@@ -12,8 +12,4 @@ if [[ -f /app/report.md ]]; then
   cp /app/report.md /logs/verifier/report.md 2>/dev/null || true
 fi
 
-if [[ -f /app/task_meta.json ]]; then
-  cp /app/task_meta.json /logs/verifier/task_meta.json 2>/dev/null || true
-fi
-
 exit $status

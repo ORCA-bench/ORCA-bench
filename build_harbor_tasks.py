@@ -9,15 +9,17 @@ Reads:
   * ``output_dir/json/<event_id>.json``       (per-event rubrics)
 
 Writes the full Harbor task tree under ``output_dir/harbor/tasks/<task_id>/``
-(instruction.md, task_meta.json, task.toml, environment/, tests/, solution/),
-plus the top-level ``tasks.csv``, ``task_snapshot_map.json``, and
-``used_snapshots.json`` under ``output_dir/harbor/``.
+(instruction.md, task.toml, environment/, tests/, solution/),
+plus the top-level ``tasks.csv``, ``task_snapshot_map.json``,
+``used_snapshots.json``, and ``dataset.toml`` under ``output_dir/harbor/``.
 
 Each ``task.toml`` gets a ``[task]`` section whose package name is a hash of the
 task id (``<org>/<hash>``), so ``harbor add`` accepts the tasks directly with no
 separate ``harbor task update`` pass, and the hub identity does not leak the
 feature flag. ``tasks.csv`` maps the real ``task_id`` to its hashed
-``package_name``.
+``package_name``. ``dataset.toml`` is a ready-to-publish manifest (mirrors
+``harbor dataset init`` + ``harbor add --scan``), so only ``harbor add`` +
+``harbor publish`` remain.
 
 ``tests/expected.json`` schema:
 
@@ -49,7 +51,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from dotenv import load_dotenv
-from harbor.models.task.config import PackageInfo, TaskConfig
+from harbor.models.dataset.manifest import DatasetInfo, DatasetManifest, DatasetTaskRef
+from harbor.models.task.config import Author, PackageInfo, TaskConfig
+from harbor.publisher.packager import Packager
 
 from task_spec import LOCAL_TZ, LOCAL_TZ_LABEL, TaskSpec
 from utils import get_base_parser, setup_logging
@@ -103,21 +107,42 @@ def task_name_hash(task_name: str) -> str:
 
 
 def add_task_package(
-    toml_path: Path, *, org: str, task_name: str, description: str = ""
+    toml_path: Path,
+    *,
+    org: str,
+    task_name: str,
+    description: str = "",
+    metadata: Mapping[str, Any] | None = None,
 ) -> None:
     """Inject a ``[task]`` section so ``harbor add`` accepts the task directly.
 
     Mirrors ``harbor task update`` (set ``config.task`` + ``schema_version`` and
     re-serialize, preserving the other sections) but names the package by a hash
     of ``task_name`` so the identity published to harbor hub does not leak the
-    feature flag.
+    feature flag. When ``metadata`` is given, its keys are merged into the
+    ``[metadata]`` section (on top of the template's difficulty/category/tags).
     """
     config = TaskConfig.model_validate_toml(toml_path.read_text())
     config.task = PackageInfo(
         name=f"{org}/{task_name_hash(task_name)}", description=description
     )
+    if metadata:
+        config.metadata = {**config.metadata, **dict(metadata)}
     config.schema_version = "1.3"
     toml_path.write_text(config.model_dump_toml())
+
+
+def _parse_authors(authors: list[str] | None) -> list[Author]:
+    """Parse 'Name <email>' / 'Name' strings into Author objects (matches harbor)."""
+    out: list[Author] = []
+    for a in authors or []:
+        m = re.match(r"^(.+?)\s*<(.+?)>\s*$", a)
+        out.append(
+            Author(name=m.group(1).strip(), email=m.group(2))
+            if m
+            else Author(name=a.strip())
+        )
+    return out
 
 
 # ───────────────────────────── Task building ─────────────────────────────
@@ -190,7 +215,7 @@ def build_task(
     )
     (task_dir / "instruction.md").write_text(textwrap.dedent(instruction))
 
-    # -- Add task metadata --
+    # -- Build task metadata (merged into task.toml [metadata] below) --
     meta: dict[str, Any] = {
         "qid": spec.qid,
         "user_facing_issue": spec.user_facing_issue,
@@ -224,11 +249,12 @@ def build_task(
         meta["quiet_window_start"] = spec.quiet_window_start.isoformat()
     if spec.quiet_window_end is not None:
         meta["quiet_window_end"] = spec.quiet_window_end.isoformat()
-    (task_dir / "task_meta.json").write_text(json.dumps(meta, indent=2))
 
     # -- Add configuration --
     copy_template(templates_dir, "task.toml.template", task_dir / "task.toml")
-    add_task_package(task_dir / "task.toml", org=org, task_name=task_dir.name)
+    add_task_package(
+        task_dir / "task.toml", org=org, task_name=task_dir.name, metadata=meta
+    )
 
     # -- Add Docker environment files --
     env_dir = task_dir / "environment"
@@ -419,6 +445,7 @@ class _BuildOutputs:
     used_snapshots: set[str]
     task_snapshot_map: dict[str, str | None]
     csv_rows: list[dict[str, Any]]
+    dataset_refs: list[DatasetTaskRef]
 
 
 def _build_all(
@@ -439,6 +466,7 @@ def _build_all(
         used_snapshots=set(),
         task_snapshot_map={},
         csv_rows=[],
+        dataset_refs=[],
     )
     spec_paths = sorted(specs_dir.glob("*.json"))
     if not spec_paths:
@@ -490,6 +518,15 @@ def _build_all(
             out.used_snapshots.add(spec.snapshot_name)
         out.csv_rows.append(_csv_row_for(spec, events))
 
+        # Pin the task by name + content digest (same digest harbor add computes).
+        content_hash, _ = Packager.compute_content_hash(task_dir)
+        out.dataset_refs.append(
+            DatasetTaskRef(
+                name=f"{org}/{task_name_hash(spec.task_id)}",
+                digest=f"sha256:{content_hash}",
+            )
+        )
+
     return out
 
 
@@ -530,6 +567,22 @@ def main() -> None:
         "--org",
         default="orca-bench",
         help="Org for the [task] package name (default: orca-bench).",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        default="orca-bench/ORCA-bench",
+        help="Dataset manifest name in org/name format.",
+    )
+    parser.add_argument(
+        "--dataset-description",
+        default="",
+        help="Dataset description for dataset.toml.",
+    )
+    parser.add_argument(
+        "--dataset-author",
+        action="append",
+        default=None,
+        help="Dataset author 'Name <email>' (repeatable).",
     )
     args = parser.parse_args()
     setup_logging(args.log_level)
@@ -598,7 +651,32 @@ def main() -> None:
                 {k: ("" if row.get(k) is None else row[k]) for k in _CSV_COLUMNS}
             )
     logger.info(f"Wrote {len(out.csv_rows)} row(s) to {csv_path}")
+
+    # -- Write dataset.toml manifest (mirrors `harbor dataset init` + `harbor add --scan`) --
+    manifest = DatasetManifest(
+        dataset=DatasetInfo(
+            name=args.dataset_name,
+            description=args.dataset_description,
+            authors=_parse_authors(args.dataset_author),
+        ),
+        tasks=out.dataset_refs,
+    )
+    manifest._header = (
+        f"# Dataset manifest for {args.dataset_name}\n"
+        "# Add tasks using: harbor add <org>/<name>\n"
+        "# Publish using: harbor publish\n\n"
+    )
+    dataset_path = task_root / "dataset.toml"
+    dataset_path.write_text(manifest.to_toml())
+    logger.info(
+        f"Wrote dataset manifest ({len(out.dataset_refs)} tasks) -> {dataset_path}"
+    )
+
     print(f"Wrote {len(out.task_dirs)} task(s) -> {tasks_dir}")
+    print(f"Wrote dataset manifest ({len(out.dataset_refs)} tasks) -> {dataset_path}")
+    print("\nNext steps:")
+    print(f"  harbor add {tasks_dir} --scan       # upload task content to harbor hub")
+    print(f"  harbor publish {dataset_path}       # publish the dataset")
 
 
 if __name__ == "__main__":
