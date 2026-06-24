@@ -10,8 +10,14 @@ Reads:
 
 Writes the full Harbor task tree under ``output_dir/harbor/tasks/<task_id>/``
 (instruction.md, task_meta.json, task.toml, environment/, tests/, solution/),
-plus the top-level ``tasks.csv``, ``task_snapshot_map.json``,
-``used_snapshots.json``, and ``registry.json`` under ``output_dir/harbor/``.
+plus the top-level ``tasks.csv``, ``task_snapshot_map.json``, and
+``used_snapshots.json`` under ``output_dir/harbor/``.
+
+Each ``task.toml`` gets a ``[task]`` section whose package name is a hash of the
+task id (``<org>/<hash>``), so ``harbor add`` accepts the tasks directly with no
+separate ``harbor task update`` pass, and the hub identity does not leak the
+feature flag. ``tasks.csv`` maps the real ``task_id`` to its hashed
+``package_name``.
 
 ``tests/expected.json`` schema:
 
@@ -29,28 +35,21 @@ Examples::
     uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
       --templates-dir harbor-template-telemetry-only --force
 
-    uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
-      --templates-dir harbor-template-telemetry-only \
-      --upload-hf --hf-repo-id orca-bench/orca-bench-harbor-tasks --hf-tag-name v0.0.0
-
 """
 
 import csv
-import io
+import hashlib
 import json
 import logging
-import os
-import random
 import re
 import shutil
-import tempfile
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from dotenv import load_dotenv
-from huggingface_hub import HfApi
+from harbor.models.task.config import PackageInfo, TaskConfig
 
 from task_spec import LOCAL_TZ, LOCAL_TZ_LABEL, TaskSpec
 from utils import get_base_parser, setup_logging
@@ -91,125 +90,40 @@ def _format_template(template: str, values: Mapping[str, Any]) -> str:
     return rendered.replace(_LBRACE_SENTINEL, "{").replace(_RBRACE_SENTINEL, "}")
 
 
-# ────────────────────────── Registry / HF helpers ──────────────────────────
-def write_local_registry(
-    task_dirs: list[Path],
-    registry_path: Path,
-    *,
-    dataset_name: str,
-    dataset_version: str = "v0.0.0",
-    description: str = "Locally generated Harbor tasks.",
+# ────────────────────────── Task package helpers ──────────────────────────
+def task_name_hash(task_name: str) -> str:
+    """Stable, GT-opaque id for a task.
+
+    The raw task_id (e.g. ``d1-c1-admanualgc-on-00-hard_control_post60m_at``)
+    leaks the feature flag / ground truth, so the published harbor-hub package
+    name is a hash instead. Deterministic so the same task always maps to the
+    same name across runs.
+    """
+    return hashlib.sha256(task_name.encode()).hexdigest()[:16]
+
+
+def add_task_package(
+    toml_path: Path, *, org: str, task_name: str, description: str = ""
 ) -> None:
-    """Write a local registry.json for the generated tasks."""
-    tasks = [{"name": d.name, "path": d.as_posix()} for d in task_dirs]
-    registry = [
-        {
-            "name": dataset_name,
-            "version": dataset_version,
-            "description": description,
-            "tasks": tasks,
-        }
-    ]
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(json.dumps(registry, indent=2))
+    """Inject a ``[task]`` section so ``harbor add`` accepts the task directly.
 
-
-def _hf_repo_url(repo_id: str) -> str:
-    return f"https://huggingface.co/datasets/{repo_id}"
-
-
-def _hf_resolve_url(repo_id: str, path_in_repo: str) -> str:
-    return f"{_hf_repo_url(repo_id)}/resolve/main/{path_in_repo}"
-
-
-def _build_registry(
-    *,
-    task_dirs: list[Path],
-    repo_id: str,
-    path_in_repo: str,
-    dataset_name: str,
-    dataset_version: str,
-    description: str,
-    git_commit_id: str | None = None,
-) -> list[dict[str, object]]:
-    git_url = _hf_repo_url(repo_id) + ".git"
-    tasks = [
-        {
-            "name": d.name,
-            "git_url": git_url,
-            "git_commit_id": git_commit_id,
-            "path": (Path(path_in_repo) / d.name).as_posix(),
-        }
-        for d in task_dirs
-    ]
-    return [
-        {
-            "name": dataset_name,
-            "version": dataset_version,
-            "description": description,
-            "tasks": tasks,
-        }
-    ]
-
-
-def upload_tasks_to_hf(
-    task_dirs: list[Path],
-    tasks_root: Path,
-    repo_id: str,
-    registry_path: str = "registry.json",
-    dataset_name: str | None = None,
-    dataset_version: str = "v0.0.0",
-    description: str = "Harbor tasks uploaded from a local tasks directory.",
-) -> dict[str, str]:
-    """Upload Harbor tasks and registry.json to a Hugging Face repo."""
-    dataset_name = dataset_name or repo_id
-    registry_path = str(registry_path).strip("/")
-
-    hf_token = os.environ.get("HF_TOKEN")
-    api = HfApi(token=hf_token)
-    api.create_repo(
-        repo_id=str(repo_id), repo_type="dataset", private=False, exist_ok=True
+    Mirrors ``harbor task update`` (set ``config.task`` + ``schema_version`` and
+    re-serialize, preserving the other sections) but names the package by a hash
+    of ``task_name`` so the identity published to harbor hub does not leak the
+    feature flag.
+    """
+    config = TaskConfig.model_validate_toml(toml_path.read_text())
+    config.task = PackageInfo(
+        name=f"{org}/{task_name_hash(task_name)}", description=description
     )
-    with tempfile.TemporaryDirectory() as tmp:
-        resolved = Path(tmp) / tasks_root.name
-        shutil.copytree(tasks_root, resolved, symlinks=False)
-        api.upload_large_folder(
-            repo_id=repo_id, repo_type="dataset", folder_path=resolved
-        )
-
-    refs = api.list_repo_refs(repo_id=repo_id, repo_type="dataset")
-    head_sha = refs.branches[0].target_commit if refs.branches else None
-
-    registry = _build_registry(
-        task_dirs=task_dirs,
-        repo_id=repo_id,
-        path_in_repo="tasks",
-        dataset_name=dataset_name,
-        dataset_version=dataset_version,
-        description=description,
-        git_commit_id=head_sha,
-    )
-
-    api.upload_file(
-        repo_id=repo_id,
-        repo_type="dataset",
-        path_or_fileobj=io.BytesIO(json.dumps(registry, indent=2).encode("utf-8")),
-        path_in_repo=registry_path,
-        commit_message="Add/update Harbor registry.json",
-    )
-    api.create_tag(repo_id=repo_id, repo_type="dataset", tag=dataset_version)
-
-    return {
-        "task_count": str(len(task_dirs)),
-        "registry_url": _hf_resolve_url(repo_id, registry_path),
-        "dataset_name": f"{dataset_name}@{dataset_version}",
-        "path_in_repo": "/",
-    }
+    config.schema_version = "1.3"
+    toml_path.write_text(config.model_dump_toml())
 
 
 # ───────────────────────────── Task building ─────────────────────────────
 _CSV_COLUMNS: list[str] = [
     "task_id",
+    "package_name",
     "qid",
     "granularity",
     "section",
@@ -246,6 +160,7 @@ def build_task(
     code_tag: str | None,
     code_only: bool,
     json_dir: Path | None,
+    org: str,
 ) -> None:
     """Render a single Harbor task directory.
 
@@ -313,6 +228,7 @@ def build_task(
 
     # -- Add configuration --
     copy_template(templates_dir, "task.toml.template", task_dir / "task.toml")
+    add_task_package(task_dir / "task.toml", org=org, task_name=task_dir.name)
 
     # -- Add Docker environment files --
     env_dir = task_dir / "environment"
@@ -462,6 +378,7 @@ def _csv_row_for(spec: TaskSpec, events: list[dict]) -> dict[str, Any]:
     period_start, period_end = spec.reported_period or (None, None)
     return {
         "task_id": spec.task_id,
+        "package_name": task_name_hash(spec.task_id),
         "qid": spec.qid,
         "granularity": spec.granularity,
         "section": spec.section,
@@ -515,6 +432,7 @@ def _build_all(
     code_tag: str,
     data_dir_name: str,
     code_only: bool,
+    org: str,
 ) -> _BuildOutputs:
     out = _BuildOutputs(
         task_dirs=[],
@@ -563,6 +481,7 @@ def _build_all(
             code_tag=code_tag if code_only else None,
             code_only=code_only,
             json_dir=json_dir,
+            org=org,
         )
         logger.info(f"Wrote task {spec.task_id} -> {task_dir}")
         out.task_dirs.append(task_dir)
@@ -608,25 +527,9 @@ def main() -> None:
         help="Overwrite the output task directory if it already exists.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=1,
-        help="Seed used to shuffle task order in registry.json (default: 1).",
-    )
-    parser.add_argument(
-        "--upload-hf",
-        action="store_true",
-        help="Upload the generated tasks to a Hugging Face repo.",
-    )
-    parser.add_argument(
-        "--hf-repo-id",
-        default="orca-bench/orca-bench-harbor-tasks",
-        help="Hugging Face repo id.",
-    )
-    parser.add_argument(
-        "--hf-tag-name",
-        default="v0.0.0",
-        help="Dataset version in registry.json.",
+        "--org",
+        default="orca-bench",
+        help="Org for the [task] package name (default: orca-bench).",
     )
     args = parser.parse_args()
     setup_logging(args.log_level)
@@ -666,6 +569,7 @@ def main() -> None:
         code_tag=args.code_tag,
         data_dir_name=args.data_dir.name,
         code_only=args.code_only,
+        org=args.org,
     )
 
     # -- Write used_snapshots.json and task_snapshot_map.json --
@@ -694,38 +598,7 @@ def main() -> None:
                 {k: ("" if row.get(k) is None else row[k]) for k in _CSV_COLUMNS}
             )
     logger.info(f"Wrote {len(out.csv_rows)} row(s) to {csv_path}")
-
-    # -- Write local registry.json --
-    if args.seed is not None:
-        random.Random(args.seed).shuffle(out.task_dirs)
-
-    registry_path = task_root / "registry.json"
-    dataset_short_name = args.hf_repo_id.split("/")[-1]
-    write_local_registry(
-        out.task_dirs,
-        registry_path,
-        dataset_name=dataset_short_name,
-        dataset_version=args.hf_tag_name,
-        description=f"Harbor tasks for {args.hf_repo_id}.",
-    )
-    print(f"Wrote registry -> {registry_path}")
-
-    if args.upload_hf:
-        if args.hf_repo_id is None:
-            raise SystemExit("--hf-repo-id is required when --upload-hf is set.")
-        summary = upload_tasks_to_hf(
-            task_dirs=out.task_dirs,
-            tasks_root=task_root,
-            repo_id=args.hf_repo_id,
-            registry_path="registry.json",
-            dataset_name=dataset_short_name,
-            dataset_version=args.hf_tag_name,
-        )
-        print(
-            f"Uploaded {summary['task_count']} tasks to {args.hf_repo_id}:{summary['path_in_repo']}"
-        )
-        print(f"Registry URL: {summary['registry_url']}")
-        print(f"Dataset name: {summary['dataset_name']}")
+    print(f"Wrote {len(out.task_dirs)} task(s) -> {tasks_dir}")
 
 
 if __name__ == "__main__":
