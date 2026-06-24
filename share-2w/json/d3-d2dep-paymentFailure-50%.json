@@ -1,0 +1,252 @@
+{
+  "incident_time": "2026-04-21T20:46:18.899501+00:00",
+  "feature_flag": "paymentFailure",
+  "description": "A feature flag set to 50% in the payment service's `charge.js` caused the `charge` function to throw `Error(\"Payment request failed. Invalid token. …\")` on ~50% of calls; the checkout service's `chargeCard` turned the gRPC error into `\"could not charge the card\"`, `PlaceOrder` returned gRPC `Internal`, and the frontend proxied it as HTTP 500 on `POST /api/checkout`.",
+  "mechanism": "The flag is read in [`charge.js#L29`](../../opentelemetry-demo/src/payment/charge.js#L29): the payment service's `charge` function evaluates `getNumberValue(\"paymentFailure\", 0)`, which returns `0.5` (variant `50%`). When the value is > 0, it generates a random number and fails the request if `Math.random() < 0.5` ([`charge.js#L33`](../../opentelemetry-demo/src/payment/charge.js#L33)), giving a 50% failure rate.\n\nOn failure (lines 34-37), the span is annotated with `app.loyalty.level=gold` and the function throws `Error('Payment request failed. Invalid token. app.loyalty.level=gold')`. The error propagates through the gRPC payment service to the checkout service's `chargeCard` at [`main.go#L552-L556`](../../opentelemetry-demo/src/checkout/main.go#L552), which returns `\"could not charge the card: ...\"`, and the checkout handler returns `codes.Internal` at [`main.go#L335`](../../opentelemetry-demo/src/checkout/main.go#L335), failing the order.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "traces_span_metrics_duration_milliseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "service_name": "payment",
+          "span_name": "oteldemo.PaymentService/Charge",
+          "status_code": "STATUS_CODE_ERROR"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(traces_span_metrics_duration_milliseconds_sum{service_name=\"payment\",span_name=\"oteldemo.PaymentService/Charge\",status_code=\"STATUS_CODE_ERROR\"}[5m])",
+            "description": "Cumulative duration of payment Charge error spans. Each failed charge adds ~1ms of error span duration. Sum grew from 36.53ms to 40.51ms (+3.98ms) as 5 new payment failures accumulated.",
+            "onset_utc": "2026-04-21 20:53:00 UTC",
+            "onset_offset_seconds": 401,
+            "onset_reasoning": "The metric is at zero from 20:38 through 20:52 (covering the incident time). At 20:53 it rises to ~0.00343 and continues climbing to ~0.0166 by 20:56, representing a clear spike above the zero baseline. 20:53 is the first timestamp after the incident where the value reappears and begins the sustained increase."
+          },
+          {
+            "type": "spiked",
+            "query": "rate(traces_span_metrics_duration_milliseconds_count{service_name=\"payment\",span_name=\"oteldemo.PaymentService/Charge\",status_code=\"STATUS_CODE_ERROR\"}[5m])",
+            "description": "Count of payment Charge error span durations recorded. Mirrors the calls_total counter, tracking how many error duration observations were recorded for the payment Charge RPC. Counter grew from 32 to 37 (+5).",
+            "onset_utc": "2026-04-21 20:53:00 UTC",
+            "onset_offset_seconds": 401,
+            "onset_reasoning": "Pre-incident baseline shows low-level activity (~0.004) that drops to zero around 20:38. After the incident at 20:46, the metric remains zero until 20:53 when it reappears at 0.0041667 and then rapidly spikes to 0.0208 by 20:56, well above the pre-incident baseline of ~0.004. This marks the clear onset of the error rate spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "traces_span_metrics_calls",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "service_name": "payment",
+          "span_name": "oteldemo.PaymentService/Charge",
+          "status_code": "STATUS_CODE_ERROR"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(traces_span_metrics_calls_total{service_name=\"payment\",span_name=\"oteldemo.PaymentService/Charge\",status_code=\"STATUS_CODE_ERROR\"}[5m])",
+            "description": "Span-derived error call counter for the payment service's Charge RPC. The paymentFailure flag causes charge.js to throw 'Payment request failed' with 50% probability, creating new STATUS_CODE_ERROR spans that did not exist before the incident. Counter grew from 32 to 37 (+5) in the 10 minutes after the flag was set.",
+            "onset_utc": "2026-04-21 20:55:00 UTC",
+            "onset_offset_seconds": 521,
+            "onset_reasoning": "Pre-incident baseline was ~0.004. After the incident at 20:46, the metric remains at 0 until 20:53-20:54 where it returns to baseline level (~0.004). At 20:55 it jumps to 0.0125 (3x baseline), then continues rising to 0.0208 at 20:56, clearly spiking above the pre-incident baseline."
+          }
+        ]
+      },
+      {
+        "metric_family": "rpc_client_duration_milliseconds",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "rpc_grpc_status_code": "2",
+          "rpc_method": "Charge",
+          "service_name": "checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(rpc_client_duration_milliseconds_count{service_name=\"checkout\",rpc_method=\"Charge\",rpc_grpc_status_code=\"2\"}[5m])",
+            "description": "Checkout's gRPC Charge calls to the payment service started returning UNKNOWN (status 2) errors when the payment service threw 'Payment request failed' errors at 50% rate",
+            "onset_utc": "2026-04-21 20:53:00 UTC",
+            "onset_offset_seconds": 401,
+            "onset_reasoning": "Pre-incident baseline was ~0.00417 (with occasional zeros/doubles). The metric dropped to zero around 20:38 and stayed zero through the incident. At 20:53 it resumes at baseline, then spikes to 0.0208 by 20:56 — roughly 5x the baseline. 20:53 is the first timestamp after the incident where the metric begins its upward trajectory toward the spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "app_frontend_requests",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "method": "POST",
+          "status": "500",
+          "target": "/api/checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(app_frontend_requests_total{method=\"POST\",target=\"/api/checkout\",status=\"500\"}[5m])",
+            "description": "Frontend POST /api/checkout requests returning HTTP 500 spiked as payment failures cascaded through checkout to the frontend",
+            "onset_utc": "2026-04-21 20:52:00 UTC",
+            "onset_offset_seconds": 341,
+            "onset_reasoning": "Pre-incident baseline was ~0.004 req/s with occasional zeros. After the incident at 20:46, the metric stays at 0 until 20:52 when it reappears and then ramps up to 0.0167 (4x baseline) by 20:56-20:58, indicating the start of the spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "rpc_server_duration_milliseconds",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "rpc_grpc_status_code": "13",
+          "rpc_method": "PlaceOrder",
+          "service_name": "checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(rpc_server_duration_milliseconds_count{service_name=\"checkout\",rpc_method=\"PlaceOrder\",rpc_grpc_status_code=\"13\"}[5m])",
+            "description": "Checkout PlaceOrder gRPC INTERNAL errors spiked as payment charge failures propagated through the checkout service, causing orders to fail with codes.Internal",
+            "onset_utc": "2026-04-21 20:53:00 UTC",
+            "onset_offset_seconds": 401,
+            "onset_reasoning": "Pre-incident baseline was ~0.004 with gaps of zero. After the incident at 20:46, the series stays at 0 until 20:53 when it reappears and then climbs to 0.0125–0.0208 (3–5x the baseline), marking the clear start of the spike."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "POST /api/checkout → 500",
+        "description": "Between 20:51:13 and 20:54:18 UTC, 5 Envoy access log entries show POST /api/checkout returning HTTP 500 with a 21-byte error response body, at a 50% random failure rate set by the paymentFailure flag.",
+        "cause": "Direct effect of paymentFailure flag set to 50% — payment service's charge function (src/payment/charge.js:29-38) throws Error('Payment request failed. Invalid token. app.loyalty.level=gold') with probability 50%. The error propagates through checkout's chargeCard (src/checkout/main.go:552-556) as 'could not charge the card', then through PlaceOrder as gRPC INTERNAL, and the frontend proxies it as HTTP 500.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "\"POST /api/checkout HTTP/1.1\" 500 - via_upstream - \"-\" ... 21 ...",
+          "event.name": "proxy.access",
+          "upstream.cluster": "frontend",
+          "url.path": "/api/checkout",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "fbPPsZ0Br_RFnSwRut_P",
+            "@timestamp": "20:51:13.267"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "kLPRsZ0Br_RFnSwRuuXG",
+            "@timestamp": "20:53:24.385"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "q7PSsZ0Br_RFnSwRIeb5",
+            "@timestamp": "20:53:51.416"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "CbPSsZ0Br_RFnSwRg-i3",
+            "@timestamp": "20:54:16.372"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "QLPSsZ0Br_RFnSwRiejx",
+            "@timestamp": "20:54:18.043"
+          }
+        ]
+      },
+      {
+        "name": "payment: Payment request failed (WARN)",
+        "description": "Between 20:51:13 and 20:54:18 UTC, 5 payment service warn-level logs record the charge rejection with full error stack trace. Each entry correlates 1:1 with a checkout 500, arriving 17–24ms after it.",
+        "cause": "Direct evidence of paymentFailure flag — charge.js:37 throws Error('Payment request failed. Invalid token. app.loyalty.level=gold') when Math.random() < 50%. The payment-logger (Pino) logs the error at warn severity before the gRPC callback returns it to the checkout service.",
+        "source": "payment service (Node.js)",
+        "representative_attributes": {
+          "body": "Payment request failed. Invalid token. app.loyalty.level=gold",
+          "severity.text": "warn",
+          "severity.number": "13",
+          "err.message": "Payment request failed. Invalid token. app.loyalty.level=gold",
+          "err.type": "Error",
+          "err.stack": "Error: Payment request failed. Invalid token. app.loyalty.level=gold\n    at module.exports.charge (/usr/src/app/charge.js:37:13)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async Object.chargeServiceHandler [as charge] (/usr/src/app/index.js:21:22)",
+          "instrumentationScope.name": "payment-logger",
+          "resource.service.name": "payment"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "0LPPsZ0Br_RFnSwRzd-c",
+            "@timestamp": "20:51:13.288"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "57PRsZ0Br_RFnSwRzeXq",
+            "@timestamp": "20:53:24.406"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "IbPSsZ0Br_RFnSwRN-eX",
+            "@timestamp": "20:53:51.434"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "9rPSsZ0Br_RFnSwRmeh0",
+            "@timestamp": "20:54:16.391"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "-LPSsZ0Br_RFnSwRmeh0",
+            "@timestamp": "20:54:18.068"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "Clicking \"Place Order\" on the cart page intermittently returns an error (~50% of the time) — the user remains on the cart page and never reaches the order confirmation. No payment is charged, no items are shipped, and the cart is not emptied.",
+        "route": "POST /api/checkout",
+        "deterministic": false,
+        "trigger_condition": "User clicks \"Place Order\" on the cart page while paymentFailure is enabled. The payment service rejects the charge with 50% probability (`Math.random() < 0.5` in [`charge.js#L33`](../../opentelemetry-demo/src/payment/charge.js#L33)).",
+        "source_file": "src/checkout/main.go",
+        "source_line": 333,
+        "calling_service": "checkout",
+        "call_pattern": "Sequential call within PlaceOrder: [`main.go#L333`](../../opentelemetry-demo/src/checkout/main.go#L333) calls `cs.chargeCard(ctx, total, req.CreditCard)`, which calls `paymentService.Charge()` at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552). The charge fails before shipping or cart cleanup.",
+        "cause": "The frontend API route [`checkout.ts#L18`](../../opentelemetry-demo/src/frontend/pages/api/checkout.ts#L18) calls `CheckoutGateway.placeOrder`, which invokes the checkout service's `PlaceOrder` gRPC. `PlaceOrder` calls `cs.chargeCard` at [`main.go#L333`](../../opentelemetry-demo/src/checkout/main.go#L333), which calls `paymentService.Charge()` at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552). The payment service evaluates the paymentFailure flag at [`charge.js#L29`](../../opentelemetry-demo/src/payment/charge.js#L29); when `Math.random() < 0.5` ([`charge.js#L33`](../../opentelemetry-demo/src/payment/charge.js#L33)), it throws `Error('Payment request failed. Invalid token. app.loyalty.level=gold')` at [`charge.js#L37`](../../opentelemetry-demo/src/payment/charge.js#L37). The error is caught in [`index.js#L24`](../../opentelemetry-demo/src/payment/index.js#L24) and returned via gRPC callback. `chargeCard` wraps it as `\"could not charge the card\"` ([`main.go#L556`](../../opentelemetry-demo/src/checkout/main.go#L556)), and `PlaceOrder` returns `codes.Internal` at [`main.go#L335`](../../opentelemetry-demo/src/checkout/main.go#L335). The frontend surfaces the gRPC error as HTTP 500. In `CartDetail.tsx`, the `await placeOrder(...)` at [`CartDetail.tsx#L38`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L38) rejects, so `push` to the confirmation page at [`CartDetail.tsx#L57`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L57) never executes.",
+        "symptom_type": "http_5xx"
+      }
+    ],
+    "traces": [
+      {
+        "name": "Checkout Payment Failure Cascade",
+        "description": "Between 20:51:13 and 20:54:17 UTC, 5 traces show checkout failing due to the payment service rejecting charges with 'Payment request failed. Invalid token.' at a 50% random failure rate, cascading through the checkout path as HTTP 500.",
+        "cause": "Direct effect of paymentFailure flag set to 50% — payment service's charge function (src/payment/charge.js:29-38) evaluates the paymentFailure flag via OpenFeature.getNumberValue(), and with probability equal to the flag value (0.5), throws Error('Payment request failed. Invalid token. app.loyalty.level=gold'). The error propagates through checkout's chargeCard (src/checkout/main.go:552-556) as 'could not charge the card', then through PlaceOrder as gRPC INTERNAL, and the frontend proxies it as HTTP 500.",
+        "call_chain": "payment:charge → payment:oteldemo.PaymentService/Charge → checkout:oteldemo.PaymentService/Charge → checkout:oteldemo.CheckoutService/PlaceOrder → frontend:oteldemo.CheckoutService/PlaceOrder → frontend:executing api route (pages) /api/checkout → frontend:POST /api/checkout → frontend:POST /api/checkout → frontend-proxy:router frontend egress → frontend-proxy:POST → load-generator:POST",
+        "smoking_gun": [
+          "payment:oteldemo.PaymentService/Charge span exception.message: 'Payment request failed. Invalid token. app.loyalty.level=gold' (matches charge.js:37)",
+          "payment:charge span attribute: app.loyalty.level=gold (set at charge.js:34 only when paymentFailure flag triggers)"
+        ],
+        "trace_documents": [
+          {
+            "traceID": "83be1af02c90c1b8dcece1be003c4e6a",
+            "@timestamp": "20:51:13",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "5994d961af0890def86006f8e18d007e",
+            "@timestamp": "20:53:24",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "c1792a7f3df0958d0d552c508cbd5f2e",
+            "@timestamp": "20:53:51",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "4740fed768edb3e9db16fdb10499db81",
+            "@timestamp": "20:54:16",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "7a114aa4d37cbde12f912c6a433e06cd",
+            "@timestamp": "20:54:17",
+            "user_action": "user_checkout_multi"
+          }
+        ]
+      }
+    ]
+  }
+}

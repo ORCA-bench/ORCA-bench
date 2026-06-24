@@ -1,0 +1,25 @@
+services:
+  main:
+    stop_grace_period: 120s
+    build:
+      context: ${CONTEXT_DIR}
+      pull: true
+    image: ${MAIN_IMAGE_NAME}
+    command: [ "sh", "-c", "sleep infinity" ]
+    privileged: true
+    environment:
+      - TEST_DIR=${TEST_DIR}
+      - CONTEXT_DIR=${CONTEXT_DIR}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - SNAPSHOT_CACHE_HOST_DIR=${SNAPSHOT_CACHE_HOST_DIR:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CONTEXT_DIR}:${CONTEXT_DIR}
+      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}
+      - ${HOST_AGENT_LOGS_PATH}:${ENV_AGENT_LOGS_PATH}
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPUS}
+          memory: ${MEMORY}

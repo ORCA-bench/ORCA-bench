@@ -1,0 +1,71 @@
+# Config for prepare_harbor_tasks_v2.py against the share-2w dataset. Each
+# axis section pairs a small base case with a wider sweep via `bundles:`.
+#
+# Pipeline inputs:
+#   - schedule: schedules/incident_schedule_share7d_n6_10day.json (126 events, 10 days)
+#   - rubrics:  out-0427/json/ (42 rubrics, one per active event in the first 6 days)
+#   - data:     data-0418 (first 6 days, ~5.6d snapshot retention)
+#   - questions: out-0427/questions/ (47 files, 292 questions:
+#                109 hard / 61 each easy/medium — counts will be regenerated
+#                under the new label scheme)
+
+schedule: schedules/incident_schedule_share7d_n6_10day.json
+
+# Section 1 — exact reported time. Two bundles:
+#   - base case at TTD=15min with offset=10
+#   - wider sweep at TTD=60/480 with offset=10
+exact:
+  enabled: true
+  bundles:
+    - phrasings: [at]              # base case
+      ttd_minutes: [15]
+      offset_minutes: [10]
+    - phrasings: [at]              # wider sweep
+      ttd_minutes: [60, 480]
+      offset_minutes: [10]
+
+# Section 2 — exact range. Two bundles, paired correct/mis offsets at the
+# wider TTD so analyses can compare ranged-correctly-specified vs
+# ranged-mis-specified at the same TTD.
+exact_range:
+  enabled: true
+  bundles:
+    - ttd_minutes: [60]
+      configs:
+        - range_window: 30
+          offset_minutes: [10]
+    - ttd_minutes: [480]
+      configs:
+        - range_window: 30
+          offset_minutes: [10, 60]   # 10: incident inside the range; 60: outside
+
+# Section 3 — broad time-of-day. Same TTD as exact_range so point/range/period
+# can be compared at a constant TTD.
+broad_range_time_of_day:
+  enabled: true
+  bundles:
+    - ttd_minutes: [480]
+      categories: [same-period, previous-period]
+
+# Section 4 — broad day. Day-level only at the longest TTD.
+# NOTE: exclude universal questions for these tasks
+broad_range_day:
+  enabled: true
+  bundles:
+    - ttd_minutes: [1440]
+      categories: [same-day]
+
+# Section 5 — control (no actual incident). Investigates a snapshot that
+# predates `incident_dt` so the telemetry contains no signal; agent should
+# respond "no incident occurred". reported_dt is pinned to current_dt so the
+# prompt reads as a fresh page from the user.
+control:
+  enabled: true
+  pre_incident_minutes: [60]
+  post_incident_minutes: [60]
+  # pre_anchor_hour_local defaults to 9 (clamps pre `current_dt` from above)
+  # 22 instead of the default 21 here so day-1 post tasks for short mid-day
+  # incidents (imageSlowLoad, adFailure) clear the 7:34–9:06 PM ET window
+  # during which adHighCpu is active.
+  post_anchor_hour_local: 22
+  phrasings: [at]

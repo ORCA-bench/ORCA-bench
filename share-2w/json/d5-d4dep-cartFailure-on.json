@@ -1,0 +1,417 @@
+{
+  "incident_time": "2026-04-23T18:58:20.036794+00:00",
+  "feature_flag": "cartFailure",
+  "description": "A feature flag made `CartService.EmptyCartAsync` route through `_badCartStore`, a `ValkeyCartStore` wired to the unreachable host `badhost:1234`; the connection attempt threw `SocketException`, was rewrapped as `RpcException(FailedPrecondition, \"Can't access cart storage…\")`, and every `EmptyCart` RPC (called by checkout at order finalization) hung — the frontend surfaced HTTP 504 timeouts on `POST /api/checkout` and `DELETE /api/cart`.",
+  "mechanism": "The flag is read in the cart service at [`CartService.cs#L83`](../../opentelemetry-demo/src/cart/src/services/CartService.cs#L83). When `cartFailure` is enabled, [`CartService.EmptyCart`](../../opentelemetry-demo/src/cart/src/services/CartService.cs#L85) routes to `_badCartStore` instead of the normal cart store.\n\nThe failure chain:\n\n1. **`_badCartStore`** is a `ValkeyCartStore` instantiated with the address `\"badhost:1234\"` — an unreachable Redis/Valkey host ([`Program.cs#L60`](../../opentelemetry-demo/src/cart/src/Program.cs#L60)).\n2. **[`ValkeyCartStore.EmptyCartAsync`](../../opentelemetry-demo/src/cart/src/cartstore/ValkeyCartStore.cs#L194)** calls [`EnsureRedisConnected`](../../opentelemetry-demo/src/cart/src/cartstore/ValkeyCartStore.cs#L74), which blocks in `StackExchange.Redis ConnectionMultiplexer.Connect` retry/backoff for hundreds of seconds while DNS resolution / TCP connect to `badhost:1234` fails repeatedly.\n3. After the retries exhaust, [`ValkeyCartStore.cs#L98`](../../opentelemetry-demo/src/cart/src/cartstore/ValkeyCartStore.cs#L98) logs `_logger.LogError(\"Wasn't able to connect to redis\")` and [`L101`](../../opentelemetry-demo/src/cart/src/cartstore/ValkeyCartStore.cs#L101) throws `ApplicationException(\"Wasn't able to connect to redis\")`.\n4. The catch block at [`ValkeyCartStore.cs#L203`](../../opentelemetry-demo/src/cart/src/cartstore/ValkeyCartStore.cs#L203) rewraps it as:\n   ```\n   RpcException(Status(StatusCode.FailedPrecondition, \"Can't access cart storage. <original exception>\"))\n   ```\n5. [`CartService.cs#L93-L96`](../../opentelemetry-demo/src/cart/src/services/CartService.cs#L93-L96) — the catch block records the error to OTLP and re-throws to the gRPC caller (checkout):\n   ```csharp\n   Activity.Current?.AddException(ex);      // adds an exception event to the trace span\n   Activity.Current?.SetStatus(ActivityStatusCode.Error, ex.Message);  // marks span as Error\n   throw;\n   ```\n6. Checkout's `PlaceOrder` invokes `cs.emptyUserCart` synchronously at [`checkout/main.go#L353`](../../opentelemetry-demo/src/checkout/main.go#L353) and discards the return value with `_ =`, so PlaceOrder blocks on this hung gRPC call for the full backoff duration. `frontend-proxy` cuts the upstream request at its fixed 15 s route timeout, returning HTTP 504 (`UT response_timeout`) to the load-generator client — even though the order has already been charged and shipped earlier in `PlaceOrder`.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "dotnet_exceptions",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "error_type": "SocketException",
+          "service_name": "cart"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(dotnet_exceptions_total{service_name=\"cart\",error_type=\"SocketException\"}[2m])",
+            "description": "Rate of SocketExceptions in the cart service. Failed TCP connection attempts to the non-existent badhost:1234 generate a flood of SocketExceptions (1.6/s → 14.5/s).",
+            "onset_utc": "2026-04-23 19:00:00 UTC",
+            "onset_offset_seconds": 99,
+            "onset_reasoning": "Pre-incident baseline fluctuates around 1.55-1.77. At 18:59 the value is 1.8, still within noise. At 19:00 it jumps to 2.08, clearly breaking above the baseline range, and continues climbing steeply thereafter. This is the first unambiguous departure from the baseline pattern."
+          }
+        ]
+      },
+      {
+        "metric_family": "dotnet_exceptions",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "error_type": "TaskCanceledException",
+          "service_name": "cart"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(dotnet_exceptions_total{service_name=\"cart\",error_type=\"TaskCanceledException\"}[2m])",
+            "description": "Rate of TaskCanceledExceptions in the cart service. Long-blocking connection attempts cause pending async tasks to be cancelled (0.2/s → 1.4/s).",
+            "onset_utc": "2026-04-23 19:00:00 UTC",
+            "onset_offset_seconds": 99,
+            "onset_reasoning": "Pre-incident baseline is roughly 0.17–0.23. At 19:00 the value jumps to 0.283, clearly above the baseline range, and continues rising steeply thereafter. This is the first timestamp after the incident where the metric begins its sustained climb."
+          }
+        ]
+      },
+      {
+        "metric_family": "rpc_client_duration_milliseconds_sum) / rate(rpc_client_duration_milliseconds",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "rpc_method": "EmptyCart",
+          "service_name": "checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(rpc_client_duration_milliseconds_sum{service_name=\"checkout\", rpc_method=\"EmptyCart\"}[5m]) / rate(rpc_client_duration_milliseconds_count{service_name=\"checkout\", rpc_method=\"EmptyCart\"}[5m])",
+            "description": "Average EmptyCart RPC duration from checkout spiked from ~4ms to 130,000–1,800,000ms — ConnectionMultiplexer.Connect retries with exponential backoff against the unreachable badhost:1234 before eventually throwing",
+            "onset_utc": "2026-04-23 18:54:00 UTC",
+            "onset_offset_seconds": -260,
+            "onset_reasoning": "The pre-incident baseline is roughly 3.5-5.0ms (with one brief spike to 6.11 at 18:46). At 18:54 the value jumps to 7.13, clearly above baseline, and sustains elevated values (8.23, 7.36, 7.05) through 18:57. This spike precedes the recorded incident time by ~4 minutes, consistent with the 5-minute rate window capturing the underlying change. After the incident time the metric drops and goes null, so the spike onset is at 18:54."
+          }
+        ]
+      },
+      {
+        "metric_family": "kafka_consumer_bytes_consumed_rate",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "service_name": "fraud-detection",
+          "topic": "orders"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "kafka_consumer_bytes_consumed_rate{topic=\"orders\",service_name=\"fraud-detection\"}",
+            "description": "Bytes consumed by fraud-detection from the Kafka 'orders' topic dropped ~70% for the same reason — fewer order messages are produced per unit time while PlaceOrder RPCs are blocked on the hung EmptyCart call.",
+            "onset_utc": "2026-04-23 18:56:00 UTC",
+            "onset_offset_seconds": -140,
+            "onset_reasoning": "Pre-incident, the metric oscillates with frequent non-zero values (averaging ~8-10) interspersed with occasional zeros. The last non-trivial value before the signal collapses is 6.37 at 18:56. After that, the metric enters a sustained zero/near-zero pattern. Post-incident, values only appear every other minute at ~4-6 (roughly half the pre-incident average), consistent with a collapsed state rather than recovery. The onset at 18:56 aligns closely with the incident time of 18:58."
+          }
+        ]
+      },
+      {
+        "metric_family": "feature_flag_flagd_impression",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "feature_flag_key": "cartFailure",
+          "feature_flag_result_variant": "off"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(feature_flag_flagd_impression_total{feature_flag_key=\"cartFailure\", feature_flag_result_variant=\"off\"}[5m])",
+            "description": "flagd impression count for cartFailure evaluating to 'off' — dropped from ~0.02/s to zero when the flag was flipped on, as EmptyCart calls now resolve to the 'on' variant instead",
+            "onset_utc": "2026-04-23 18:57:00 UTC",
+            "onset_offset_seconds": -80,
+            "onset_reasoning": "The pre-incident signal oscillates around 0.01-0.03 through 18:57. At 18:58 it drops sharply to 0.004 and hits 0 at 18:59, never recovering. The last timestamp with a normal pre-incident value is 18:57 (0.0167), making it the onset — the last active reading before the collapse."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "POST /api/checkout → 504",
+        "description": "Between 18:58:40.731 and 19:08:10.476 UTC (20 s to ~9.8 min after cartFailure was flipped on at 18:58:20 UTC), 14 POST /api/checkout requests from the load-generator returned HTTP 504 with Envoy response flag 'UT' (upstream request timeout) and a total duration of ~15000 ms each.",
+        "cause": "Downstream symptom of cartFailure. CheckoutService.PlaceOrder calls cart's EmptyCart RPC as its final step; with cartFailure=on, CartService.EmptyCart (src/cart/src/services/CartService.cs:83-85) routes to _badCartStore (a ValkeyCartStore constructed against 'badhost:1234' in src/cart/src/Program.cs:60), which blocks in ConnectionMultiplexer.Connect retry/backoff for hundreds of seconds. The checkout PlaceOrder span hangs on this call, and frontend-proxy cuts the upstream request at its fixed 15 s timeout, returning 504 UT response_timeout to the caller.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "[2026-04-23T18:58:40.731Z] \"POST /api/checkout HTTP/1.1\" 504 UT response_timeout - \"-\" 380 24 15003 - \"-\" \"python-requests/2.32.5\" \"13bbac02-02a2-9812-a8cc-15b40bc5f00b\" \"frontend-proxy:8080\" \"172.18.0.27:8080\" frontend 172.18.0.29:41144 172.18.0.29:8080 172.18.0.28:42900 - -",
+          "severity": "",
+          "event.name": "proxy.access",
+          "url.path": "/api/checkout",
+          "url.full": "http://frontend-proxy:8080/api/checkout",
+          "upstream.cluster": "frontend",
+          "upstream.host": "172.18.0.27:8080",
+          "destination.address": "172.18.0.27",
+          "user_agent.original": "python-requests/2.32.5",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "nNe1u50Br_RFnSwRooF9",
+            "@timestamp": "18:58:40.731"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "f9e2u50Br_RFnSwRP4N3",
+            "@timestamp": "18:59:21.297"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "Cte2u50Br_RFnSwR3oXw",
+            "@timestamp": "19:00:02.120"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "xte4u50Br_RFnSwRoYkD",
+            "@timestamp": "19:01:57.414"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "B9e4u50Br_RFnSwR64tC",
+            "@timestamp": "19:02:15.865"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "INe5u50Br_RFnSwRTYwI",
+            "@timestamp": "19:02:40.893"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "Yde5u50Br_RFnSwRuo15",
+            "@timestamp": "19:03:08.935"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "rde6u50Br_RFnSwRHI4o",
+            "@timestamp": "19:03:33.920"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "hte7u50Br_RFnSwRtpNm",
+            "@timestamp": "19:05:18.796"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "u9e7u50Br_RFnSwR2JOn",
+            "@timestamp": "19:05:27.955"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "dte8u50Br_RFnSwRFJQq",
+            "@timestamp": "19:05:43.129"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "5te9u50Br_RFnSwRbJgb",
+            "@timestamp": "19:07:10.684"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "Mte9u50Br_RFnSwR5Jo1",
+            "@timestamp": "19:07:42.310"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "bte-u50Br_RFnSwRUpuT",
+            "@timestamp": "19:08:10.476"
+          }
+        ]
+      },
+      {
+        "name": "cart: Wasn't able to connect to redis (ERROR)",
+        "description": "Between 19:00:50.772 and 19:06:55.479 UTC the cart service emitted 4 severity-Error logs 'Wasn't able to connect to redis' from cart.cartstore.ValkeyCartStore. Each carries the traceId of one of the failing checkout requests in the POST /api/checkout 504 cluster, directly linking the downstream timeouts to this root-cause signal.",
+        "cause": "Direct effect of the cartFailure feature flag. When cartFailure=on, CartService.EmptyCart (src/cart/src/services/CartService.cs:85) calls _badCartStore.EmptyCartAsync, whose ValkeyCartStore is wired to the unreachable host 'badhost:1234' at src/cart/src/Program.cs:60. ValkeyCartStore.EnsureRedisConnected logs _logger.LogError(\"Wasn't able to connect to redis\") at src/cart/src/cartstore/ValkeyCartStore.cs:98 and then throws ApplicationException at line 101. The log is only emitted on this failing path — it is not produced during normal operation.",
+        "source": "cart service (.NET, cart.cartstore.ValkeyCartStore)",
+        "representative_attributes": {
+          "body": "Wasn't able to connect to redis",
+          "severity.text": "Error",
+          "severity.number": "17",
+          "instrumentationScope.name": "cart.cartstore.ValkeyCartStore",
+          "traceId": "1dd3a2182754a0215a74f9d4018e716a",
+          "spanId": "7130f2a0ab074897",
+          "resource.service.name": "cart",
+          "resource.service.namespace": "opentelemetry-demo",
+          "resource.service.version": "2.2.0",
+          "resource.telemetry.sdk.language": "dotnet"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "Sde3u50Br_RFnSwRbobW",
+            "@timestamp": "19:00:50.772"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "L9e5u50Br_RFnSwRV4wt",
+            "@timestamp": "19:02:55.786"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "i9e7u50Br_RFnSwRGJF0",
+            "@timestamp": "19:04:53.788"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "M9e9u50Br_RFnSwRAJfL",
+            "@timestamp": "19:06:55.479"
+          }
+        ]
+      },
+      {
+        "name": "cart: gRPC FailedPrecondition — Can't access cart storage (INFO)",
+        "description": "Between 19:00:50.772 and 19:06:55.479 UTC (4 entries), Grpc.AspNetCore.Server.ServerCallHandler auto-logged the thrown RpcException as 'Error status code {StatusCode} with detail {Detail} raised.' with StatusCode=FailedPrecondition and a Detail field whose stack trace points precisely at ValkeyCartStore.EnsureRedisConnected (line 101) → ValkeyCartStore.EmptyCartAsync (line 194). Note severity is Information (9) despite being a server-side gRPC error — the ASP.NET Core gRPC handler logs these at Info by default. The first entry fires 1 ms after the corresponding ValkeyCartStore Error above, sharing its traceId and spanId.",
+        "cause": "Direct effect of cartFailure. ValkeyCartStore.EmptyCartAsync (src/cart/src/cartstore/ValkeyCartStore.cs:194) catches the ApplicationException from EnsureRedisConnected and rethrows it as RpcException(Status(FailedPrecondition, \"Can't access cart storage. {ex}\")) at line 203. The ASP.NET Core gRPC middleware (Grpc.AspNetCore.Server.ServerCallHandler) then structurally logs the resulting status+detail. The stack trace targets EmptyCartAsync specifically — not AddItemAsync or GetCartAsync — which is consistent with the CartService.EmptyCart branch being the only one wired to _badCartStore in CartService.cs:85.",
+        "source": "cart service (.NET, Grpc.AspNetCore.Server.ServerCallHandler)",
+        "representative_attributes": {
+          "body": "Error status code '{StatusCode}' with detail '{Detail}' raised.",
+          "severity.text": "Information",
+          "severity.number": "9",
+          "StatusCode": "FailedPrecondition",
+          "Detail": "Can't access cart storage. System.ApplicationException: Wasn't able to connect to redis\n   at cart.cartstore.ValkeyCartStore.EnsureRedisConnected() in /usr/src/app/src/cartstore/ValkeyCartStore.cs:line 101\n   at cart.cartstore.ValkeyCartStore.EmptyCartAsync(String userId) in /usr/src/app/src/cartstore/ValkeyCartStore.cs:line 194",
+          "instrumentationScope.name": "Grpc.AspNetCore.Server.ServerCallHandler",
+          "traceId": "1dd3a2182754a0215a74f9d4018e716a",
+          "spanId": "7130f2a0ab074897",
+          "resource.service.name": "cart",
+          "resource.service.namespace": "opentelemetry-demo",
+          "resource.service.version": "2.2.0",
+          "resource.telemetry.sdk.language": "dotnet"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "Ste3u50Br_RFnSwRbobW",
+            "@timestamp": "19:00:50.772"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "MNe5u50Br_RFnSwRV4wt",
+            "@timestamp": "19:02:55.787"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "jNe7u50Br_RFnSwRGJF0",
+            "@timestamp": "19:04:53.789"
+          },
+          {
+            "_index": "otel-logs-2026-04-23",
+            "_id": "NNe9u50Br_RFnSwRAJfL",
+            "@timestamp": "19:06:55.479"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "Clicking \"Place Order\" on the cart page hangs for ~15 seconds and then fails — the user remains on the cart page and never reaches the order confirmation. The order is actually processed in the backend (payment is charged and items are shipped), but the user sees no confirmation and the cart is not emptied.",
+        "route": "POST /api/checkout",
+        "deterministic": true,
+        "trigger_condition": "User clicks \"Place Order\" on the cart page while cartFailure is enabled.",
+        "source_file": "src/checkout/main.go",
+        "source_line": 353,
+        "calling_service": "checkout",
+        "call_pattern": "Sequential call within PlaceOrder: after payment and shipping complete, [`main.go#L353`](../../opentelemetry-demo/src/checkout/main.go#L353) calls `cs.emptyUserCart(ctx, req.UserId)` which invokes CartService.EmptyCart via gRPC. The return value (error) is discarded with `_ =`, but the call itself blocks synchronously.",
+        "cause": "The frontend API route [`checkout.ts#L18`](../../opentelemetry-demo/src/frontend/pages/api/checkout.ts#L18) calls `CheckoutGateway.placeOrder`, which invokes the checkout service's `PlaceOrder` gRPC. PlaceOrder succeeds through payment and shipping, then calls `cs.emptyUserCart` at [`main.go#L353`](../../opentelemetry-demo/src/checkout/main.go#L353). This invokes `CartService.EmptyCart` ([`CartService.cs#L83`](../../opentelemetry-demo/src/cart/src/services/CartService.cs#L83)), which evaluates the `cartFailure` flag and routes to `_badCartStore` ([`Program.cs#L60`](../../opentelemetry-demo/src/cart/src/Program.cs#L60), constructed with `\"badhost:1234\"`). `ValkeyCartStore.EmptyCartAsync` ([`ValkeyCartStore.cs#L194`](../../opentelemetry-demo/src/cart/src/cartstore/ValkeyCartStore.cs#L194)) calls `EnsureRedisConnected`, which blocks in `ConnectionMultiplexer.Connect` retry/backoff for hundreds of seconds against the unreachable host. The frontend-proxy Envoy default route timeout (15 s) fires first, returning HTTP 504 with response flag `UT` (upstream request timeout). In `CartDetail.tsx`, the `await placeOrder(...)` at [`CartDetail.tsx#L38`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L38) rejects, so `push` to the confirmation page at [`CartDetail.tsx#L57`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L57) never executes.",
+        "symptom_type": "http_timeout"
+      },
+      {
+        "description": "Clicking \"Empty Cart\" on the cart page hangs for ~15 seconds and then fails — items remain in the cart.",
+        "route": "DELETE /api/cart",
+        "deterministic": true,
+        "trigger_condition": "User clicks \"Empty Cart\" on the cart page while cartFailure is enabled.",
+        "source_file": "src/frontend/pages/api/cart.ts",
+        "source_line": 45,
+        "calling_service": "frontend",
+        "call_pattern": "Single direct call: [`cart.ts#L45`](../../opentelemetry-demo/src/frontend/pages/api/cart.ts#L45) calls `CartGateway.emptyCart(userId)` → gRPC `client.emptyCart` ([`Cart.gateway.ts#L23`](../../opentelemetry-demo/src/frontend/gateways/rpc/Cart.gateway.ts#L23)).",
+        "cause": "The DELETE handler in [`cart.ts#L45`](../../opentelemetry-demo/src/frontend/pages/api/cart.ts#L45) calls `CartGateway.emptyCart(userId)`, which invokes `CartService.EmptyCart` ([`CartService.cs#L83`](../../opentelemetry-demo/src/cart/src/services/CartService.cs#L83)). When cartFailure is on, the call routes to `_badCartStore` ([`Program.cs#L60`](../../opentelemetry-demo/src/cart/src/Program.cs#L60), `\"badhost:1234\"`). `ValkeyCartStore.EmptyCartAsync` ([`ValkeyCartStore.cs#L194`](../../opentelemetry-demo/src/cart/src/cartstore/ValkeyCartStore.cs#L194)) calls `EnsureRedisConnected`, which blocks in `ConnectionMultiplexer.Connect` retry/backoff against the unreachable host. The frontend-proxy Envoy 15 s default route timeout fires, returning HTTP 504 UT. The `emptyCartMutation` in [`Cart.provider.tsx#L52`](../../opentelemetry-demo/src/frontend/providers/Cart.provider.tsx#L52) rejects, but React Query absorbs the error — the cart items remain and the user stays on the cart page.",
+        "symptom_type": "http_timeout"
+      }
+    ],
+    "traces": [
+      {
+        "name": "Checkout EmptyCart Cascade",
+        "description": "Between 18:58:40 and 19:08:06 UTC (20 s to ~9.8 min after cartFailure was flipped on at 18:58:20 UTC), 14 load-generator checkout traces failed. The root `load-generator:user_checkout_single|multi` span issues a POST through the frontend-proxy, which times out after exactly 15.0 s with HTTP 504. The underlying `cart:POST /oteldemo.CartService/EmptyCart` span hangs for 130–1141 s in a `ConnectionMultiplexer.Connect` retry loop against the bogus host `badhost:1234`, then terminates with gRPC `FailedPrecondition` — 'Can't access cart storage. System.ApplicationException: Wasn't able to connect to redis'. Because EmptyCart is the last step of `CheckoutService.PlaceOrder`, the `charged` and `shipped` span events fire before the failure: the customer is charged and the order is booked for shipping even though they see a 504.",
+        "cause": "Direct effect of the cartFailure feature flag. `CartService.EmptyCart` (`src/cart/src/services/CartService.cs:83-85`) evaluates `cartFailure`; when `on`, it routes the call to `_badCartStore`, an extra `ValkeyCartStore` instance constructed in `src/cart/src/Program.cs:60` with the unreachable connection string `badhost:1234`. `ValkeyCartStore.EmptyCartAsync` calls `EnsureRedisConnected` → `ConnectionMultiplexer.Connect`, which retries with exponential backoff for hundreds of seconds before throwing `ApplicationException(\"Wasn't able to connect to redis\")` at `ValkeyCartStore.cs:101`; the catch block at `ValkeyCartStore.cs:203` rewraps it as `RpcException(Status(FailedPrecondition, \"Can't access cart storage. {ex}\"))`. Because `checkout/main.go:353` calls `emptyUserCart` synchronously and discards the return value with `_ =`, the PlaceOrder RPC blocks on this hung call for the full backoff duration; `frontend-proxy` cuts the upstream request at its fixed 15 s timeout and the client receives HTTP 504.",
+        "call_chain": "cart:POST /oteldemo.CartService/EmptyCart → checkout:oteldemo.CartService/EmptyCart → checkout:oteldemo.CheckoutService/PlaceOrder → frontend:oteldemo.CheckoutService/PlaceOrder → frontend:executing api route (pages) /api/checkout → frontend:POST /api/checkout → frontend-proxy:router frontend egress → frontend-proxy:POST → load-generator:POST → load-generator:user_checkout_single|user_checkout_multi",
+        "smoking_gun": [
+          "`cart:POST /oteldemo.CartService/EmptyCart` span log `feature_flag.evaluation` with `feature_flag.key=cartFailure`, `feature_flag.provider.name=flagd Provider`, `feature_flag.result.reason=static`, `feature_flag.result.value=True`, `feature_flag.result.variant=on` — definitively proves the flag routed this call into `_badCartStore`.",
+          "`cart:POST /oteldemo.CartService/EmptyCart` span `otel.status_code=ERROR` with `otel.status_description=Status(StatusCode=\"FailedPrecondition\", Detail=\"Can't access cart storage. System.ApplicationException: Wasn't able to connect to redis\\n   at cart.cartstore.ValkeyCartStore.EnsureRedisConnected() in /usr/src/app/src/cartstore/ValkeyCartStore.cs:line 101\\n   at cart.cartstore.ValkeyCartStore.EmptyCartAsync(String userId) in /usr/src/app/src/cartstore/ValkeyCartStore.cs:line 194\")`.",
+          "`cart:POST /oteldemo.CartService/EmptyCart` exception event with `exception.type=Grpc.Core.RpcException`, `exception.message=Status(StatusCode=\"FailedPrecondition\", Detail=\"Can't access cart storage. ... Wasn't able to connect to redis\")`, and `exception.stacktrace` through `ValkeyCartStore.EmptyCartAsync:line 203` and `CartService.EmptyCart:line 85`.",
+          "`checkout:oteldemo.CartService/EmptyCart` and `cart:POST /oteldemo.CartService/EmptyCart` span durations between 130 s and 1141 s across the 14 traces (well beyond normal Redis latency), which is consistent with `StackExchange.Redis ConnectionMultiplexer.Connect` exponential-backoff retries against `badhost:1234` rather than a normal transient network error.",
+          "`frontend-proxy:router frontend egress` error span with `error=true`, `canceled=true`, `http.status_code=0`, `response_flags=-`, and `duration≈15.00 s` — Envoy upstream timeout fired and canceled the request to the backend, while `load-generator:POST` records the resulting `http.status_code=504` and `otel.status_code=ERROR` returned to the client.",
+          "`checkout:oteldemo.CheckoutService/PlaceOrder` span event sequence observed *before* the EmptyCart failure: `prepared` → `feature_flag.evaluation paymentUnreachable=off` → `charged` (carrying `app.payment.transaction.id`) → `shipped` (carrying `app.shipping.tracking.id`) → `feature_flag.evaluation kafkaQueueProblems=off`. The order is fully charged and shipped *before* EmptyCart is invoked, confirming that the 504 surfaces only at the final cart-cleanup step."
+        ],
+        "trace_documents": [
+          {
+            "traceID": "e62cfbf4a4498bec490d05a487f663d2",
+            "@timestamp": "19:08:06",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "1140.9",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "48b4938be6410fc9e0a1ae01c7d1b1da",
+            "@timestamp": "19:07:42",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "1059.1",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "af66ed82e652a52a6ae460147e87b146",
+            "@timestamp": "19:07:10",
+            "user_action": "user_checkout_multi",
+            "cart_empty_duration_seconds": "969.7",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "025111871e3d82ea201c57c82b3dcd4e",
+            "@timestamp": "19:05:43",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "934.7",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "170b2d19b53fbde35f06cbf4b0cf464a",
+            "@timestamp": "19:05:27",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "837.3",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "429444bb6856ea1c30c77a0902ed0272",
+            "@timestamp": "19:05:18",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "724.4",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "a9902e3b7c9e18c1c44d45b49485d55e",
+            "@timestamp": "19:03:33",
+            "user_action": "user_checkout_multi",
+            "cart_empty_duration_seconds": "706.2",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "0d3df581377c11585792b76bd04aef09",
+            "@timestamp": "19:03:08",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "605.5",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "92ce296778b9ed5031d814c9b4cff1cb",
+            "@timestamp": "19:02:40",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "503.1",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "3084185fb85cc0e2ca8dfa1a0b1e54b3",
+            "@timestamp": "19:02:15",
+            "user_action": "user_checkout_multi",
+            "cart_empty_duration_seconds": "400.9",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "9e5f6f6de1dbb277b49e2bb12ad3a49e",
+            "@timestamp": "19:01:57",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "298.0",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "a54b288e878a7475b282e3212888cca9",
+            "@timestamp": "19:00:02",
+            "user_action": "user_checkout_multi",
+            "cart_empty_duration_seconds": "291.6",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "5dbf27e0b9abdf387b7c5246815d2c0b",
+            "@timestamp": "18:59:21",
+            "user_action": "user_checkout_multi",
+            "cart_empty_duration_seconds": "214.4",
+            "frontend_proxy_http_status": "504"
+          },
+          {
+            "traceID": "1dd3a2182754a0215a74f9d4018e716a",
+            "@timestamp": "18:58:40",
+            "user_action": "user_checkout_single",
+            "cart_empty_duration_seconds": "130.0",
+            "frontend_proxy_http_status": "504"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "incident_time": "2026-04-19T20:48:14.517927+00:00",
+  "feature_flag": "loadGeneratorFloodHomepage",
+  "description": "A feature flag in the load generator's `locustfile.py` activated a `flood_home` Locust task (weighted 5/32, ~16% of selection per cycle) that fired `flood_count = 100` rapid GETs to the frontend homepage; outbound HTTP request rate from the load generator spiked, driving container CPU and network traffic on the frontend and frontend-proxy containers above baseline.",
+  "mechanism": "The flag is read in [`locustfile.py#L220`](../../opentelemetry-demo/src/load-generator/locustfile.py#L220), inside the load generator's Locust test suite.\n\nEach simulated user repeats this loop:\n\n1. Execute one randomly-chosen task (weighted)\n2. Wait for `wait_time` (1–10 seconds, [line 114](../../opentelemetry-demo/src/load-generator/locustfile.py#L114))\n3. Go back to step 1\n\nOne iteration of that loop is a \"cycle.\" Each user runs independently and concurrently. There are **5 simulated users** (see [`.env#L101`](../../opentelemetry-demo/.env#L101)).\n\n`flood_home` has a **5/32 (~16%) chance** of being selected each cycle. When selected, it sends `flood_count` rapid requests to the homepage. The `flood_count` value is **100**, defined in [`demo.flagd.json#L105`](../../opentelemetry-demo/src/flagd/demo.flagd.json#L105).",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "traces_span_metrics_calls",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "service_name": "load-generator"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "sum(rate(traces_span_metrics_calls_total{service_name=\"load-generator\"}[5m]))",
+            "description": "Span call count for load-generator spiked ~7x because each flood_home invocation produces a client span plus ~100 rapid child spans for the homepage GETs",
+            "onset_utc": "2026-04-19 20:50:00 UTC",
+            "onset_offset_seconds": 105,
+            "onset_reasoning": "Pre-incident baseline hovers around 0.75-0.85. At 20:50, the value jumps to 1.6625, roughly double the baseline, marking the first clear departure from normal levels. By 20:51 it reaches 3.34 and continues climbing to ~6-7, confirming a sustained spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_cpu_utilization_ratio",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "container_name": "frontend-proxy"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "container_cpu_utilization_ratio{container_name=\"frontend-proxy\"}",
+            "description": "Frontend-proxy container CPU utilization spiked from a baseline of ~0.6-1.6% to a peak of 10.9% as the Envoy proxy handled the high volume of flood traffic",
+            "onset_utc": "2026-04-19 20:49:00 UTC",
+            "onset_offset_seconds": 45,
+            "onset_reasoning": "Pre-incident baseline fluctuates roughly between 0.58 and 1.75, with most values under 1.0. At 20:49 UTC (one minute after the incident marker), the value jumps to 9.97, which is ~10x the typical baseline. This is the first clear spike above normal levels after the incident time. Subsequent intermittent spikes (8.93 at 20:54, 10.76 at 21:05) confirm the ongoing spiking pattern."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_network_io_usage_rx_bytes",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "container_name": "frontend-proxy"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_network_io_usage_rx_bytes_total{container_name=\"frontend-proxy\"}[5m])",
+            "description": "Frontend-proxy container inbound network throughput spiked ~25x (from ~900 to ~25,000 bytes/s) as the flood of HTTP GET requests from the load generator arrived at the Envoy proxy",
+            "onset_utc": "2026-04-19 20:49:00 UTC",
+            "onset_offset_seconds": 45,
+            "onset_reasoning": "Pre-incident baseline fluctuates roughly 820-940 bytes/s. At 20:49 (one minute after incident), the value jumps to ~3991, approximately 4x the baseline, marking a clear and sustained spike that continues to climb to ~28k."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_cpu_utilization_ratio",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "container_name": "frontend"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "container_cpu_utilization_ratio{container_name=\"frontend\"}",
+            "description": "Frontend container CPU utilization spiked from a baseline of ~0.6-1.9% to peaks of 3.3% initially and 99.8% at 21:08 UTC, driven by server-side rendering the homepage under flood load",
+            "onset_utc": "2026-04-19 20:49:00 UTC",
+            "onset_offset_seconds": 45,
+            "onset_reasoning": "Pre-incident baseline is roughly 0.6-0.7 with occasional spikes up to ~3. At 20:49, one minute after the incident marker, the value jumps to 75.79 — orders of magnitude above baseline. This is the first clear, massive spike post-incident, and subsequent data continues to show intermittent large spikes (64.1, 20.6, 23.0, 101.2, 16.2) that never appeared before the incident."
+          }
+        ]
+      },
+      {
+        "metric_family": "kafka_consumer_records_lag",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "service_name": "fraud-detection",
+          "topic": "orders"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "kafka_consumer_records_lag{topic=\"orders\",service_name=\"fraud-detection\"}",
+            "description": "Kafka consumer lag (current offset behind latest) for fraud-detection on the orders topic. Was 0 pre-incident, started growing at ~20:48 and reached 9095+ by 22:00. The homepage flood starved fraud-detection of resources, so it fell behind on consuming order messages.",
+            "onset_utc": "2026-04-19 20:53:00 UTC",
+            "onset_offset_seconds": 285,
+            "onset_reasoning": "The baseline before the incident is 0, with a minor bump to 5 starting at 20:45. The major spike occurs at 20:53 when the value jumps from 5 to 813, representing the clear onset of the significant lag spike associated with the incident."
+          },
+          {
+            "type": "spiked",
+            "query": "kafka_consumer_records_lag_max{topic=\"orders\",service_name=\"fraud-detection\"}",
+            "description": "Maximum consumer lag reported by fraud-detection on the orders topic. Mirrors kafka_consumer_records_lag, growing continuously from 0 to 9095+ after the incident.",
+            "onset_utc": "2026-04-19 20:53:00 UTC",
+            "onset_offset_seconds": 285,
+            "onset_reasoning": "Pre-incident baseline is 0 (20:28-20:44). There is a small bump to 5 at 20:45-20:49, but the major spike occurs at 20:53 when the value jumps to 813, clearly indicating the onset of the kafka consumer lag spike following the incident at 20:48."
+          },
+          {
+            "type": "spiked",
+            "query": "kafka_consumer_records_lag_avg{topic=\"orders\",service_name=\"fraud-detection\"}",
+            "description": "Average consumer lag for fraud-detection on the orders topic. Spiked from near-zero to thousands, confirming sustained inability to keep up with message production.",
+            "onset_utc": "2026-04-19 20:53:00 UTC",
+            "onset_offset_seconds": 285,
+            "onset_reasoning": "Pre-incident baseline is 0 (with a minor shift to 5 starting at 20:45). After the incident at 20:48, the metric jumps dramatically to 813 at 20:53, representing the clear spike onset. The small increase to 5 at 20:45 is negligible compared to the massive jump to 813, which is the true spike."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "load-generator: User flooding homepage 100 times (INFO)",
+        "description": "Starting at 20:48:35.365 UTC and continuing through 20:57:57.740 UTC, load-generator emitted 29 flood_home logs confirming loadGeneratorFloodHomepage is ON with value 100. The downstream effect is visible in frontend-proxy Envoy access logs as a surge in homepage GETs starting at 20:48 UTC (baseline ~1-3 req/min through 20:47, climbing to 100-600 req/min during 20:48-20:57), all returning HTTP 200.",
+        "cause": "Direct effect of the loadGeneratorFloodHomepage feature flag. When flagd returns a value > 0, locust's flood_home task starts a user_flood_home span (attribute flood.count=100) and logs 'User flooding homepage {flood_count} times' before issuing that many GET / requests against frontend-proxy.",
+        "source": "load-generator (Locust, opentelemetry-demo/src/load-generator/locustfile.py:219-225)",
+        "representative_attributes": {
+          "body": "User flooding homepage 100 times",
+          "severity.text": "INFO",
+          "resource.service.name": "load-generator",
+          "instrumentationScope.name": "root",
+          "code.file.path": "/usr/src/app/locustfile.py",
+          "code.function.name": "flood_home",
+          "code.line.number": "223",
+          "traceId": "99d251380a7301aa3af0d862ee96de8d",
+          "spanId": "943da7200f0b7d91"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-19",
+            "_id": "MoiAp50Br_RFnSwRqFgb",
+            "@timestamp": "20:48:35.365"
+          }
+        ]
+      }
+    ],
+    "frontend": [],
+    "traces": []
+  }
+}

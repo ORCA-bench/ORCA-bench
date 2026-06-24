@@ -1,0 +1,245 @@
+{
+  "incident_time": "2026-04-20T15:08:20.478349+00:00",
+  "feature_flag": "adFailure",
+  "description": "A feature flag in the ad service's `GetAds` handler threw `StatusRuntimeException(Status.UNAVAILABLE)` on ~10% of calls (`random.nextInt(10) == 0`); the frontend `/api/data` route caught the gRPC error and returned HTTP 500, but React Query's default `adList = []` fallback masked the failure in the UI — the yellow ad banner silently rendered blank rather than showing an error.",
+  "mechanism": "The flag is read in [`AdService.java#L205`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L205): on every `getAds` gRPC call, after ads have been collected and the request/response type attributes set, the service evaluates `ffClient.getBooleanValue(\"adFailure\", false, evaluationContext)`. When `true`, it throws `StatusRuntimeException(Status.UNAVAILABLE)` with probability 1/10 (`random.nextInt(10) == 0`) at [`AdService.java#L206`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L206).\n\nThe exception is caught at [`AdService.java#L218`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L218): the catch block adds an \"Error\" span event (line 219-220), sets the span status to ERROR (line 221), logs a WARN \"GetAds Failed with status {UNAVAILABLE}\" (line 222), and calls `responseObserver.onError(e)` (line 223) which sends the gRPC UNAVAILABLE status back to the caller.\n\nThe frontend calls the ad service via [`Ad.gateway.ts#L14`](../../opentelemetry-demo/src/frontend/gateways/rpc/Ad.gateway.ts#L14) (`client.getAds`), invoked from the `/api/data` route at [`data.ts#L15`](../../opentelemetry-demo/src/frontend/pages/api/data.ts#L15). When the gRPC call fails, the error propagates through the Next.js API route as an unhandled rejection, and the frontend-proxy Envoy returns HTTP 500 to the client.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "rpc_server_duration_milliseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "rpc_grpc_status_code": "14",
+          "rpc_method": "GetAds",
+          "rpc_service": "oteldemo.AdService"
+        },
+        "variants": [
+          {
+            "type": "created (fixed after human verification)",
+            "query": "rate(rpc_server_duration_milliseconds_count{rpc_service=\"oteldemo.AdService\",rpc_method=\"GetAds\",rpc_grpc_status_code=\"14\"}[5m])",
+            "description": "gRPC server-side error count for AdService GetAds calls returning UNAVAILABLE (status 14). New series appeared after adFailure flag activation, as StatusRuntimeException(Status.UNAVAILABLE) is thrown with 1/10 probability.",
+            "onset_utc": "2026-04-20 15:12:00 UTC",
+            "onset_offset_seconds": 219,
+            "onset_reasoning": "This is a 'created' metric type, meaning the series appeared after the incident. The incident occurred at 15:08:20 UTC and the first data point in the series is at 15:12:00 UTC, indicating the metric was created at that time. The series did not exist before the incident, and its appearance at 15:12:00 represents the onset of error responses (gRPC status code 14) for the AdService GetAds RPC."
+          },
+          {
+            "type": "created (fixed after human verification)",
+            "query": "rate(rpc_server_duration_milliseconds_sum{rpc_service=\"oteldemo.AdService\",rpc_method=\"GetAds\",rpc_grpc_status_code=\"14\"}[5m])",
+            "description": "Cumulative request duration for failed AdService GetAds gRPC calls with UNAVAILABLE status. Tracks total server-side processing time spent on requests that hit the adFailure flag path.",
+            "onset_utc": "2026-04-20 15:12:00 UTC",
+            "onset_offset_seconds": 219,
+            "onset_reasoning": "This metric type is 'created', meaning it appeared for the first time after the incident. The incident occurred at 15:08:20 UTC and the very first data point in the series is at 15:12:00 UTC with a non-zero value of 0.0498, indicating the rpc_server_duration for status_code=14 (UNAVAILABLE) began being emitted shortly after the incident. Since there are no data points before 15:12:00, this is the onset — the first observation of this newly created error metric."
+          }
+        ]
+      },
+      {
+        "metric_family": "rpc_server_response_size_bytes",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "rpc_grpc_status_code": "14",
+          "rpc_service": "oteldemo.AdService"
+        },
+        "variants": [
+          {
+            "type": "created (fixed after human verification)",
+            "query": "rate(rpc_server_response_size_bytes_count{rpc_service=\"oteldemo.AdService\",rpc_grpc_status_code=\"14\"}[5m])",
+            "description": "Count of gRPC server response messages for AdService calls that returned UNAVAILABLE error. New series created when adFailure flag began triggering failures.",
+            "onset_utc": "2026-04-20 15:12:00 UTC",
+            "onset_offset_seconds": 219,
+            "onset_reasoning": "This is a 'created' metric (rpc_grpc_status_code=14 errors for AdService). The series begins at 15:12:00 UTC, which is the first data point after the incident at 15:08:20 UTC. Since this metric didn't exist before the incident, the onset is when it first appears. The ~4 minute delay is consistent with the 5m rate window needing time to accumulate counts after errors begin."
+          },
+          {
+            "type": "created (fixed after human verification)",
+            "query": "rate(rpc_server_response_size_bytes_sum{rpc_service=\"oteldemo.AdService\",rpc_grpc_status_code=\"14\"}[5m])",
+            "description": "Total gRPC server response bytes for AdService UNAVAILABLE error responses. Tracks the size of error response payloads sent back to the frontend.",
+            "onset_utc": "2026-04-20 15:12:00 UTC",
+            "onset_offset_seconds": 219,
+            "onset_reasoning": "Metric type is 'created' — this series (rpc_grpc_status_code=14, i.e. UNAVAILABLE errors for AdService) did not exist before the incident. The first data point appears at 15:12:00 UTC, approximately 4 minutes after the incident injection at 15:08:20, which aligns with the 5m rate window needing time to populate. This is the onset of the new error signal."
+          }
+        ]
+      },
+      {
+        "metric_family": "app_frontend_requests",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "method": "GET",
+          "status": "500",
+          "target": "/api/data"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(app_frontend_requests_total{method=\"GET\",target=\"/api/data\",status=\"500\"}[5m])",
+            "description": "Custom frontend application counter for GET /api/data requests returning HTTP 500. Rate spiked from zero after the adFailure flag caused gRPC errors to propagate as 500s on the /api/data endpoint.",
+            "onset_utc": "2026-04-20 15:11:00 UTC",
+            "onset_offset_seconds": 159,
+            "onset_reasoning": "The metric is flat at 0 from the start of the window through 15:10. At 15:11 it first rises to ~0.0042, marking the initial spike above the zero baseline, approximately 3 minutes after the incident time."
+          }
+        ]
+      },
+      {
+        "metric_family": "http_client_duration_milliseconds",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "http_status_code": "500",
+          "net_peer_name": "frontend-proxy",
+          "service_name": "load-generator"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(http_client_duration_milliseconds_count{service_name=\"load-generator\",http_status_code=\"500\",net_peer_name=\"frontend-proxy\"}[5m])",
+            "description": "Load generator HTTP client receiving 500 errors from frontend-proxy. Rate went from zero to non-zero as the ad service failures cascaded through the frontend to the external client.",
+            "onset_utc": "2026-04-20 15:10:00 UTC",
+            "onset_offset_seconds": 99,
+            "onset_reasoning": "The metric is flat at 0 from 14:48 through 15:09. At 15:10 it first rises to ~0.004, which is the first non-zero value after the incident time (15:08). This marks the clear onset of the HTTP 500 spike."
+          },
+          {
+            "type": "spiked",
+            "query": "rate(http_client_duration_milliseconds_sum{service_name=\"load-generator\",http_status_code=\"500\",net_peer_name=\"frontend-proxy\"}[5m])",
+            "description": "Cumulative HTTP client request duration for load generator requests that received 500 from frontend-proxy due to the ad service failure cascade.",
+            "onset_utc": "2026-04-20 15:10:00 UTC",
+            "onset_offset_seconds": 99,
+            "onset_reasoning": "The metric is flat at 0 from 14:48 through 15:09. At 15:10 it jumps to 0.228, marking the first clear spike above the zero baseline. This is consistent with the incident at 15:08, with a ~2-minute propagation delay through the 5m rate window."
+          }
+        ]
+      },
+      {
+        "metric_family": "feature_flag_flagd_result_reason",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "feature_flag_key": "adFailure"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(feature_flag_flagd_result_reason_total{feature_flag_key=\"adFailure\"}[5m])",
+            "description": "flagd evaluation result reason counter for the adFailure flag. Incremented when flagd resolved the adFailure flag (STATIC reason), coinciding with the flag being toggled on.",
+            "onset_utc": "2026-04-20 15:09:00 UTC",
+            "onset_offset_seconds": 39,
+            "onset_reasoning": "The metric is flat at 0 from 14:49 through 15:08 (incident time). At 15:09 it spikes to ~0.00417, sustaining for a few minutes (15:09–15:12), which is the first clear rise above the zero baseline after the incident."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "GET /api/data → 500",
+        "description": "Between 15:09:27 and 15:16:14 UTC, GET /api/data?contextKeys={category} returned 500 errors three times (3 failures out of 25 completed /api/data requests after the incident, ~12%, matching the 1/10 probabilistic failure rate). Each failing request shares its traceId with an ad-service GetAds UNAVAILABLE WARN logged ~10-50 ms later. The three failing requests sample different categories (travel, books, telescopes).",
+        "cause": "Direct effect of the adFailure flag. pages/api/data.ts calls AdGateway.listAds, which invokes the ad service's GetAds gRPC. When adFailure is on, AdService.java:205 throws StatusRuntimeException(Status.UNAVAILABLE) with 1/10 probability (random.nextInt(10) == 0), which propagates back through the frontend gateway as a 500.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "[2026-04-20T15:09:27.734Z] \"GET /api/data?contextKeys=travel HTTP/1.1\" 500 - via_upstream - \"-\" 0 21 48 48 \"-\" \"python-requests/2.32.5\" \"5570480f-1ad2-9163-aac4-ff388352596a\" \"frontend-proxy:8080\" \"172.18.0.27:8080\" frontend",
+          "event.name": "proxy.access",
+          "url.full": "http://frontend-proxy:8080/api/data?contextKeys=travel",
+          "url.path": "/api/data?contextKeys=travel",
+          "upstream.cluster": "frontend",
+          "upstream.host": "172.18.0.27:8080",
+          "user_agent.original": "python-requests/2.32.5",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log",
+          "traceId": "78b32363779706cd748895d77f56d844",
+          "spanId": "a9714bdfc6d2fb07"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-20",
+            "_id": "1ptwq50Br_RFnSwRemHk",
+            "@timestamp": "15:09:27.734"
+          },
+          {
+            "_index": "otel-logs-2026-04-20",
+            "_id": "QJtxq50Br_RFnSwRRmSL",
+            "@timestamp": "15:10:19.847"
+          },
+          {
+            "_index": "otel-logs-2026-04-20",
+            "_id": "MJt2q50Br_RFnSwRrXgq",
+            "@timestamp": "15:16:14.441"
+          }
+        ]
+      },
+      {
+        "name": "ad: GetAds Failed (WARN)",
+        "description": "Between 15:09:27 and 15:16:14 UTC, the ad service emitted 3 WARN logs reporting that GetAds failed with gRPC status UNAVAILABLE. Each WARN arrives ~10-50 ms after its corresponding /api/data 500 in the frontend-proxy access log, giving a 1:1 correspondence with the GetAds UNAVAILABLE Cascade traces (matching the 3 failing traces under that cluster).",
+        "cause": "Smoking-gun direct evidence of the adFailure flag. Each time AdService.java:205 throws StatusRuntimeException(Status.UNAVAILABLE), execution enters the catch block at AdService.java:218, which calls logger.log(Level.WARN, \"GetAds Failed with status {}\", e.getStatus()) at AdService.java:222 before rethrowing to the gRPC client. The ad service explicitly names the failing RPC and echoes the UNAVAILABLE status code from the feature-flag code path.",
+        "source": "ad service (Java, oteldemo.AdService logger via OpenTelemetry Java agent)",
+        "representative_attributes": {
+          "body": "GetAds Failed with status Status{code=UNAVAILABLE, description=null, cause=null}",
+          "severity.text": "WARN",
+          "severity.number": "13",
+          "instrumentationScope.name": "oteldemo.AdService",
+          "resource.service.name": "ad",
+          "resource.service.namespace": "opentelemetry-demo",
+          "resource.service.version": "2.2.0",
+          "resource.telemetry.sdk.language": "java",
+          "resource.telemetry.distro.name": "opentelemetry-java-instrumentation",
+          "traceId": "78b32363779706cd748895d77f56d844",
+          "spanId": "99899da46f430d35"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-20",
+            "_id": "uZtwq50Br_RFnSwRd2HN",
+            "@timestamp": "15:09:27.776"
+          },
+          {
+            "_index": "otel-logs-2026-04-20",
+            "_id": "Pptxq50Br_RFnSwRRmRY",
+            "@timestamp": "15:10:19.859"
+          },
+          {
+            "_index": "otel-logs-2026-04-20",
+            "_id": "Ppt2q50Br_RFnSwRr3gE",
+            "@timestamp": "15:16:14.450"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "The yellow ad banner at the bottom of product detail and checkout confirmation pages renders as a blank yellow box with no ad text and no link. The rest of the page loads normally — the failure is silent degradation, not a visible error.",
+        "route": "GET /api/data",
+        "deterministic": false,
+        "trigger_condition": "User visits a product detail page or checkout confirmation page, triggering an ad fetch via AdProvider. The ad service fails with 10% probability (`random.nextInt(10) == 0` in [`AdService.java#L205`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L205)).",
+        "source_file": "src/frontend/pages/api/data.ts",
+        "source_line": 15,
+        "calling_service": "frontend",
+        "call_pattern": "Single direct call: AdProvider.useQuery ([`Ad.provider.tsx#L30`](../../opentelemetry-demo/src/frontend/providers/Ad.provider.tsx#L30)) → ApiGateway.listAds ([`Api.gateway.ts#L103`](../../opentelemetry-demo/src/frontend/gateways/Api.gateway.ts#L103)) → [`data.ts#L15`](../../opentelemetry-demo/src/frontend/pages/api/data.ts#L15) → AdGateway.listAds → gRPC client.getAds ([`Ad.gateway.ts#L14`](../../opentelemetry-demo/src/frontend/gateways/rpc/Ad.gateway.ts#L14)).",
+        "cause": "The [`data.ts#L15`](../../opentelemetry-demo/src/frontend/pages/api/data.ts#L15) API route calls `AdGateway.listAds` with no try-catch. When adFailure is on and the 1/10 random gate fires, the ad service throws `StatusRuntimeException(Status.UNAVAILABLE)` at [`AdService.java#L206`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L206). The gRPC error rejects the promise in [`Ad.gateway.ts#L14`](../../opentelemetry-demo/src/frontend/gateways/rpc/Ad.gateway.ts#L14), propagates to [`InstrumentationMiddleware.ts#L23`](../../opentelemetry-demo/src/frontend/utils/telemetry/InstrumentationMiddleware.ts#L23) which records the exception on the span and re-throws, and Next.js returns HTTP 500. On the client side, React Query in [`Ad.provider.tsx#L30`](../../opentelemetry-demo/src/frontend/providers/Ad.provider.tsx#L30) catches the failure and defaults `adList` to `[]`. The Ad component ([`Ad.tsx#L10`](../../opentelemetry-demo/src/frontend/components/Ad/Ad.tsx#L10)) falls back to `{ text: '', redirectUrl: '' }`, rendering the styled yellow banner with empty content.",
+        "symptom_type": "visual_degradation"
+      }
+    ],
+    "traces": [
+      {
+        "name": "GetAds UNAVAILABLE Cascade",
+        "description": "Between 15:09:27 and 15:16:14 UTC, 3 traces show ad:oteldemo.AdService/GetAds failing with gRPC status 14 UNAVAILABLE and cascading through the frontend /api/data path. All 3 traces have root operation load-generator:user_get_ads. The 3 failures span ~7 minutes, consistent with the load generator's user_get_ads cadence multiplied by the ~1/10 probabilistic failure rate.",
+        "cause": "Direct effect of the adFailure flag. When adFailure is on, AdService.java:205 throws StatusRuntimeException(Status.UNAVAILABLE) with 1/10 probability (random.nextInt(10) == 0). The exception is caught at AdService.java:218, logged as WARN at line 222, then surfaced to the gRPC client via responseObserver.onError(...). The error propagates through frontend's AdGateway to the Next.js /api/data route handler, which returns HTTP 500, and finally back out through the frontend-proxy Envoy to the load generator.",
+        "call_chain": "ad:oteldemo.AdService/GetAds → frontend:oteldemo.AdService/GetAds → frontend:executing api route (pages) /api/data → frontend:GET /api/data → frontend-proxy:router frontend egress → frontend-proxy:GET → load-generator:GET",
+        "smoking_gun": [
+          "ad:oteldemo.AdService/GetAds span: otel.status_code=ERROR, rpc.grpc.status_code=14, rpc.service=oteldemo.AdService, rpc.method=GetAds, and log event {event: \"Error\", exception.message: \"UNAVAILABLE\"} — no description, no stacktrace, matching the bare `throw new StatusRuntimeException(Status.UNAVAILABLE)` at AdService.java:206",
+          "ad:oteldemo.AdService/GetAds span attributes app.ads.count=1-2 and app.ads.ad_request_type=TARGETED with app.ads.contextKeys=[telescopes], [books], or [travel], set at AdService.java:195 before the flag check at line 205 — proves execution reached the flag-triggered throw with ads already prepared (rules out upstream failures in getAdsByCategory/getRandomAds)",
+          "ad:getAdsByCategory child span completes successfully with no errors — the failure is injected by the explicit flag-triggered throw in getAds, not by any downstream dependency",
+          "frontend:oteldemo.AdService/GetAds client span carries the received gRPC error as tag grpc.error_message=\"14 UNAVAILABLE: \" with rpc.grpc.status_code=14 (trailing colon with empty description, characteristic of the Java server not calling .withDescription(...))"
+        ],
+        "trace_documents": [
+          {
+            "traceID": "78b32363779706cd748895d77f56d844",
+            "@timestamp": "15:09:27",
+            "user_action": "user_get_ads"
+          },
+          {
+            "traceID": "594cefb047aa9caa2c8acf85f2aafa8b",
+            "@timestamp": "15:10:19",
+            "user_action": "user_get_ads"
+          },
+          {
+            "traceID": "1221c4c4d070604b6603185e6f679eda",
+            "@timestamp": "15:16:14",
+            "user_action": "user_get_ads"
+          }
+        ]
+      }
+    ]
+  }
+}

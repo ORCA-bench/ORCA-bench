@@ -1,0 +1,124 @@
+{
+  "incident_time": "2026-04-20T14:08:06.132885+00:00",
+  "feature_flag": "adHighCpu",
+  "description": "A feature flag read inside the ad service's `GetAds` handler activated a singleton `CPULoad` that spawned 4 daemon threads each running a tight `Math.log(System.currentTimeMillis())` loop; the threads pinned CPU cores and saturated container CPU and `jvm_cpu_recent_utilization_ratio` on the `ad` service.",
+  "mechanism": "The flag is read in [`AdService.java#L172`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L172): on every `getAds` gRPC call, `CPULoad.getInstance().execute()` is invoked with the boolean value of the `adHighCpu` flag. When the flag is `true`, [`CPULoad.java#L46-L52`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/CPULoad.java#L46) calls `spawnLoadWorkers(4)`, which launches 4 daemon threads ([`CPULoad.java#L64-L74`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/CPULoad.java#L64)). Each thread runs a tight `while(shouldRun) { Math.log(System.currentTimeMillis()); }` loop ([`CPULoad.java#L101-L103`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/CPULoad.java#L101)), saturating CPU cores with continuous logarithm calculations. The threads persist until the flag is toggled off, at which point `stopWorkers()` sets `shouldRun=false` on each thread. Because the workers are spawned only once (guarded by the `running` flag at line 49), repeated `getAds` calls while the flag is on do not create additional threads.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "container_cpu_usage_nanoseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "ad"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_cpu_usage_nanoseconds_total{container_name=\"ad\"}[2m])",
+            "description": "Ad container total CPU usage rate (nanoseconds/sec) spiked from ~2e6 to ~3.9e9, reflecting the 4 CPU-bound daemon threads consuming nearly 4 full cores",
+            "onset_utc": "2026-04-20 14:09:00 UTC",
+            "onset_offset_seconds": 53,
+            "onset_reasoning": "Pre-incident baseline is ~1.7-2.1e+06. At 14:09 UTC (one minute after incident), the value jumps to 7.14e+08 (~430x baseline), marking the clear onset of the CPU spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_cpu_usage_usermode_nanoseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "ad"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_cpu_usage_usermode_nanoseconds_total{container_name=\"ad\"}[2m])",
+            "description": "Ad container usermode CPU usage rate spiked from ~1.5e6 to ~3.9e9 ns/s, as the Logarithmizer threads run entirely in user space computing Math.log() in tight loops",
+            "onset_utc": "2026-04-20 14:09:00 UTC",
+            "onset_offset_seconds": 53,
+            "onset_reasoning": "Pre-incident baseline is ~1.2-1.5e+06. At 14:09, one minute after the incident marker, the value jumps to ~7.12e+08 — roughly 500x the baseline — clearly the first timestamp of the spike. By 14:10 it reaches ~2.83e+09 and stabilizes around ~3.9e+09."
+          }
+        ]
+      },
+      {
+        "metric_family": "avg without(cpu)(system_cpu_utilization_ratio)",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "state": "idle"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "avg without(cpu)(system_cpu_utilization_ratio{state=\"idle\"})",
+            "description": "Host-level CPU idle utilization ratio dropped from ~0.87 to ~0.37 as the ad container's CPU-saturating threads consumed available idle CPU capacity across the host",
+            "onset_utc": "2026-04-20 14:08:00 UTC",
+            "onset_offset_seconds": -6,
+            "onset_reasoning": "Pre-incident the idle CPU ratio oscillates around ~0.875. At 14:08 it is still at 0.886, then at 14:09 it drops sharply to 0.790 and by 14:10 collapses to ~0.37 where it stays. The last timestamp showing normal pre-incident activity is 14:08, marking the onset of the collapse."
+          }
+        ]
+      },
+      {
+        "metric_family": "feature_flag_flagd_impression",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "feature_flag_key": "adHighCpu",
+          "feature_flag_result_variant": "on"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(feature_flag_flagd_impression_total{feature_flag_key=\"adHighCpu\",feature_flag_result_variant=\"on\"}[5m])",
+            "description": "flagd impression counter for adHighCpu with result variant 'on' incremented after the flag was enabled, confirming the CPU load problem pattern was activated.",
+            "onset_utc": "2026-04-20 14:09:00 UTC",
+            "onset_offset_seconds": 53,
+            "onset_reasoning": "The metric is flat at 0 through 14:08 (incident time). At 14:09 it jumps to 0.00416667, which is the first non-zero value and clearly the start of the spike above baseline."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_cpu_utilization_ratio",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "ad"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "container_cpu_utilization_ratio{container_name=\"ad\"}",
+            "description": "Ad container CPU utilization ratio spiked from ~0.16 to ~395 because the adHighCpu flag spawned 4 tight-loop Logarithmizer threads saturating CPU cores inside the ad container",
+            "onset_utc": "2026-04-20 14:09:00 UTC",
+            "onset_offset_seconds": 53,
+            "onset_reasoning": "Pre-incident baseline is ~0.15-0.19. At 14:09 the value jumps to 381.683, a ~2000x increase from baseline, clearly marking the spike onset."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "ad: High CPU-Load problempattern enabled (INFO)",
+        "description": "At 14:08:31.239 UTC, the ad service emitted 26 INFO logs announcing that the High CPU-Load problem pattern had been enabled.",
+        "cause": "Smoking-gun direct evidence of the adHighCpu flag. On every getAds invocation, AdService.java:172 calls ffClient.getBooleanValue(\"adHighCpu\", false, ctx) and passes the result to CPULoad.execute(enabled). When enabled=true, CPULoad.java:48 logs \"High CPU-Load problempattern enabled\" at INFO and, if not already running, spawns 4 daemon Logarithmizer threads (CPULoad.java:50, 64-73) that tight-loop Math.log(System.currentTimeMillis()) to saturate CPU. Note the log is not an error — the ad service continues serving requests successfully, just under CPU pressure.",
+        "source": "ad service (Java, oteldemo.problempattern.CPULoad logger via OpenTelemetry Java agent)",
+        "representative_attributes": {
+          "body": "High CPU-Load problempattern enabled",
+          "severity.text": "INFO",
+          "severity.number": "9",
+          "instrumentationScope.name": "oteldemo.problempattern.CPULoad",
+          "resource.service.name": "ad",
+          "resource.service.namespace": "opentelemetry-demo",
+          "resource.service.version": "2.2.0",
+          "resource.telemetry.sdk.language": "java",
+          "resource.process.runtime.description": "Eclipse Adoptium OpenJDK 64-Bit Server VM 21.0.9+10-LTS"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-20",
+            "_id": "BZo4q50Br_RFnSwRrKld",
+            "@timestamp": "14:08:31.239"
+          }
+        ]
+      }
+    ],
+    "frontend": [],
+    "traces": []
+  }
+}

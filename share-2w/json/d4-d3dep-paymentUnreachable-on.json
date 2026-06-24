@@ -1,0 +1,357 @@
+{
+  "incident_time": "2026-04-22T21:22:52.483960+00:00",
+  "feature_flag": "paymentUnreachable",
+  "description": "A feature flag read in the checkout service's `chargeCard` rebuilt the payment gRPC client against the unresolvable host `badAddress:50051`; the subsequent `paymentService.Charge()` failed DNS lookup and returned gRPC `Unavailable`, `PlaceOrder` returned `codes.Internal`, and the frontend surfaced HTTP 500s on `POST /api/checkout`.",
+  "mechanism": "The flag is read in the checkout service's `chargeCard` function at [`main.go#L546`](../../opentelemetry-demo/src/checkout/main.go#L546). When enabled, it replaces the payment service client with one pointing to `badAddress:50051`, causing a DNS lookup failure. The checkout service creates a new gRPC client to this bad address at [`main.go#L547-549`](../../opentelemetry-demo/src/checkout/main.go#L547-L549), so the subsequent `paymentService.Charge()` call at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552) fails with a gRPC `Unavailable` status.\n\nThe call chain is:\n\n1. **[`main.go#L546`](../../opentelemetry-demo/src/checkout/main.go#L546)** — `chargeCard` checks the `paymentUnreachable` feature flag.\n2. **[`main.go#L547-549`](../../opentelemetry-demo/src/checkout/main.go#L547-L549)** — If enabled, creates a new gRPC client pointing to `badAddress:50051`.\n3. **[`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552)** — `paymentService.Charge()` fails because DNS cannot resolve `badAddress`.\n4. **[`main.go#L333-335`](../../opentelemetry-demo/src/checkout/main.go#L333-L335)** — `PlaceOrder` calls `cs.chargeCard()` and returns `codes.Internal` on failure.\n5. **Frontend** — Surfaces the error as an HTTP 500 when the user clicks \"Place Order\".",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "rpc_client_duration_milliseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "job": "opentelemetry-demo/checkout",
+          "rpc_grpc_status_code": "0",
+          "rpc_method": "Charge"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(rpc_client_duration_milliseconds_count{rpc_grpc_status_code=\"0\",rpc_method=\"Charge\",job=\"opentelemetry-demo/checkout\"}[5m])",
+            "description": "Successful (OK) gRPC Charge calls from checkout to payment dropped to zero because the gRPC client is directed at badAddress:50051 which fails DNS resolution",
+            "onset_utc": "2026-04-22 21:24:00 UTC",
+            "onset_offset_seconds": 67,
+            "onset_reasoning": "Pre-incident, the metric oscillates between ~0.004 and ~0.017 with typical values around 0.008. After the incident at 21:22:52, the value at 21:23 is 0.00417 (still within normal range), then 21:24 shows 0.00417 as the last non-zero reading. From 21:25 onward the signal drops to zero and never recovers. The onset is 21:24 — the last timestamp showing pre-incident activity before the collapse."
+          }
+        ]
+      },
+      {
+        "metric_family": "rpc_client_duration_milliseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "job": "opentelemetry-demo/checkout",
+          "rpc_grpc_status_code": "14",
+          "rpc_method": "Charge"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(rpc_client_duration_milliseconds_count{rpc_grpc_status_code=\"14\",rpc_method=\"Charge\",job=\"opentelemetry-demo/checkout\"}[5m])",
+            "description": "New gRPC UNAVAILABLE (code 14) errors appeared on checkout's client calls to PaymentService/Charge — the gRPC dial to badAddress:50051 fails with DNS resolution error",
+            "onset_utc": "2026-04-22 21:24:00 UTC",
+            "onset_offset_seconds": 67,
+            "onset_reasoning": "The metric is flat at 0 from 21:02 through 21:23 (including the incident marker). At 21:24 it jumps to 0.00417, the first non-zero value, and continues rising steadily thereafter. This is the clear onset of the spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "kafka_consumer_bytes_consumed_rate",
+        "signal_layer": "propagation",
+        "defining_labels": {},
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "kafka_consumer_bytes_consumed_rate",
+            "description": "Kafka consumer byte consumption rate dropped to zero because no order records are being produced to the orders topic, leaving the fraud-detection consumer with nothing to consume",
+            "onset_utc": "2026-04-22 21:21:00 UTC",
+            "onset_offset_seconds": -112,
+            "onset_reasoning": "Pre-incident pattern shows periodic non-zero values every 1-3 minutes (9.25, 9.54, 5.48, 8.7, 4.08, 4.35, 4.51, 4.27, 4.95). The last non-zero value is at 21:21 (4.9464). From 21:22 onward the signal is permanently zero, aligning with the incident at 21:22:52. This is the last active timestamp before the collapse."
+          }
+        ]
+      },
+      {
+        "metric_family": "app_confirmation_counter",
+        "signal_layer": "symptom",
+        "defining_labels": {},
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(app_confirmation_counter_total[5m])",
+            "description": "Checkout order confirmation rate dropped to zero because every checkout fails at the payment step, so no order confirmation emails are sent",
+            "onset_utc": "2026-04-22 21:24:00 UTC",
+            "onset_offset_seconds": 67,
+            "onset_reasoning": "The metric shows low but non-zero activity (oscillating around 0.004-0.017) before the incident. At 21:24 the value is 0.00416642, and from 21:25 onward it drops to zero permanently. The last non-trivial value is at 21:24, marking the final moment the pre-incident pattern is still active before the signal collapses."
+          }
+        ]
+      },
+      {
+        "metric_family": "otlp_exporter_exported",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "service_name": "fraud-detection",
+          "type": "log"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(otlp_exporter_exported_total{service_name=\"fraud-detection\", type=\"log\"}[5m])",
+            "description": "OTLP exporter record counter for logs exported by the fraud-detection service. Collapsed to zero because fraud-detection produces no order-processing logs when no orders arrive via Kafka.",
+            "onset_utc": "2026-04-22 21:24:00 UTC",
+            "onset_offset_seconds": 67,
+            "onset_reasoning": "The metric shows low-level periodic activity (oscillating roughly 0.004–0.017) before the incident. At 21:24 the value is 0.00416667, and from 21:25 onward it drops to 0 permanently. So 21:24 is the last timestamp with non-zero activity before the signal collapses, aligning closely with the incident time of 21:22:52."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "POST /api/checkout → 500",
+        "description": "Between 21:22:56 and 21:32:45 UTC, 21 POST /api/checkout requests returned HTTP 500 with a 21-byte error response body. The DNS lookup for badAddress fails on the checkout service, so the payment service is never contacted.",
+        "cause": "Direct effect of paymentUnreachable flag — checkout service's chargeCard redirects payment gRPC calls to badAddress:50051 instead of the real payment service (src/checkout/main.go:546-549), causing a DNS lookup failure. The checkout service wraps this as \"could not charge the card\" (main.go:555-556) and returns gRPC Internal (main.go:334-335), which the frontend proxies as HTTP 500.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "[2026-04-22T21:22:56.660Z] \"POST /api/checkout HTTP/1.1\" 500 - via_upstream - \"-\" 372 21 37 36 \"-\" \"python-requests/2.32.5\" \"39765a6c-ead4-9254-b089-6d267091fe68\" \"frontend-proxy:8080\" \"172.18.0.27:8080\" frontend 172.18.0.29:60672 172.18.0.29:8080 172.18.0.28:42900 - -",
+          "severity": "",
+          "event.name": "proxy.access",
+          "url.path": "/api/checkout",
+          "url.full": "http://frontend-proxy:8080/api/checkout",
+          "upstream.cluster": "frontend",
+          "upstream.host": "172.18.0.27:8080",
+          "user_agent.original": "python-requests/2.32.5",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "zMYTt50Br_RFnSwRIFmm",
+            "@timestamp": "21:22:56.660"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "q8YTt50Br_RFnSwRuVsu",
+            "@timestamp": "21:23:36.192"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "OsYTt50Br_RFnSwR2Fxc",
+            "@timestamp": "21:23:43.528"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "HsYUt50Br_RFnSwRt18x",
+            "@timestamp": "21:24:40.599"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "JMYVt50Br_RFnSwRU2G7",
+            "@timestamp": "21:25:21.132"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "b8YVt50Br_RFnSwRW2GB",
+            "@timestamp": "21:25:23.001"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "5cYVt50Br_RFnSwR6GM2",
+            "@timestamp": "21:25:59.000"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "bMYWt50Br_RFnSwROmVG",
+            "@timestamp": "21:26:19.473"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "58YWt50Br_RFnSwRv2Yb",
+            "@timestamp": "21:26:53.885"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "HsYWt50Br_RFnSwRxmfp",
+            "@timestamp": "21:26:55.839"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "mMYWt50Br_RFnSwR1meH",
+            "@timestamp": "21:26:59.477"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "NMYXt50Br_RFnSwRfmmP",
+            "@timestamp": "21:27:43.350"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "FMYXt50Br_RFnSwRoWqt",
+            "@timestamp": "21:27:51.861"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "f8YXt50Br_RFnSwR92um",
+            "@timestamp": "21:28:13.953"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "kcYZt50Br_RFnSwRmW_c",
+            "@timestamp": "21:30:01.382"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "w8Yat50Br_RFnSwRA3BZ",
+            "@timestamp": "21:30:28.410"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "ScYat50Br_RFnSwRHnG2",
+            "@timestamp": "21:30:35.254"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "ksYat50Br_RFnSwRwnPN",
+            "@timestamp": "21:31:17.237"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "ocYbt50Br_RFnSwRW3Us",
+            "@timestamp": "21:31:55.636"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "isYct50Br_RFnSwRCnj5",
+            "@timestamp": "21:32:40.871"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "w8Yct50Br_RFnSwRGniZ",
+            "@timestamp": "21:32:45.287"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "Clicking \"Place Order\" on the cart page returns an error — the user remains on the cart page and never reaches the order confirmation. Unlike cartFailure (which hangs for ~15 seconds), the failure is fast (~50 ms) because the DNS lookup for badAddress fails immediately. No payment is charged, no items are shipped, and the cart is not emptied.",
+        "route": "POST /api/checkout",
+        "deterministic": true,
+        "trigger_condition": "User clicks \"Place Order\" on the cart page while paymentUnreachable is enabled.",
+        "source_file": "src/checkout/main.go",
+        "source_line": 333,
+        "calling_service": "checkout",
+        "call_pattern": "Sequential call within PlaceOrder: [`main.go#L333`](../../opentelemetry-demo/src/checkout/main.go#L333) calls `cs.chargeCard(ctx, total, req.CreditCard)`, which internally creates a gRPC client to `badAddress:50051` at [`main.go#L547-549`](../../opentelemetry-demo/src/checkout/main.go#L547-L549) and calls `paymentService.Charge()` at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552). The charge fails before shipping or cart cleanup.",
+        "cause": "The frontend API route [`checkout.ts#L18`](../../opentelemetry-demo/src/frontend/pages/api/checkout.ts#L18) calls `CheckoutGateway.placeOrder`, which invokes the checkout service's `PlaceOrder` gRPC. `PlaceOrder` calls `cs.chargeCard` at [`main.go#L333`](../../opentelemetry-demo/src/checkout/main.go#L333). With paymentUnreachable enabled, `chargeCard` ([`main.go#L546`](../../opentelemetry-demo/src/checkout/main.go#L546)) creates a new gRPC client pointing to `badAddress:50051` and calls `paymentService.Charge()` at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552). DNS cannot resolve `badAddress`, returning gRPC `Unavailable`. `chargeCard` wraps this as `\"could not charge the card\"` ([`main.go#L556`](../../opentelemetry-demo/src/checkout/main.go#L556)), and `PlaceOrder` returns `codes.Internal` (`\"failed to charge card\"`) at [`main.go#L335`](../../opentelemetry-demo/src/checkout/main.go#L335). The frontend surfaces the gRPC error as HTTP 500. In `CartDetail.tsx`, the `await placeOrder(...)` at [`CartDetail.tsx#L38`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L38) rejects, so `push` to the confirmation page at [`CartDetail.tsx#L57`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L57) never executes.",
+        "symptom_type": "http_5xx"
+      }
+    ],
+    "traces": [
+      {
+        "name": "Checkout Payment Unreachable Cascade",
+        "description": "Between 21:22:56 and 21:32:45 UTC, 21 traces show checkout failing to reach the payment service due to DNS resolution failure at badAddress:50051, cascading through the checkout path as HTTP 500.",
+        "cause": "Direct effect of paymentUnreachable flag — checkout service's chargeCard creates a gRPC client pointing at badAddress:50051 instead of the real payment service (src/checkout/main.go:546-549). DNS lookup fails with 'server misbehaving', returning gRPC Unavailable. The payment service never receives the request.",
+        "call_chain": "checkout:oteldemo.PaymentService/Charge → checkout:oteldemo.CheckoutService/PlaceOrder → frontend:oteldemo.CheckoutService/PlaceOrder → frontend:executing api route (pages) /api/checkout → frontend:POST /api/checkout → frontend:POST /api/checkout → frontend-proxy:router frontend egress → frontend-proxy:POST → load-generator:POST",
+        "smoking_gun": [
+          "checkout:PlaceOrder span log: feature_flag.key=paymentUnreachable, feature_flag.result.variant=on",
+          "checkout:PaymentService/Charge span: otel.status_code=ERROR, otel.status_description=\"dns: A record lookup error: lookup badAddress on 127.0.0.11:53: server misbehaving\", rpc.grpc.status_code=Unavailable",
+          "payment service absent from trace processes — request never reaches the payment service"
+        ],
+        "trace_documents": [
+          {
+            "traceID": "ef1830bae2b06545f2a0ce5082b28603",
+            "@timestamp": "21:22:56",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "9ba2397f2ded4d7ece094390cdab35e5",
+            "@timestamp": "21:23:36",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "2f408f49c74e7eea3612ef826f10f421",
+            "@timestamp": "21:23:43",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "096d4942de145bb342e6959b152b52e0",
+            "@timestamp": "21:24:40",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "a8a4d188026cbf1bf78b0dabde9662e2",
+            "@timestamp": "21:25:21",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "f14a727ca1de784762fdc8d49a788989",
+            "@timestamp": "21:25:22",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "7f40ec3e191d9be6b09396b5194f21de",
+            "@timestamp": "21:25:58",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "6e725c6b333de8026b05a16bf7f4a619",
+            "@timestamp": "21:26:19",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "8f64663d763e5607f2943043aadcd53d",
+            "@timestamp": "21:26:53",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "d6fe178e3ac626e359d37e4a18bf4f71",
+            "@timestamp": "21:26:55",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "0a0f9239ebb6afdd0015c315c816b4a1",
+            "@timestamp": "21:26:59",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "4e3bb300c7f158ff428414804727359e",
+            "@timestamp": "21:27:43",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "cca1ebb62eca649ce47b9c0d64b186d1",
+            "@timestamp": "21:27:51",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "accdadceaf5af68cf0be327155f9f2ac",
+            "@timestamp": "21:28:13",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "6a7beb8972f9e43fffb874210034c9d3",
+            "@timestamp": "21:30:01",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "9039f2ae7a68223da4113f72eb81dc83",
+            "@timestamp": "21:30:28",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "5dcb2636f02200ebe76974ae944c1965",
+            "@timestamp": "21:30:35",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "5ef605bd79cfb4907d80db49d4e57701",
+            "@timestamp": "21:31:17",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "e05f457e54ebfb886701005b1c90734a",
+            "@timestamp": "21:31:55",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "3b0f522f893442746d64bfab844df9c7",
+            "@timestamp": "21:32:40",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "fee034208640c0d39ee49e002446fa52",
+            "@timestamp": "21:32:45",
+            "user_action": "user_checkout_single"
+          }
+        ]
+      }
+    ]
+  }
+}

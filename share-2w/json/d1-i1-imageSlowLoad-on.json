@@ -1,0 +1,24 @@
+{
+  "incident_time": "2026-04-19T14:01:51.404464+00:00",
+  "feature_flag": "imageSlowLoad",
+  "description": "A feature flag in the frontend `ProductCard` React component added an `x-envoy-fault-delay-request` header (plus `Cache-Control: no-cache`) to every product-image fetch; Envoy honored the fault-injection header and artificially delayed each `GET /images/products/<picture>` response, so product thumbnails took seconds to render.",
+  "mechanism": "The flag is read in [`ProductCard.tsx#L32`](../../opentelemetry-demo/src/frontend/components/ProductCard/ProductCard.tsx#L32): the `ProductCard` React component calls `useNumberFlagValue('imageSlowLoad', 0)` to get the delay value in milliseconds (variants: `0` for off, `5000` for 5 sec, `10000` for 10 sec). When non-zero, the component sets the `x-envoy-fault-delay-request` header to the flag value on every product image fetch ([`ProductCard.tsx#L37`](../../opentelemetry-demo/src/frontend/components/ProductCard/ProductCard.tsx#L37)).\n\nThe image request is sent to `/images/products/<picture>`, which the frontend-proxy Envoy routes to the `image-provider` cluster ([`envoy.tmpl.yaml#L54-L55`](../../opentelemetry-demo/src/frontend-proxy/envoy.tmpl.yaml#L54)). Envoy's `envoy.filters.http.fault` filter is configured with `header_delay: {}` and 100% percentage ([`envoy.tmpl.yaml#L67-L74`](../../opentelemetry-demo/src/frontend-proxy/envoy.tmpl.yaml#L67)), meaning it honors the `x-envoy-fault-delay-request` header and injects the specified delay (in ms) before forwarding the request. Every product card image load is therefore delayed by the flag value (e.g. 5 or 10 seconds), causing the page to render with blank/loading images until the delayed responses arrive.",
+  "symptoms": {
+    "metrics": [],
+    "logs": [],
+    "frontend": [
+      {
+        "description": "Product card thumbnails on the homepage product grid (and the recommendations carousel on product/cart/checkout pages) render with a blank image placeholder for ~5 seconds before the actual thumbnail appears. The page text and layout render immediately; only the images are delayed. Affects every product card on every page load while the flag is on — the failure is silent slowness, not a visible error.",
+        "route": "GET /images/products/<picture>",
+        "deterministic": true,
+        "trigger_condition": "Every page load that renders a `ProductCard` component — homepage product grid (`/`), recommendations carousel on product detail (`/product/<id>`), cart, and checkout pages.",
+        "source_file": "src/frontend/components/ProductCard/ProductCard.tsx",
+        "source_line": 37,
+        "calling_service": "frontend",
+        "call_pattern": "ProductCard.useEffect ([`ProductCard.tsx#L34`](../../opentelemetry-demo/src/frontend/components/ProductCard/ProductCard.tsx#L34)) → fetch(`/images/products/<picture>`) with header `x-envoy-fault-delay-request: 5000` ([`ProductCard.tsx#L37`](../../opentelemetry-demo/src/frontend/components/ProductCard/ProductCard.tsx#L37)) → frontend-proxy Envoy → image-provider.",
+        "cause": "`useNumberFlagValue('imageSlowLoad', 0)` returns 5000 (the `5sec` variant value, [`demo.flagd.json` `imageSlowLoad.variants.5sec`](../../opentelemetry-demo/src/flagd/demo.flagd.json)). ProductCard sets `x-envoy-fault-delay-request: 5000` on every image fetch ([`ProductCard.tsx#L37`](../../opentelemetry-demo/src/frontend/components/ProductCard/ProductCard.tsx#L37)). The frontend-proxy `envoy.filters.http.fault` filter ([`envoy.tmpl.yaml#L67`](../../opentelemetry-demo/src/frontend-proxy/envoy.tmpl.yaml#L67)) honors this header and delays each image response by 5000ms before forwarding to image-provider, so each `<S.Image>` only resolves after that delay."
+      }
+    ],
+    "traces": []
+  }
+}

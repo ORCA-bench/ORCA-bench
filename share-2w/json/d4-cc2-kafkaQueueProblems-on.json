@@ -1,0 +1,218 @@
+{
+  "incident_time": "2026-04-22T15:21:17.018871+00:00",
+  "feature_flag": "kafkaQueueProblems",
+  "description": "A feature flag returning an integer `N>0` made the checkout service's `sendToKafka` fan every `OrderResult` out into `1 + N` identical copies on the `orders` Kafka topic (all sharing the same `order_id`); the accounting service's `Consumer.cs` inserted each copy into `accounting.order` whose primary key is `order_id`, so every duplicate beyond the first raised Postgres SQLSTATE `23505` `duplicate key value violates unique constraint \"order_pkey\"` (logged as EF Core errors in the accounting service), and the fraud-detection consumer slept an additional 1 second per message.",
+  "mechanism": "The `kafkaQueueProblems` feature flag is read by the **checkout** service inside `sendToKafka` ([`src/checkout/main.go:683-693`](../../opentelemetry-demo/src/checkout/main.go#L683-L693)). When `getIntFeatureFlag(ctx, \"kafkaQueueProblems\")` returns an integer `N > 0`, checkout logs `\"FeatureFlag 'kafkaQueueProblems' is activated, overloading queue now.\"` and then spawns `N` goroutines that each re-publish the same `OrderResult` to the `orders` Kafka topic, producing `1 + N` copies of every placed order with the same `order_id`. In parallel, the **fraud-detection** consumer reads the same flag inside its poll loop ([`fraud-detection/src/main/kotlin/frauddetection/main.kt:60-62`](../../opentelemetry-demo/src/fraud-detection/src/main/kotlin/frauddetection/main.kt#L60-L62)) and calls `Thread.sleep(1000)` for every record it polls, capping its consumer throughput at ~1 record/s and amplifying lag on the `orders` topic.\n\nThe downstream consumer of interest is the **accounting** service ([`src/accounting/Consumer.cs`](../../opentelemetry-demo/src/accounting/Consumer.cs)). `StartListening` ([`Consumer.cs:55-83`](../../opentelemetry-demo/src/accounting/Consumer.cs#L55-L83)) runs a synchronous loop that, for each Kafka record, opens an `order-consumed` activity (line 65) and calls `ProcessMessage` ([`Consumer.cs:86-138`](../../opentelemetry-demo/src/accounting/Consumer.cs#L86-L138)). `ProcessMessage` constructs an `OrderEntity` with `Id = order.OrderId` (lines 99-102) and calls `dbContext.Add(orderEntity)` (line 103). Because `OrderEntity` declares `[PrimaryKey(nameof(Id))]` with `[Column(\"order_id\")]` ([`Entities.cs:52-58`](../../opentelemetry-demo/src/accounting/Entities.cs#L52-L58)), EF Core's in-memory change tracker maintains a per-`DBContext` identity map keyed by `Id`. The first copy of any duplicated order succeeds; every subsequent copy hits `Microsoft.EntityFrameworkCore.ChangeTracking.Internal.IdentityMap<TKey>.ThrowIdentityConflict` and raises `System.InvalidOperationException: The instance of entity type 'OrderEntity' cannot be tracked because another instance with the same key value for {'Id'} is already being tracked.`. The exception is caught by `ProcessMessage`'s try/catch ([`Consumer.cs:135-138`](../../opentelemetry-demo/src/accounting/Consumer.cs#L135-L138)) and logged as the Error-severity record `\"Order parsing failed:\"`. Because the conflict is detected at EF Core's change-tracking layer before the batched INSERT is built, no SQL ever reaches Postgres — so no SQLSTATE `23505` `order_pkey` violation, no `accounting:otel` DB span ERROR, and no row insert succeeds for the duplicated `order_id`.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "container_network_io_usage_rx_bytes",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "fraud-detection"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_network_io_usage_rx_bytes_total{container_name=\"fraud-detection\"}[5m])",
+            "description": "Fraud-detection container network receive rate spiked in bursts (from ~400 to peaks of ~4000 bytes/s) as it consumed duplicate order messages from the Kafka orders topic in irregular bursts due to the 1-second sleep per record.",
+            "onset_utc": "2026-04-22 15:22:00 UTC",
+            "onset_offset_seconds": 42,
+            "onset_reasoning": "Pre-incident baseline is approximately 397-415 bytes/sec. At 15:22 UTC (first reading after incident time 15:21:17), the value jumps to 494.862, roughly 80+ above the baseline ceiling, marking the clear start of the spike that continues escalating to 1600+."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_network_io_usage_tx_bytes",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "fraud-detection"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_network_io_usage_tx_bytes_total{container_name=\"fraud-detection\"}[5m])",
+            "description": "Fraud-detection container network transmit rate tripled (from ~1000 to ~3000 bytes/s) because the fraud-detection consumer's Thread.sleep(1000) per record slowed consumption, causing accumulated telemetry to be sent in larger batches.",
+            "onset_utc": "2026-04-22 15:22:00 UTC",
+            "onset_offset_seconds": 42,
+            "onset_reasoning": "Pre-incident baseline hovers around 960-1050 bytes/s. At 15:22, the value jumps to ~1149, clearly breaking above the baseline range, and then rapidly climbs to ~3000 over the next several minutes. This is the first timestamp after the incident where the spike begins."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_network_io_usage_rx_bytes",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "container_name": "accounting"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_network_io_usage_rx_bytes_total{container_name=\"accounting\"}[5m])",
+            "description": "Accounting container network receive rate doubled (from ~480 to ~1100+ bytes/s) because the accounting consumer received duplicate order messages on the Kafka orders topic, produced by checkout's overload goroutines.",
+            "onset_utc": "2026-04-22 15:22:00 UTC",
+            "onset_offset_seconds": 42,
+            "onset_reasoning": "Pre-incident baseline is roughly 475-498. At 15:22, one minute after the incident marker, the value jumps to ~583, a clear departure (~19% above the highest baseline value). It continues rising sharply to ~800+ and then ~1200+ in subsequent minutes, confirming the spike onset at 15:22."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_network_io_usage_rx_bytes",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "container_name": "opensearch"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_network_io_usage_rx_bytes_total{container_name=\"opensearch\"}[5m])",
+            "description": "OpenSearch container network receive rate doubled (from ~10K to ~22K bytes/s) because it ingested the surge of error logs from accounting (InvalidOperationException) and info logs from fraud-detection (sleep messages) forwarded by the OTel collector.",
+            "onset_utc": "2026-04-22 15:22:00 UTC",
+            "onset_offset_seconds": 42,
+            "onset_reasoning": "Pre-incident baseline fluctuates around 9,500–10,500. At 15:22, the value jumps to 12,149.8, clearly breaking above the baseline range, and continues climbing rapidly to ~25,000+ in subsequent minutes. This is the first post-incident timestamp with a significant departure from baseline."
+          }
+        ]
+      },
+      {
+        "metric_family": "kafka_consumer_commit_rate",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "service_name": "fraud-detection"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "kafka_consumer_commit_rate{service_name=\"fraud-detection\"}",
+            "description": "Offset commit rate for fraud-detection consumer. Collapsed from ~0.21 commits/s to near 0 because the consumer rarely completes a poll cycle (blocked by per-record sleeps), so it almost never commits offsets.",
+            "onset_utc": "2026-04-22 15:22:00 UTC",
+            "onset_offset_seconds": 42,
+            "onset_reasoning": "The metric holds steady around 0.2088-0.2089 through 15:22. At 15:23 it drops sharply to 0.0696, then to 0.0315 at 15:24, and reaches zero at 15:25 where it remains. The last timestamp showing the pre-incident active level is 15:22, making it the onset of the collapse."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "checkout — \"FeatureFlag 'kafkaQueueProblems' is activated, overloading queue now.\" (INFO)",
+        "description": "Between 15:21:30.864 and 15:30:56.139 UTC, the checkout service logged this INFO message 12 times — once per PlaceOrder invocation after the flag was enabled. This is direct textual confirmation that the kafkaQueueProblems flag is on.",
+        "cause": "Direct effect of kafkaQueueProblems. When `getIntFeatureFlag(ctx, \"kafkaQueueProblems\") > 0`, checkout enters the overload branch at `checkout/main.go:683-693` and emits this warning before spawning ffValue goroutines that each re-publish the same order message to the Kafka `orders` topic.",
+        "source": "checkout service application logs (instrumentationScope.name=checkout)",
+        "representative_attributes": {
+          "body": "Warning: FeatureFlag 'kafkaQueueProblems' is activated, overloading queue now.",
+          "severity.text": "INFO",
+          "resource.service.name": "checkout",
+          "instrumentationScope.name": "checkout"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "eMDItZ0Br_RFnSwRO-Gu",
+            "@timestamp": "15:21:30.864"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "O8DLtZ0Br_RFnSwRLfiU",
+            "@timestamp": "15:24:44.256"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "4cHQtZ0Br_RFnSwR2hS4",
+            "@timestamp": "15:30:56.139"
+          }
+        ]
+      },
+      {
+        "name": "fraud-detection — \"FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second\" (INFO)",
+        "description": "Between 15:21:30.856 and 15:31:17.170 UTC, the fraud-detection service logged this INFO message 587 times — once per Kafka record polled from the `orders` topic. This is direct textual confirmation that the kafkaQueueProblems flag is on and is the primary driver of fraud-detection consumer lag.",
+        "cause": "Direct effect of kafkaQueueProblems. When `getFeatureFlagValue(\"kafkaQueueProblems\") > 0`, the fraud-detection consumer loop at `fraud-detection/src/main/kotlin/frauddetection/main.kt:60-62` logs this line and calls `Thread.sleep(1000)` for every polled record, capping consumer throughput at ~1 record/s regardless of producer volume.",
+        "source": "fraud-detection service application logs (instrumentationScope.name=fraud-detection)",
+        "representative_attributes": {
+          "body": "FeatureFlag 'kafkaQueueProblems' is enabled, sleeping 1 second",
+          "severity.text": "INFO",
+          "resource.service.name": "fraud-detection",
+          "instrumentationScope.name": "fraud-detection"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "c8DItZ0Br_RFnSwROuFv",
+            "@timestamp": "15:21:30.856"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "gMDMtZ0Br_RFnSwRsf94",
+            "@timestamp": "15:26:24.013"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "RMHRtZ0Br_RFnSwRLBhB",
+            "@timestamp": "15:31:17.170"
+          }
+        ]
+      },
+      {
+        "name": "accounting — \"Order parsing failed:\" InvalidOperationException EF Core duplicate-Id (ERROR)",
+        "description": "Between 15:21:30.881 and 15:30:56.168 UTC, the accounting service logged 1200 Error-severity `Order parsing failed:` entries. Each entry carries `exception.type=InvalidOperationException` whose message is `The instance of entity type 'OrderEntity' cannot be tracked because another instance with the same key value for {'Id'} is already being tracked.` and whose stacktrace ends at `Accounting.Consumer.ProcessMessage(...) in /src/Accounting/Consumer.cs:line 102` (the `dbContext.Add(orderEntity)` call). This is the dominant application-level Error-severity signal in the capture.",
+        "cause": "Cascading effect of kafkaQueueProblems via checkout. Checkout's overload loop (`checkout/main.go:683-693`) re-publishes the same `OrderResult` message to the `orders` topic ffValue extra times, producing duplicate copies with the same `order_id`. The accounting consumer (`Accounting.Consumer.ProcessMessage` at `accounting/Consumer.cs:103`) calls `dbContext.Add(orderEntity)` for each copy with `Id = order.OrderId`. EF Core's in-memory change tracker (`IdentityMap.ThrowIdentityConflict`) detects the duplicate primary key and throws `InvalidOperationException` before any SQL ever reaches Postgres — so no Postgres `23505` / `order_pkey` violation is observable in this capture.",
+        "source": "accounting service application logs (instrumentationScope.name=Accounting.Consumer)",
+        "representative_attributes": {
+          "body": "Order parsing failed:",
+          "severity.text": "Error",
+          "resource.service.name": "accounting",
+          "instrumentationScope.name": "Accounting.Consumer",
+          "exception.type": "InvalidOperationException",
+          "exception.message": "The instance of entity type 'OrderEntity' cannot be tracked because another instance with the same key value for {'Id'} is already being tracked. When attaching existing entities, ensure that only one entity instance with a given key value is attached. Consider using 'DbContextOptionsBuilder.EnableSensitiveDataLogging' to see the conflicting key values.",
+          "exception.stacktrace": "System.InvalidOperationException: The instance of entity type 'OrderEntity' cannot be tracked because another instance with the same key value for {'Id'} is already being tracked. ... at Microsoft.EntityFrameworkCore.ChangeTracking.Internal.IdentityMap`1.ThrowIdentityConflict(InternalEntityEntry entry) ... at Microsoft.EntityFrameworkCore.DbContext.Add[TEntity](TEntity entity) at Accounting.Consumer.ProcessMessage(Message`2 message) in /src/Accounting/Consumer.cs:line 102"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "fcDItZ0Br_RFnSwRO-Hz",
+            "@timestamp": "15:21:30.881"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "OsDLtZ0Br_RFnSwRN_m-",
+            "@timestamp": "15:24:44.260"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "hcHQtZ0Br_RFnSwR3RZl",
+            "@timestamp": "15:30:56.168"
+          }
+        ]
+      },
+      {
+        "name": "kafka broker — GroupCoordinator consumer-group rebalance for `accounting` (INFO)",
+        "description": "Between 15:23:27.687 and 15:24:07.949 UTC, the Kafka broker's GroupCoordinator logged 5 rebalance-related INFO events for the `accounting` consumer group: a new dynamic member joining, the group entering PreparingRebalance, the previous member being removed after failing its session heartbeat, the group stabilizing on a new generation, and the assignment being received from the new leader. These events occur a few minutes after the flag was toggled on, once the accounting consumer's exception-storm loop has stalled long enough to miss heartbeats.",
+        "cause": "Downstream effect of kafkaQueueProblems. The accounting consumer's `ProcessMessage` (`accounting/Consumer.cs:86-138`) runs synchronously inside the consume loop and throws an EF Core `InvalidOperationException` on every duplicate order message produced by checkout's overload loop. The cumulative slowdown — combined with fraud-detection's 1-second-per-record sleep on the same `orders` topic — causes accounting's librdkafka client to miss session heartbeats, so the broker removes the member and triggers a rebalance of `group accounting` (group id set on `accounting/Consumer.cs:145`).",
+        "source": "kafka broker logs (instrumentationScope.name=kafka.coordinator.group.GroupCoordinator)",
+        "representative_attributes": {
+          "body": "[GroupCoordinator 1]: Preparing to rebalance group accounting in state PreparingRebalance with old generation 2 (__consumer_offsets-43) (reason: Adding new member rdkafka-bc14a332-0eab-496a-a7a6-209b3f01def3 with group instance id None; client reason: not provided)",
+          "severity.text": "INFO",
+          "resource.service.name": "kafka",
+          "instrumentationScope.name": "kafka.coordinator.group.GroupCoordinator"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "-8DKtZ0Br_RFnSwRA-5Y",
+            "@timestamp": "15:23:27.687"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "NsDKtZ0Br_RFnSwRn_G3",
+            "@timestamp": "15:24:07.944"
+          },
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "OMDKtZ0Br_RFnSwRn_G3",
+            "@timestamp": "15:24:07.949"
+          }
+        ]
+      }
+    ],
+    "frontend": [],
+    "traces": []
+  }
+}

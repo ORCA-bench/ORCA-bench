@@ -1,0 +1,124 @@
+{
+  "incident_time": "2026-04-22T14:21:00.987886+00:00",
+  "feature_flag": "adHighCpu",
+  "description": "A feature flag read inside the ad service's `GetAds` handler activated a singleton `CPULoad` that spawned 4 daemon threads each running a tight `Math.log(System.currentTimeMillis())` loop; the threads pinned CPU cores and saturated container CPU and `jvm_cpu_recent_utilization_ratio` on the `ad` service.",
+  "mechanism": "The flag is read in [`AdService.java#L172`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L172): on every `getAds` gRPC call, `CPULoad.getInstance().execute()` is invoked with the boolean value of the `adHighCpu` flag. When the flag is `true`, [`CPULoad.java#L46-L52`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/CPULoad.java#L46) calls `spawnLoadWorkers(4)`, which launches 4 daemon threads ([`CPULoad.java#L64-L74`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/CPULoad.java#L64)). Each thread runs a tight `while(shouldRun) { Math.log(System.currentTimeMillis()); }` loop ([`CPULoad.java#L101-L103`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/CPULoad.java#L101)), saturating CPU cores with continuous logarithm calculations. The threads persist until the flag is toggled off, at which point `stopWorkers()` sets `shouldRun=false` on each thread. Because the workers are spawned only once (guarded by the `running` flag at line 49), repeated `getAds` calls while the flag is on do not create additional threads.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "container_cpu_usage_nanoseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "ad"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_cpu_usage_nanoseconds_total{container_name=\"ad\"}[5m])",
+            "description": "Ad container total CPU usage rate spiked from ~0.002 to ~3.9 CPU cores, reflecting the 4 CPU-bound worker threads consuming nearly 4 full cores",
+            "onset_utc": "2026-04-22 14:22:00 UTC",
+            "onset_offset_seconds": 59,
+            "onset_reasoning": "Pre-incident baseline is ~2e6. At 14:22, one minute after the incident marker, the value jumps to ~3.37e8 — roughly 170x the baseline — clearly marking the onset of the CPU spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_cpu_usage_usermode_nanoseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "ad"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_cpu_usage_usermode_nanoseconds_total{container_name=\"ad\"}[5m])",
+            "description": "Ad container user-mode CPU usage rate spiked from ~0.001 to ~3.9 CPU cores, confirming the CPU saturation is entirely user-space computation (Math.log tight loops)",
+            "onset_utc": "2026-04-22 14:22:00 UTC",
+            "onset_offset_seconds": 59,
+            "onset_reasoning": "Pre-incident baseline is ~1.2e6–1.5e6. At 14:22, one minute after the incident marker, the value jumps to ~3.36e8 — a ~200x increase — clearly the first timestamp of the spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "system_cpu_utilization_ratio",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "state": "idle"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "system_cpu_utilization_ratio{state=\"idle\"}",
+            "description": "Host-level idle CPU ratio collapsed from ~96% to ~44%, as the 4 Logarithmizer threads from the ad service consumed the majority of available CPU capacity",
+            "onset_utc": "2026-04-22 14:22:00 UTC",
+            "onset_offset_seconds": 59,
+            "onset_reasoning": "Pre-incident values oscillate around 0.96. At 14:22 the value is 0.962 (still in the normal range), but at 14:23 it drops sharply to 0.619 and continues collapsing to near-zero. The last timestamp with a normal pre-incident value is 14:22, making it the onset — the last point before the idle CPU ratio collapses, indicating a sudden spike in CPU utilization."
+          }
+        ]
+      },
+      {
+        "metric_family": "traces_span_metrics_duration_milliseconds",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "service_name": "frontend"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "sum(rate(traces_span_metrics_duration_milliseconds_sum{service_name=\"frontend\"}[5m]))",
+            "description": "Total span duration (ms/s) for the frontend service. The frontend calls the CPU-saturated ad service on product pages, so its spans inherit the ad service's multi-second latency, increasing aggregate duration ~10x.",
+            "onset_utc": "2026-04-22 14:31:00 UTC",
+            "onset_offset_seconds": 599,
+            "onset_reasoning": "Pre-incident baseline is roughly 17-27 (mean ~21-22). There's a minor bump around 14:16-14:20 that subsides back to baseline by 14:28-14:30. The sustained spike begins at 14:31 (28.1) and climbs sharply to 50+ by 14:35, never returning to baseline. This is the clear onset of the persistent spike following the incident."
+          }
+        ]
+      },
+      {
+        "metric_family": "feature_flag_flagd_impression",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "feature_flag_key": "adHighCpu",
+          "feature_flag_result_variant": "on"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(feature_flag_flagd_impression_total{feature_flag_key=\"adHighCpu\",feature_flag_result_variant=\"on\"}[5m])",
+            "description": "The flagd impression counter for the adHighCpu flag with variant=on increased from 3 to 5 after the flag was toggled on, recording new evaluations of the flag returning true.",
+            "onset_utc": "2026-04-22 14:22:00 UTC",
+            "onset_offset_seconds": 59,
+            "onset_reasoning": "The metric baseline is 0 throughout the pre-incident period. At 14:22 UTC (one minute after the incident time), the value spikes to 0.00416667, which is the first non-zero value and clearly marks the onset of the feature flag being toggled on."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "ad: High CPU-Load problempattern enabled (INFO)",
+        "description": "At 14:21:26.532 UTC, the ad service emitted 25 INFO logs announcing that the High CPU-Load problem pattern had been enabled.",
+        "cause": "Smoking-gun direct evidence of the adHighCpu flag. On every getAds invocation, AdService.java:172 calls ffClient.getBooleanValue(\"adHighCpu\", false, ctx) and passes the result to CPULoad.execute(enabled). When enabled=true, CPULoad.java:48 logs \"High CPU-Load problempattern enabled\" at INFO and, if not already running, spawns 4 daemon Logarithmizer threads (CPULoad.java:50, 64-73) that tight-loop Math.log(System.currentTimeMillis()) to saturate CPU. Note the log is not an error — the ad service continues serving requests successfully, just under CPU pressure.",
+        "source": "ad service (Java, oteldemo.problempattern.CPULoad logger via OpenTelemetry Java agent)",
+        "representative_attributes": {
+          "body": "High CPU-Load problempattern enabled",
+          "severity.text": "INFO",
+          "severity.number": "9",
+          "instrumentationScope.name": "oteldemo.problempattern.CPULoad",
+          "resource.service.name": "ad",
+          "resource.service.namespace": "opentelemetry-demo",
+          "resource.service.version": "2.2.0",
+          "resource.telemetry.sdk.language": "java",
+          "resource.process.runtime.description": "Eclipse Adoptium OpenJDK 64-Bit Server VM 21.0.9+10-LTS"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-22",
+            "_id": "CcCRtZ0Br_RFnSwROCiz",
+            "@timestamp": "14:21:26.532"
+          }
+        ]
+      }
+    ],
+    "frontend": [],
+    "traces": []
+  }
+}

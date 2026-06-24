@@ -1,0 +1,1309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "10-Day Incident Schedule (share-7d constraints, N=6 per type, Sun-FAFO Friday-weekend-Mon novel-Tue)",
+  "metadata": {
+    "version": "2.0-share7d-n6-10day",
+    "author": "SRE Team",
+    "purpose": "10-day N=6 schedule modeling Readonly-Friday: weekday buildup, Friday chaos peak, weekend bleeding/reoccurrence, Monday novel surface, Tuesday recovery. Flag-budget utilization near-maximal (58/60 flag-slots).",
+    "theme_by_day": {
+      "1": "Sunday \u2014 quiet warmup (2 Iso + Indep pair + Conflict pair)",
+      "2": "Monday \u2014 ad CPU/GC cascade + afternoon catalog-payment canary",
+      "3": "Tuesday \u2014 CDN-kafka-retry cascade + payment canary",
+      "4": "Wednesday \u2014 ad cascade recurrence + canary",
+      "5": "Thursday \u2014 ad-service flaky cascade + cart canary gone bad",
+      "6": "FRIDAY FAFO \u2014 6 flags peak, adHighCpu bleeds 5h",
+      "7": "Saturday \u2014 2AM cart reoccurrence, daytime image novel, ad pair returns, buried kafka",
+      "8": "Sunday \u2014 1AM ad cascade recurs (5h), quiet catalog buried",
+      "9": "Monday \u2014 novel rec-cache surfaces, cautious deploy, evening kafka+ad pair",
+      "10": "Tuesday \u2014 morning kafka-imageSlow-adFailure cascade + normal catalog canary"
+    }
+  },
+  "schedule": [
+    {
+      "id": "d1-i1-imageSlowLoad-on",
+      "category": "isolated",
+      "description": "Sunday: weekend shopper reports slow product images",
+      "day": 1,
+      "time": "10:00",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "5sec"
+    },
+    {
+      "id": "d1-i1-imageSlowLoad-off",
+      "category": "isolated",
+      "description": "CDN failover engaged",
+      "day": 1,
+      "time": "12:00",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "off"
+    },
+    {
+      "id": "d1-i2-adFailure-on",
+      "category": "isolated",
+      "description": "Sunday: ad service flaky - low traffic, buried",
+      "day": 1,
+      "time": "12:30",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "on"
+    },
+    {
+      "id": "d1-i2-adFailure-off",
+      "category": "isolated",
+      "description": "Ad service pool recycled after 3.5h",
+      "day": 1,
+      "time": "16:00",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "off"
+    },
+    {
+      "id": "d1-n1-kafkaQueueProblems-on",
+      "category": "independent",
+      "description": "Afternoon: consumer lag surfaces",
+      "day": 1,
+      "time": "16:30",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "on"
+    },
+    {
+      "id": "d1-n1-loadGeneratorFloodHomepage-on",
+      "category": "independent",
+      "description": "Unrelated: scheduled load test",
+      "day": 1,
+      "time": "16:45",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "on"
+    },
+    {
+      "id": "d1-n1-loadGeneratorFloodHomepage-off",
+      "category": "independent",
+      "description": "Load test ends",
+      "day": 1,
+      "time": "18:45",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "off"
+    },
+    {
+      "id": "d1-n1-kafkaQueueProblems-off",
+      "category": "independent",
+      "description": "Consumers caught up",
+      "day": 1,
+      "time": "19:00",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "off"
+    },
+    {
+      "id": "d1-c1-adHighCpu-on",
+      "category": "conflicting",
+      "description": "Evening: ad service CPU spike",
+      "day": 1,
+      "time": "19:30",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "on"
+    },
+    {
+      "id": "d1-c1-adManualGc-on",
+      "category": "conflicting",
+      "description": "GC follows CPU (overlapping signals)",
+      "day": 1,
+      "time": "19:35",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "on"
+    },
+    {
+      "id": "d1-c1-adManualGc-off",
+      "category": "conflicting",
+      "description": "GC relieved",
+      "day": 1,
+      "time": "21:00",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "off"
+    },
+    {
+      "id": "d1-c1-adHighCpu-off",
+      "category": "conflicting",
+      "description": "CPU normal",
+      "day": 1,
+      "time": "21:02",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "off"
+    },
+    {
+      "id": "d2-cc1-adHighCpu-on",
+      "category": "conflicting_cascading",
+      "description": "Monday morning: ad CPU saturates",
+      "day": 2,
+      "time": "10:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "on"
+    },
+    {
+      "id": "d2-cc1-adManualGc-on",
+      "category": "conflicting_cascading",
+      "description": "GC pressure builds (overlapping signals)",
+      "day": 2,
+      "time": "10:25",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "on"
+    },
+    {
+      "id": "d2-cc1-adFailure-on",
+      "category": "conflicting_cascading",
+      "description": "Ad service starts returning errors",
+      "day": 2,
+      "time": "11:00",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "on"
+    },
+    {
+      "id": "d2-cc1-adFailure-off",
+      "category": "conflicting_cascading",
+      "description": "Ad pods autoscaled",
+      "day": 2,
+      "time": "12:30",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "off"
+    },
+    {
+      "id": "d2-cc1-adManualGc-off",
+      "category": "conflicting_cascading",
+      "description": "GC relieved",
+      "day": 2,
+      "time": "13:00",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "off"
+    },
+    {
+      "id": "d2-cc1-adHighCpu-off",
+      "category": "conflicting_cascading",
+      "description": "CPU normalized",
+      "day": 2,
+      "time": "13:30",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "off"
+    },
+    {
+      "id": "d2-d1dep-productCatalogFailure-on",
+      "category": "deployment",
+      "description": "Catalog canary begins",
+      "day": 2,
+      "time": "14:30",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "on"
+    },
+    {
+      "id": "d2-d1dep-productCatalogFailure-off",
+      "category": "deployment",
+      "description": "Catalog healthy - rolls forward",
+      "day": 2,
+      "time": "16:00",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "off"
+    },
+    {
+      "id": "d2-d1dep-paymentFailure-10%",
+      "category": "deployment",
+      "description": "Payment begins canary (10%)",
+      "day": 2,
+      "time": "16:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "10%"
+    },
+    {
+      "id": "d2-d1dep-paymentFailure-50%",
+      "category": "deployment",
+      "description": "Escalates to 50%",
+      "day": 2,
+      "time": "16:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "50%"
+    },
+    {
+      "id": "d2-d1dep-paymentFailure-off",
+      "category": "deployment",
+      "description": "Rolled back",
+      "day": 2,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "off"
+    },
+    {
+      "id": "d2-d1dep-cartFailure-on",
+      "category": "deployment",
+      "description": "Cart holds stale payment refs",
+      "day": 2,
+      "time": "17:00",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "on"
+    },
+    {
+      "id": "d2-d1dep-cartFailure-off",
+      "category": "deployment",
+      "description": "Cart pool recycled",
+      "day": 2,
+      "time": "18:30",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "off"
+    },
+    {
+      "id": "d3-ic1-imageSlowLoad-on",
+      "category": "independent_cascading",
+      "description": "CDN latency begins",
+      "day": 3,
+      "time": "10:00",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "5sec"
+    },
+    {
+      "id": "d3-ic1-kafkaQueueProblems-on",
+      "category": "independent_cascading",
+      "description": "Image-processing queue builds",
+      "day": 3,
+      "time": "10:20",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "on"
+    },
+    {
+      "id": "d3-ic1-loadGeneratorFloodHomepage-on",
+      "category": "independent_cascading",
+      "description": "Retry storm amplifies homepage load",
+      "day": 3,
+      "time": "10:45",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "on"
+    },
+    {
+      "id": "d3-ic1-loadGeneratorFloodHomepage-off",
+      "category": "independent_cascading",
+      "description": "Retry storm subsides",
+      "day": 3,
+      "time": "11:45",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "off"
+    },
+    {
+      "id": "d3-ic1-kafkaQueueProblems-off",
+      "category": "independent_cascading",
+      "description": "Consumer catches up",
+      "day": 3,
+      "time": "12:10",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "off"
+    },
+    {
+      "id": "d3-ic1-imageSlowLoad-off",
+      "category": "independent_cascading",
+      "description": "CDN recovered",
+      "day": 3,
+      "time": "12:30",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "off"
+    },
+    {
+      "id": "d3-d2dep-productCatalogFailure-on",
+      "category": "deployment",
+      "description": "Catalog deploy step 1",
+      "day": 3,
+      "time": "14:30",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "on"
+    },
+    {
+      "id": "d3-d2dep-productCatalogFailure-off",
+      "category": "deployment",
+      "description": "Migrated",
+      "day": 3,
+      "time": "16:00",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "off"
+    },
+    {
+      "id": "d3-d2dep-paymentFailure-10%",
+      "category": "deployment",
+      "description": "Payment canary 10%",
+      "day": 3,
+      "time": "16:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "10%"
+    },
+    {
+      "id": "d3-d2dep-paymentFailure-50%",
+      "category": "deployment",
+      "description": "Escalates to 50%",
+      "day": 3,
+      "time": "16:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "50%"
+    },
+    {
+      "id": "d3-d2dep-paymentFailure-off",
+      "category": "deployment",
+      "description": "Rolled back",
+      "day": 3,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "off"
+    },
+    {
+      "id": "d3-d2dep-paymentUnreachable-on",
+      "category": "deployment",
+      "description": "Rolling restart leaves service unreachable",
+      "day": 3,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "on"
+    },
+    {
+      "id": "d3-d2dep-paymentUnreachable-off",
+      "category": "deployment",
+      "description": "Restart complete",
+      "day": 3,
+      "time": "18:30",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "off"
+    },
+    {
+      "id": "d4-cc2-adHighCpu-on",
+      "category": "conflicting_cascading",
+      "description": "Wed: ad CPU saturates",
+      "day": 4,
+      "time": "10:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "on"
+    },
+    {
+      "id": "d4-cc2-adManualGc-on",
+      "category": "conflicting_cascading",
+      "description": "GC kicks in",
+      "day": 4,
+      "time": "10:25",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "on"
+    },
+    {
+      "id": "d4-cc2-kafkaQueueProblems-on",
+      "category": "conflicting_cascading",
+      "description": "Ad events queue backs up inside CPU window",
+      "day": 4,
+      "time": "11:00",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "on"
+    },
+    {
+      "id": "d4-cc2-kafkaQueueProblems-off",
+      "category": "conflicting_cascading",
+      "description": "Queue drains",
+      "day": 4,
+      "time": "12:30",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "off"
+    },
+    {
+      "id": "d4-cc2-adManualGc-off",
+      "category": "conflicting_cascading",
+      "description": "GC relieved",
+      "day": 4,
+      "time": "13:00",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "off"
+    },
+    {
+      "id": "d4-cc2-adHighCpu-off",
+      "category": "conflicting_cascading",
+      "description": "CPU normalized",
+      "day": 4,
+      "time": "13:30",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "off"
+    },
+    {
+      "id": "d4-d3dep-productCatalogFailure-on",
+      "category": "deployment",
+      "description": "Canary push",
+      "day": 4,
+      "time": "14:30",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "on"
+    },
+    {
+      "id": "d4-d3dep-productCatalogFailure-off",
+      "category": "deployment",
+      "description": "Rolled forward",
+      "day": 4,
+      "time": "16:00",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "off"
+    },
+    {
+      "id": "d4-d3dep-paymentFailure-10%",
+      "category": "deployment",
+      "description": "Payment 10%",
+      "day": 4,
+      "time": "16:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "10%"
+    },
+    {
+      "id": "d4-d3dep-paymentFailure-50%",
+      "category": "deployment",
+      "description": "Payment 50%",
+      "day": 4,
+      "time": "16:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "50%"
+    },
+    {
+      "id": "d4-d3dep-paymentFailure-off",
+      "category": "deployment",
+      "description": "Rolled back",
+      "day": 4,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "off"
+    },
+    {
+      "id": "d4-d3dep-paymentUnreachable-on",
+      "category": "deployment",
+      "description": "Pods restarting",
+      "day": 4,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "on"
+    },
+    {
+      "id": "d4-d3dep-paymentUnreachable-off",
+      "category": "deployment",
+      "description": "Service healthy",
+      "day": 4,
+      "time": "18:30",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "off"
+    },
+    {
+      "id": "d5-ic2-adFailure-on",
+      "category": "independent_cascading",
+      "description": "Ad service flaky canary",
+      "day": 5,
+      "time": "10:00",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "on"
+    },
+    {
+      "id": "d5-ic2-imageSlowLoad-on",
+      "category": "independent_cascading",
+      "description": "Ad-heavy pages slow",
+      "day": 5,
+      "time": "10:25",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "5sec"
+    },
+    {
+      "id": "d5-ic2-loadGeneratorFloodHomepage-on",
+      "category": "independent_cascading",
+      "description": "Retry storm",
+      "day": 5,
+      "time": "11:00",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "on"
+    },
+    {
+      "id": "d5-ic2-loadGeneratorFloodHomepage-off",
+      "category": "independent_cascading",
+      "description": "Retries subside",
+      "day": 5,
+      "time": "11:45",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "off"
+    },
+    {
+      "id": "d5-ic2-imageSlowLoad-off",
+      "category": "independent_cascading",
+      "description": "Image loads recover",
+      "day": 5,
+      "time": "12:10",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "off"
+    },
+    {
+      "id": "d5-ic2-adFailure-off",
+      "category": "independent_cascading",
+      "description": "Ad service rolled back",
+      "day": 5,
+      "time": "12:30",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "off"
+    },
+    {
+      "id": "d5-d4dep-cartFailure-on",
+      "category": "deployment",
+      "description": "Thursday cart canary bad",
+      "day": 5,
+      "time": "14:30",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "on"
+    },
+    {
+      "id": "d5-d4dep-cartFailure-off",
+      "category": "deployment",
+      "description": "Rolled back fast (90 min)",
+      "day": 5,
+      "time": "16:00",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "off"
+    },
+    {
+      "id": "d5-d4dep-paymentFailure-10%",
+      "category": "deployment",
+      "description": "Payment errors begin",
+      "day": 5,
+      "time": "16:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "10%"
+    },
+    {
+      "id": "d5-d4dep-paymentFailure-50%",
+      "category": "deployment",
+      "description": "Escalates",
+      "day": 5,
+      "time": "16:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "50%"
+    },
+    {
+      "id": "d5-d4dep-paymentFailure-off",
+      "category": "deployment",
+      "description": "Rolled back at 50%",
+      "day": 5,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "off"
+    },
+    {
+      "id": "d5-d4dep-paymentUnreachable-on",
+      "category": "deployment",
+      "description": "Pods rolling restart",
+      "day": 5,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "on"
+    },
+    {
+      "id": "d5-d4dep-paymentUnreachable-off",
+      "category": "deployment",
+      "description": "All healthy - weekend ready",
+      "day": 5,
+      "time": "18:30",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "off"
+    },
+    {
+      "id": "d6-big-adHighCpu-on",
+      "category": "conflicting",
+      "description": "FRIDAY: Friday-afternoon deploy - ad service CPU saturates first",
+      "day": 6,
+      "time": "12:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "on"
+    },
+    {
+      "id": "d6-big-adManualGc-on",
+      "category": "conflicting",
+      "description": "GC storm follows",
+      "day": 6,
+      "time": "12:15",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "on"
+    },
+    {
+      "id": "d6-big-productCatalogFailure-on",
+      "category": "conflicting",
+      "description": "Catalog replicas saturate",
+      "day": 6,
+      "time": "12:30",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "on"
+    },
+    {
+      "id": "d6-big-recommendationCacheFailure-on",
+      "category": "conflicting",
+      "description": "Recommender cache invalidates",
+      "day": 6,
+      "time": "12:45",
+      "action": "set",
+      "flag": "recommendationCacheFailure",
+      "value": "on"
+    },
+    {
+      "id": "d6-big-cartFailure-on",
+      "category": "conflicting",
+      "description": "Cart service 500s",
+      "day": 6,
+      "time": "13:00",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "on"
+    },
+    {
+      "id": "d6-big-paymentFailure-10%",
+      "category": "conflicting",
+      "description": "Payment tipping - 10%",
+      "day": 6,
+      "time": "13:15",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "10%"
+    },
+    {
+      "id": "d6-big-paymentFailure-50%",
+      "category": "conflicting",
+      "description": "Escalates - 50%",
+      "day": 6,
+      "time": "13:45",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "50%"
+    },
+    {
+      "id": "d6-big-paymentFailure-100%",
+      "category": "conflicting",
+      "description": "Peak - 100% (all-hands paged)",
+      "day": 6,
+      "time": "14:15",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "100%"
+    },
+    {
+      "id": "d6-big-productCatalogFailure-off",
+      "category": "conflicting",
+      "description": "Catalog recovers first",
+      "day": 6,
+      "time": "14:15",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "off"
+    },
+    {
+      "id": "d6-big-cartFailure-off",
+      "category": "conflicting",
+      "description": "Cart pool recycled",
+      "day": 6,
+      "time": "14:30",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "off"
+    },
+    {
+      "id": "d6-big-recommendationCacheFailure-off",
+      "category": "conflicting",
+      "description": "Cache warmed",
+      "day": 6,
+      "time": "14:30",
+      "action": "set",
+      "flag": "recommendationCacheFailure",
+      "value": "off"
+    },
+    {
+      "id": "d6-big-paymentFailure-off",
+      "category": "conflicting",
+      "description": "Payment rolls back",
+      "day": 6,
+      "time": "14:45",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "off"
+    },
+    {
+      "id": "d6-big-adManualGc-off",
+      "category": "conflicting",
+      "description": "GC eases",
+      "day": 6,
+      "time": "15:00",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "off"
+    },
+    {
+      "id": "d6-big-adHighCpu-off",
+      "category": "conflicting",
+      "description": "Ad CPU finally normal (5h bleed)",
+      "day": 6,
+      "time": "17:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "off"
+    },
+    {
+      "id": "d7-i3-cartFailure-on",
+      "category": "isolated",
+      "description": "SATURDAY 2AM: cart reoccurs - Friday fix failed",
+      "day": 7,
+      "time": "02:00",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "on"
+    },
+    {
+      "id": "d7-i3-cartFailure-off",
+      "category": "isolated",
+      "description": "Team force-restarts cart (120 min cap)",
+      "day": 7,
+      "time": "04:00",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "off"
+    },
+    {
+      "id": "d7-i4-imageSlowLoad-on",
+      "category": "isolated",
+      "description": "Saturday: user reports slow images - CDN config still off",
+      "day": 7,
+      "time": "10:00",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "5sec"
+    },
+    {
+      "id": "d7-i4-imageSlowLoad-off",
+      "category": "isolated",
+      "description": "CDN fully reverted (120 min cap)",
+      "day": 7,
+      "time": "12:00",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "off"
+    },
+    {
+      "id": "d7-c2-adHighCpu-on",
+      "category": "conflicting",
+      "description": "Ad CPU re-emerges - partial weekend fix",
+      "day": 7,
+      "time": "14:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "on"
+    },
+    {
+      "id": "d7-c2-adManualGc-on",
+      "category": "conflicting",
+      "description": "GC follows (overlapping signals)",
+      "day": 7,
+      "time": "14:05",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "on"
+    },
+    {
+      "id": "d7-c2-adManualGc-off",
+      "category": "conflicting",
+      "description": "GC eases",
+      "day": 7,
+      "time": "15:55",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "off"
+    },
+    {
+      "id": "d7-c2-adHighCpu-off",
+      "category": "conflicting",
+      "description": "CPU normal",
+      "day": 7,
+      "time": "16:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "off"
+    },
+    {
+      "id": "d7-n2-kafkaQueueProblems-on",
+      "category": "independent",
+      "description": "Evening buried: kafka lag nobody investigating",
+      "day": 7,
+      "time": "18:00",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "on"
+    },
+    {
+      "id": "d7-n2-loadGeneratorFloodHomepage-on",
+      "category": "independent",
+      "description": "Unrelated: scheduled synthetic load test",
+      "day": 7,
+      "time": "18:10",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "on"
+    },
+    {
+      "id": "d7-n2-loadGeneratorFloodHomepage-off",
+      "category": "independent",
+      "description": "Load test completes",
+      "day": 7,
+      "time": "21:10",
+      "action": "set",
+      "flag": "loadGeneratorFloodHomepage",
+      "value": "off"
+    },
+    {
+      "id": "d7-n2-kafkaQueueProblems-off",
+      "category": "independent",
+      "description": "Kafka lag drained",
+      "day": 7,
+      "time": "21:30",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "off"
+    },
+    {
+      "id": "d8-cc3-adHighCpu-on",
+      "category": "conflicting_cascading",
+      "description": "SUNDAY 1AM: ad CPU saturates again",
+      "day": 8,
+      "time": "01:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "on"
+    },
+    {
+      "id": "d8-cc3-adManualGc-on",
+      "category": "conflicting_cascading",
+      "description": "GC recurs (same flavor as Friday)",
+      "day": 8,
+      "time": "01:30",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "on"
+    },
+    {
+      "id": "d8-cc3-adFailure-on",
+      "category": "conflicting_cascading",
+      "description": "Ad service failing inside cascade",
+      "day": 8,
+      "time": "02:00",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "on"
+    },
+    {
+      "id": "d8-cc3-adFailure-off",
+      "category": "conflicting_cascading",
+      "description": "Pods restarted",
+      "day": 8,
+      "time": "04:30",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "off"
+    },
+    {
+      "id": "d8-cc3-adManualGc-off",
+      "category": "conflicting_cascading",
+      "description": "GC eased",
+      "day": 8,
+      "time": "05:30",
+      "action": "set",
+      "flag": "adManualGc",
+      "value": "off"
+    },
+    {
+      "id": "d8-cc3-adHighCpu-off",
+      "category": "conflicting_cascading",
+      "description": "CPU normalized (5h at cap)",
+      "day": 8,
+      "time": "06:00",
+      "action": "set",
+      "flag": "adHighCpu",
+      "value": "off"
+    },
+    {
+      "id": "d8-i5-productCatalogFailure-on",
+      "category": "isolated",
+      "description": "Sunday afternoon: catalog returns 500s - quiet Sunday, low pressure",
+      "day": 8,
+      "time": "10:00",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "on"
+    },
+    {
+      "id": "d8-i5-productCatalogFailure-off",
+      "category": "isolated",
+      "description": "Catalog cache rebuilt (240 min buried)",
+      "day": 8,
+      "time": "14:00",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "off"
+    },
+    {
+      "id": "d9-i6-recommendationCacheFailure-on",
+      "category": "isolated",
+      "description": "MONDAY: novel finding - rec cache stale from weekend (missed during chaos)",
+      "day": 9,
+      "time": "10:00",
+      "action": "set",
+      "flag": "recommendationCacheFailure",
+      "value": "on"
+    },
+    {
+      "id": "d9-i6-recommendationCacheFailure-off",
+      "category": "isolated",
+      "description": "Cache rebuilt (120 min cap)",
+      "day": 9,
+      "time": "12:00",
+      "action": "set",
+      "flag": "recommendationCacheFailure",
+      "value": "off"
+    },
+    {
+      "id": "d9-d5dep-cartFailure-on",
+      "category": "deployment",
+      "description": "Cautious Monday deploy - cart canary",
+      "day": 9,
+      "time": "13:00",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "on"
+    },
+    {
+      "id": "d9-d5dep-cartFailure-off",
+      "category": "deployment",
+      "description": "Canary rolled back",
+      "day": 9,
+      "time": "14:30",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "off"
+    },
+    {
+      "id": "d9-d5dep-paymentFailure-10%",
+      "category": "deployment",
+      "description": "Payment errors detected",
+      "day": 9,
+      "time": "14:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "10%"
+    },
+    {
+      "id": "d9-d5dep-paymentFailure-25%",
+      "category": "deployment",
+      "description": "Escalates",
+      "day": 9,
+      "time": "15:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "25%"
+    },
+    {
+      "id": "d9-d5dep-paymentFailure-50%",
+      "category": "deployment",
+      "description": "50%",
+      "day": 9,
+      "time": "15:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "50%"
+    },
+    {
+      "id": "d9-d5dep-paymentFailure-off",
+      "category": "deployment",
+      "description": "Rolled back",
+      "day": 9,
+      "time": "16:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "off"
+    },
+    {
+      "id": "d9-d5dep-paymentUnreachable-on",
+      "category": "deployment",
+      "description": "Pods restarting",
+      "day": 9,
+      "time": "16:00",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "on"
+    },
+    {
+      "id": "d9-d5dep-paymentUnreachable-off",
+      "category": "deployment",
+      "description": "Healthy",
+      "day": 9,
+      "time": "17:30",
+      "action": "set",
+      "flag": "paymentUnreachable",
+      "value": "off"
+    },
+    {
+      "id": "d9-n3-kafkaQueueProblems-on",
+      "category": "independent",
+      "description": "Evening: kafka lag (backend, non-urgent)",
+      "day": 9,
+      "time": "18:00",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "on"
+    },
+    {
+      "id": "d9-n3-adFailure-on",
+      "category": "independent",
+      "description": "Unrelated: ad canary fails",
+      "day": 9,
+      "time": "18:15",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "on"
+    },
+    {
+      "id": "d9-n3-adFailure-off",
+      "category": "independent",
+      "description": "Ad service stabilized",
+      "day": 9,
+      "time": "19:45",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "off"
+    },
+    {
+      "id": "d9-n3-kafkaQueueProblems-off",
+      "category": "independent",
+      "description": "Kafka catches up",
+      "day": 9,
+      "time": "20:00",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "off"
+    },
+    {
+      "id": "d10-ic3-kafkaQueueProblems-on",
+      "category": "independent_cascading",
+      "description": "Kafka backlog morning",
+      "day": 10,
+      "time": "10:00",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "on"
+    },
+    {
+      "id": "d10-ic3-imageSlowLoad-on",
+      "category": "independent_cascading",
+      "description": "Image CDN slow inside kafka window",
+      "day": 10,
+      "time": "10:30",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "5sec"
+    },
+    {
+      "id": "d10-ic3-adFailure-on",
+      "category": "independent_cascading",
+      "description": "Ad service flaky inside cascade",
+      "day": 10,
+      "time": "11:00",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "on"
+    },
+    {
+      "id": "d10-ic3-adFailure-off",
+      "category": "independent_cascading",
+      "description": "Ad service rolled back",
+      "day": 10,
+      "time": "11:30",
+      "action": "set",
+      "flag": "adFailure",
+      "value": "off"
+    },
+    {
+      "id": "d10-ic3-imageSlowLoad-off",
+      "category": "independent_cascading",
+      "description": "CDN recovered",
+      "day": 10,
+      "time": "12:00",
+      "action": "set",
+      "flag": "imageSlowLoad",
+      "value": "off"
+    },
+    {
+      "id": "d10-ic3-kafkaQueueProblems-off",
+      "category": "independent_cascading",
+      "description": "Consumers caught up",
+      "day": 10,
+      "time": "12:30",
+      "action": "set",
+      "flag": "kafkaQueueProblems",
+      "value": "off"
+    },
+    {
+      "id": "d10-d6dep-productCatalogFailure-on",
+      "category": "deployment",
+      "description": "Scheduled deploy - catalog",
+      "day": 10,
+      "time": "14:30",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "on"
+    },
+    {
+      "id": "d10-d6dep-productCatalogFailure-off",
+      "category": "deployment",
+      "description": "Catalog healthy",
+      "day": 10,
+      "time": "16:00",
+      "action": "set",
+      "flag": "productCatalogFailure",
+      "value": "off"
+    },
+    {
+      "id": "d10-d6dep-paymentFailure-10%",
+      "category": "deployment",
+      "description": "Payment 10%",
+      "day": 10,
+      "time": "16:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "10%"
+    },
+    {
+      "id": "d10-d6dep-paymentFailure-50%",
+      "category": "deployment",
+      "description": "50%",
+      "day": 10,
+      "time": "16:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "50%"
+    },
+    {
+      "id": "d10-d6dep-paymentFailure-100%",
+      "category": "deployment",
+      "description": "Full canary failure",
+      "day": 10,
+      "time": "17:00",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "100%"
+    },
+    {
+      "id": "d10-d6dep-paymentFailure-off",
+      "category": "deployment",
+      "description": "Rolled back",
+      "day": 10,
+      "time": "17:30",
+      "action": "set",
+      "flag": "paymentFailure",
+      "value": "off"
+    },
+    {
+      "id": "d10-d6dep-cartFailure-on",
+      "category": "deployment",
+      "description": "Cart holds stale refs",
+      "day": 10,
+      "time": "17:30",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "on"
+    },
+    {
+      "id": "d10-d6dep-cartFailure-off",
+      "category": "deployment",
+      "description": "Healthy - normal ops restored",
+      "day": 10,
+      "time": "19:00",
+      "action": "set",
+      "flag": "cartFailure",
+      "value": "off"
+    }
+  ],
+  "evaluation_criteria": {
+    "isolated": {
+      "description": "AI must identify a single root cause.",
+      "pass_criteria": "Correctly identifies the single active flag."
+    },
+    "independent": {
+      "description": "AI must identify multiple unrelated concurrent root causes.",
+      "pass_criteria": "Enumerates all concurrent flags and asserts they share no symptoms."
+    },
+    "conflicting": {
+      "description": "AI must distinguish concurrent root causes with overlapping symptoms.",
+      "pass_criteria": "Enumerates all concurrent flags and attributes overlapping symptoms correctly."
+    },
+    "independent_cascading": {
+      "description": "AI must determine containment order for non-overlapping cascade.",
+      "pass_criteria": "Identifies outer>middle>inner and no symptom overlap."
+    },
+    "conflicting_cascading": {
+      "description": "AI must determine containment order with overlapping symptoms.",
+      "pass_criteria": "Identifies outer>middle>inner and flags overlapping pairs."
+    },
+    "deployment": {
+      "description": "AI must recognize sequential rollout with overlapping symptoms.",
+      "pass_criteria": "Identifies step1>step2>step3 order, canary variants, and rollout pattern."
+    }
+  }
+}
