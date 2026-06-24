@@ -106,12 +106,6 @@ docker compose -f opentelemetry-demo/docker-compose.yml up --force-recreate --re
 > - Flagd configurator UI: http://localhost:8080/feature
 
 > \[!TIP\]
-> Helpful Docker monitoring commands:
-> - List the running Docker containers: `docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"`
-> - Check the memory usage of all containers: `docker stats --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"`
-> - Stop all containers: `docker stop $(docker ps -q)`
-
-> \[!TIP\]
 > To check the health of the telemetry data, please run:
 > ```bash
 > ./check_health.sh
@@ -181,20 +175,6 @@ uv run python generate_questions.py --schedule SCHEDULE_PATH -od OUTPUT_DIR
 ```
 
 7. Create Harbor tasks and share to the HuggingFace repo at https://huggingface.co/datasets/orca-bench/sre-2d-harbor-tasks:
-
-> \[!TIP\]
-> For development, you can specify the question ID using the `--qid productCatalogFailure-00` flag.
-
-> \[!TIP\]
-> To delete a HF repo from the CLI:
-> ```bash
-> uv run hf auth login --token HF_TOKEN
-> uv run hf repo delete orca-bench/sre-2d-harbor-tasks --repo-type dataset
-> ```
-
-> \[!TIP\]
-> To clear storage space, please run `docker image prune -af && docker builder prune -af`.
-
 
 ```bash
 # NOTE: build_harbor_tasks.py writes `OUTPUT_DIR/harbor/used_snapshots.json` listing the snapshots actually referenced by tasks.
