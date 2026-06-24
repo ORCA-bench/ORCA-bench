@@ -377,7 +377,7 @@ uv run harbor-export JOBS_DIR -od OUTPUT_DIR \
 
 4. Obtain LLM judge scores using GPT 5.4 (high):
 
-> \[!NOTE\]
+> [!IMPORTANT]
 > You may get errors like `2026-05-18T00:09:35+0000 - ERROR - Trial d6-big-cartfailure-on-univ00-uni__EHeBeZo (d6-big-cartfailure-on-univ00-universal_ttd480m_range30m_off+60m) failed: Unterminated string starting at: line 1 column 2297 (char 2296)`. Please re-run the following command until there are no more errors.
 
 ```bash
