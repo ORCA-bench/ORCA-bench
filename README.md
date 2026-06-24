@@ -182,6 +182,8 @@ uv run python generate_task_specs.py \
   -od out-test-0503-3 -dd data-0418 -e high \
   --config configs/harbor_tasks_v2_share2w.yaml --force
 uv run python generate_answers.py -od out-test-0503-3 -dd data-0418 -e high --concurrency 1600
+
+# NOTE: to build the Harbor tasks with the telemetry-only environment, pass `--templates-dir harbor-template-telemetry-only`
 uv run python build_harbor_tasks.py -od out-test-0503-3 -dd data-0418 --templates-dir harbor-template --force
 ```
 
@@ -224,47 +226,6 @@ uv run python build_and_push_snapshots.py --data-dir DATA_DIR
 # Example:
 #   uv run python build_and_push_snapshots.py --data-dir data-0329-2
 ```
-
-<details>
-  <summary>Instructions for MCP version</summary>
-
-```bash
-uv run python prepare_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
-  --templates-dir harbor-template-mcp \
-  --upload-hf --hf-repo-id orca-bench/sre-2d-mcp-harbor-tasks \
-
-uv run python build_and_push_snapshots.py --data-dir DATA_DIR --templates-dir harbor-template-mcp
-```
-
-</details>
-
-<details>
-  <summary>Instructions for code-only version</summary>
-
-```bash
-# Build and push the code-only Docker image (once):
-uv run python build_and_push_code.py
-
-# Generate tasks:
-uv run python prepare_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
-  --upload-hf --hf-repo-id orca-bench/sre-2d-code-only-harbor-tasks \
-  --code-only --templates-dir harbor-template-code-only
-```
-
-</details>
-
-<details>
-  <summary>Instructions for verification version</summary>
-
-```bash
-uv run python prepare_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
-  --upload-hf --hf-repo-id orca-bench/sre-2d-verify-harbor-tasks \
-  --templates-dir harbor-template-verify
-
-uv run python build_and_push_snapshots.py --data-dir DATA_DIR
-```
-
-</details>
 
 ### Curating ground-truth symptoms
 
