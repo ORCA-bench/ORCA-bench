@@ -1,21 +1,9 @@
 # OpenTelementry Demo
 
-We collect telemetry data using the codebase at https://github.com/open-telemetry/opentelemetry-demo with the following modifications:
+This repo contains the instructions to reproduce the dataset construction and evaluation in our paper [ORCA-bench: How Ready Are Language Model Agents for Oncall?]().
 
-1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and by default only looks back 72 hours (`max_span_age`) when querying. When loading historical snapshots older than 3 days, the `max_span_age` in `jaeger-config-snapshot.yml` must be large enough to cover the age of the snapshot data, otherwise the Jaeger service list will appear empty. It is currently set to `2160h` (90 days). Note: very large values (e.g. 1 year+) cause OpenSearch's 4096-byte HTTP line limit to be exceeded, since Jaeger generates one index name per day in the query URL.
-
-2. We also increase the memory resources for certain containers:
-
-| Service | Original | New | Notes |
-|---------|----------|-----|-------|
-| `opensearch` | 1G | 2G | Prevents OOM kills |
-| `llm` | 50M | 100M | Prevents OOM kills |
-| `product-catalog` | 20M | 80M | Requires more memory to start |
-| `product-catalog` GOMEMLIMIT | 16MiB | 64MiB | Go runtime memory limit |
-
-TODO:
-- [ ] Bump `ad` service memory from 300M to 500M in `patches/docker-compose.yml`. The Java service + OTel agent has a steady-state RSS of ~280 MiB (post-GC tenured gen ~60 MB is flat across 48h+ incarnations — no leak), so it sits at ~93% utilization and gets OOM-killed by transient spikes every ~2 days, generating a fresh `service_instance_id` UUID and breaking counter continuity in metrics like `app_ads_ad_requests_total`.
-- [ ] Add `?verify=false` to the OpenSearch snapshot repo registration in both `load_snapshot.sh` and `harbor-template/environment/entrypoint.sh`, since we only need read access.
+```bibtex
+```
 
 ## Setup Instructions
 
@@ -24,14 +12,12 @@ TODO:
 ```bash
 pip install uv
 uv sync --all-groups
-# Setup pre-commit hooks to run every time `git commit` is called
-uv run pre-commit install
 ```
 
 <details>
   <summary>Additional setup instructions for data collection</summary>
 
-Setup OpenTelemetry Demo system:
+The telemetry data collection was performed on a machine with 32 GB / 8 CPUs. Please follow these steps to set up the OpenTelemetry Demo system:
 
 ```bash
 # Initialize submodules
@@ -53,105 +39,47 @@ cp patches/opentelemetry-demo.env opentelemetry-demo/.env
 <details>
   <summary>Additional setup instructions for Harbor + GradientAI evaluation</summary>
 
-1. Patch LiteLLM to support `reasoning_effort` and Anthropic `cache_control` passthrough for Gradient AI:
+1. Please go to https://cloud.digitalocean.com/gen-ai/model-access-keys -> Create model access key. Then configure the following environment variables:
+
+```bash
+export GRADIENT_AI_API_KEY=$MODEL_ACCESS_KEY
+```
+
+2. Patch LiteLLM to support `reasoning_effort` and Anthropic `cache_control` passthrough for Gradient AI:
 
 ```bash
 cp patches/litellm_gradient_ai_chat_transformation.py \
   "$(uv run python -c "import litellm; print(litellm.__path__[0])")/llms/gradient_ai/chat/transformation.py"
 ```
 
-2. Patch Harbor's `Task.checksum` to ignore `environment/.trials/`. The harbor-template entrypoint stages each trial's OpenTelemetry demo + live OpenSearch data under `environment/.trials/<PROJECT_HASH>/`; without this patch, `dirhash` walks into another in-flight trial's snapshot tree and races OpenSearch's segment renames, raising `FileNotFoundError` mid-scan. The unpatched checksum is also non-deterministic for the same reason.
+3. Patch Harbor's `Task.checksum` to ignore `environment/.trials/`. The harbor-template entrypoint stages each trial's OpenTelemetry demo + live OpenSearch data under `environment/.trials/<PROJECT_HASH>/`; without this patch, `dirhash` walks into another in-flight trial's snapshot tree and races OpenSearch's segment renames, raising `FileNotFoundError` mid-scan. The unpatched checksum is also non-deterministic for the same reason.
 
 ```bash
 cp patches/harbor_models_task_task.py \
   "$(uv run python -c "import harbor.models.task.task as m; print(m.__file__)")"
 ```
 
-3. Optional: Patch Harbor to support `max_tokens` for the OpenHands SDK agent:
-
-```bash
-HARBOR_AGENTS="$(uv run python -c "import harbor.agents.installed; print(harbor.agents.installed.__path__[0])")"
-cp patches/harbor_openhands_sdk.py "$HARBOR_AGENTS/openhands_sdk.py"
-cp patches/harbor_openhands_sdk_runner.py "$HARBOR_AGENTS/openhands_sdk_runner.py"
-```
-
 </details>
 
-### Using DigitalOcean
-
-1. Navigate to the page to create a droplet. (We will only need to use CPU droplets for this project.)
-
-2. Select the region "New York".
-
-3. Choose an image -> Marketplace -> Docker on Ubuntu 22.04.
-
-4. Choose Basic -> Premium Intel -> 32 GB / 8 Intel CPUs (note: as of Feb 27, the pricing is $192/mo.)
-
-5. Configure the ssh-firewall in Droplet -> Networking. This prevents ransomware attacks on the OpenSearch database.
-
-6. Tune kernel limits for high-concurrency Docker trials. The defaults silently drop packets (ARP/conntrack overflow) and can hang SSH/VS Code once you launch many containers across multiple bridges.
-
-```bash
-# Add swap (safety net; persist in fstab)
-fallocate -l 8G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-
-# Raise ARP/conntrack/inotify/FD/PID/port limits and persist
-cat > /etc/sysctl.d/99-docker-scale.conf <<'EOF'
-# ARP / neighbor table (prevents silent packet drops with many veth interfaces)
-net.ipv4.neigh.default.gc_thresh1 = 8192
-net.ipv4.neigh.default.gc_thresh2 = 32768
-net.ipv4.neigh.default.gc_thresh3 = 65536
-net.ipv6.neigh.default.gc_thresh1 = 8192
-net.ipv6.neigh.default.gc_thresh2 = 32768
-net.ipv6.neigh.default.gc_thresh3 = 65536
-
-# Conntrack table (same silent-drop failure mode)
-net.netfilter.nf_conntrack_max = 524288
-
-# inotify (VS Code remote + file watchers)
-fs.inotify.max_user_instances = 8192
-fs.inotify.max_user_watches = 1048576
-
-# File descriptors
-fs.file-max = 2097152
-
-# PIDs
-kernel.pid_max = 4194304
-
-# Ephemeral ports
-net.ipv4.ip_local_port_range = 10000 65535
-EOF
-sysctl -p /etc/sysctl.d/99-docker-scale.conf
-```
-
-> \[!TIP\]
-> If SSH/VS Code disconnects mid-run, check `dmesg -T | tail` for `neighbour: arp_cache: neighbor table overflow` or `nf_conntrack: table full` — both indicate the limits above need to go higher.
-
-7. Enlarge Docker's IP address pool. Each Harbor environment creates its own bridge network, and Docker's built-in pool can be exhausted after a few dozen concurrent (or stale) networks, producing `Error response from daemon: all predefined address pools have been fully subnetted` on `docker compose up`. The config below provisions 1024 × /24 networks (4 × /16 carved into /24s).
-
-```bash
-# Stop running containers first — restarting docker will kill them.
-cat > /etc/docker/daemon.json <<'EOF'
-{
-  "default-address-pools": [
-    {"base": "10.200.0.0/14", "size": 24}
-  ]
-}
-EOF
-systemctl restart docker
-# Verify
-docker info | grep -A2 "Default Address Pools"
-```
-
-> \[!TIP\]
-> If you hit the pool-exhausted error again, sweep stale resources first — Harbor environments that exit abnormally can leave behind networks tied to stopped containers:
-> ```bash
-> docker container prune -f --filter "label=com.docker.compose.project"
-> docker network prune -f
-> ```
-
 ## Constructing Dataset
+
+<details>
+<summary>:warning: Modifications to the OpenTelemetry Demo</summary>
+
+We collect telemetry data using the codebase at https://github.com/open-telemetry/opentelemetry-demo with the following modifications:
+
+1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and by default only looks back 72 hours (`max_span_age`) when querying. When loading historical snapshots older than 3 days, the `max_span_age` in `jaeger-config-snapshot.yml` must be large enough to cover the age of the snapshot data, otherwise the Jaeger service list will appear empty. It is currently set to `2160h` (90 days). Note: very large values (e.g. 1 year+) cause OpenSearch's 4096-byte HTTP line limit to be exceeded, since Jaeger generates one index name per day in the query URL.
+
+2. We also increase the memory resources for certain containers:
+
+| Service | Original | New | Notes |
+|---------|----------|-----|-------|
+| `opensearch` | 1G | 2G | Prevents OOM kills |
+| `llm` | 50M | 100M | Prevents OOM kills |
+| `product-catalog` | 20M | 80M | Requires more memory to start |
+| `product-catalog` GOMEMLIMIT | 16MiB | 64MiB | Go runtime memory limit |
+
+</details>
 
 1. Initialize data volumes for persisting telemetry data and follow the provided instructions to export the data mount environment variables:
 
@@ -167,10 +95,6 @@ docker info | grep -A2 "Default Address Pools"
 ```bash
 docker compose -f opentelemetry-demo/docker-compose.yml up --force-recreate --remove-orphans --detach
 ```
-<!-- # If resuming an existing Docker:
-docker compose -f opentelemetry-demo/docker-compose.yml up -d
-# To pause a Docker, please use the following command:
-docker compose -f opentelemetry-demo/docker-compose.yml down -->
 
 > \[!NOTE\]
 > Once the images are built and containers are started you can access:
@@ -474,53 +398,9 @@ uv run python label_metrics.py -f FEATURE_FLAG -od OUTPUT_DIR \
 
 </details>
 
-## Reproducing evaluation using Harbor
+## Reproducing Harbor evaluation
 
-- [ ] Have the entrypoint write the MCP config file (`~/.claude.json`) at runtime, similar to how it writes `/tmp/env-ports`. This would allow agents with native MCP support (Claude Code, Cline, etc.) to automatically connect to the MCP servers with dynamic ports.
-
-1. Please go to https://cloud.digitalocean.com/gen-ai/model-access-keys -> Create model access key. Then configure the following environment variables:
-
-<details>
-  <summary>Instructions for running Codex</summary>
-
-```bash
-export OPENAI_API_KEY=$MODEL_ACCESS_KEY
-export OPENAI_BASE_URL=https://inference.do-ai.run/v1
-```
-
-</details>
-
-<details>
-  <summary>Instructions for running Terminus-2 with models on DigitalOcean (e.g., GPT and Claude)</summary>
-
-See https://docs.digitalocean.com/products/gradient-ai-platform/details/models/ for the full list of supported models.
-
-```bash
-export GRADIENT_AI_API_KEY=$MODEL_ACCESS_KEY
-```
-
-</details>
-
-<details>
-  <summary>Instructions for running OpenHands with models on DigitalOcean (e.g., GPT and Claude)</summary>
-
-See https://docs.digitalocean.com/products/gradient-ai-platform/details/models/ for the full list of supported models.
-
-```bash
-export LLM_API_KEY=$MODEL_ACCESS_KEY
-```
-
-</details>
-
-2. Launch the Harbor tasks using the following command:
-
-<!-- > \[!TIP\]
-> If your home volume is small, point Harbor's cache at a mounted disk via a symlink (one-time setup):
-> ```bash
-> mkdir -p /mnt/volume_nyc2_XXXXX/harbor-cache
-> ln -s /mnt/volume_nyc2_XXXXX/harbor-cache ~/.cache/harbor
-> ```
-> Note: with a symlinked cache, use `find ~/.cache/harbor/ -mindepth 1 -delete` instead of `uv run harbor cache clean`. -->
+1. Launch the Harbor tasks using the following command:
 
 ```bash
 # Stop all containers from previous runs to avoid Docker container naming conflicts
@@ -652,30 +532,4 @@ uv run python classify_redundant_calls.py -od out-0518-sample100 --concurrency 8
 
 # Generate Figure 7: Token & tool-calling efficiency
 uv run python plot_efficiency.py
-```
-
-## Generating Solutions
-
-As a sanity check, `run_solve.py` generates an incident report from the rubric that should achieve close to perfect score using our LLM judge scoring scheme.
-
-1. Please run the following script to generate the solution incident reports:
-
-```bash
-# Use format_rubric alone
-uv run python run_solve.py -od share-8h
-
-# Use format_rubric and GPT 5.4 (high) to convert the formatted rubric into the style of a postmortem: 1. Summary, 2. Timeline, 3. 5 Whys (with evidence), 4. Remediation
-uv run python run_solve.py -od share-8h -m openai-gpt-5.4
-```
-
-2. Then export the solutions to a JSON file that mirrors the output of `harbor-export`.
-
-```bash
-uv run python export_solutions.py -od share-8h
-```
-
-3. Finally, launch the LLM judge script to score using GPT 5.4 (high):
-
-```bash
-uv run python run_llm_judge.py -od share-8h
 ```
