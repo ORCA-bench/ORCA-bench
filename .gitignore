@@ -1,3 +1,11 @@
+# Telemetry data directories (large; linked/generated locally, never committed)
+/data-*/
+/data/
+
+# Pipeline output directories (generated locally, never committed)
+/out-*/
+/out/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
