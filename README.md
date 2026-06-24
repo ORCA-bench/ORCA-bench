@@ -17,7 +17,7 @@ uv sync --all-groups
 <details>
   <summary>Additional setup instructions for data collection</summary>
 
-The telemetry data collection was performed on a machine with 32 GB / 8 CPUs. Please follow these steps to set up the OpenTelemetry Demo system:
+The telemetry data collection was performed on a DigitalOcean Droplet with 32 GB / 8 CPUs. Please follow these steps to set up the OpenTelemetry Demo system:
 
 ```bash
 # Initialize submodules
