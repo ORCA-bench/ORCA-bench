@@ -77,9 +77,10 @@ cp patches/harbor_models_task_task.py \
 > properly firewalled/secured OpenSearch instance the scheduled snapshots are
 > already complete and point-in-time-correct, so no recovery or consolidation is
 > needed and the Harbor entrypoint restores the scheduled snapshot directly.
-> Reproducing from scratch
-> should therefore *not* require the recovery steps, and the corresponding scripts
-> have been removed from this repo.
+> Reproducing from scratch should therefore *not* require the recovery steps. For
+> complete provenance, the exact post-hoc recovery procedure we ran (the runbook
+> and its scripts) is preserved under
+> [`opensearch-recovery/`](opensearch-recovery/).
 
 <details>
 <summary>:warning: Modifications to the OpenTelemetry Demo</summary>
