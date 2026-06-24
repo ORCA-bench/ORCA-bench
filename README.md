@@ -17,7 +17,22 @@ uv sync --all-groups
 <details>
   <summary>Additional setup instructions for data collection</summary>
 
-The telemetry data collection was performed on a DigitalOcean Droplet with 32 GB / 8 CPUs. Please follow these steps to set up the OpenTelemetry Demo system:
+The telemetry data collection was performed on a DigitalOcean Droplet with 32 GB / 8 CPUs.
+
+We collect telemetry data using the codebase at https://github.com/open-telemetry/opentelemetry-demo with the following modifications:
+
+1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and by default only looks back 72 hours (`max_span_age`) when querying. When loading historical snapshots older than 3 days, the `max_span_age` in `jaeger-config-snapshot.yml` must be large enough to cover the age of the snapshot data, otherwise the Jaeger service list will appear empty. It is currently set to `2160h` (90 days). Note: very large values (e.g. 1 year+) cause OpenSearch's 4096-byte HTTP line limit to be exceeded, since Jaeger generates one index name per day in the query URL.
+
+2. We also increase the memory resources for certain containers:
+
+| Service | Original | New | Notes |
+|---------|----------|-----|-------|
+| `opensearch` | 1G | 2G | Prevents OOM kills |
+| `llm` | 50M | 100M | Prevents OOM kills |
+| `product-catalog` | 20M | 80M | Requires more memory to start |
+| `product-catalog` GOMEMLIMIT | 16MiB | 64MiB | Go runtime memory limit |
+
+Please follow these steps to set up the OpenTelemetry Demo system:
 
 ```bash
 # Initialize submodules
@@ -81,24 +96,6 @@ cp patches/harbor_models_task_task.py \
 > complete provenance, the exact post-hoc recovery procedure we ran (the runbook
 > and its scripts) is preserved under
 > [`opensearch-recovery/`](opensearch-recovery/).
-
-<details>
-<summary>:warning: Modifications to the OpenTelemetry Demo</summary>
-
-We collect telemetry data using the codebase at https://github.com/open-telemetry/opentelemetry-demo with the following modifications:
-
-1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and by default only looks back 72 hours (`max_span_age`) when querying. When loading historical snapshots older than 3 days, the `max_span_age` in `jaeger-config-snapshot.yml` must be large enough to cover the age of the snapshot data, otherwise the Jaeger service list will appear empty. It is currently set to `2160h` (90 days). Note: very large values (e.g. 1 year+) cause OpenSearch's 4096-byte HTTP line limit to be exceeded, since Jaeger generates one index name per day in the query URL.
-
-2. We also increase the memory resources for certain containers:
-
-| Service | Original | New | Notes |
-|---------|----------|-----|-------|
-| `opensearch` | 1G | 2G | Prevents OOM kills |
-| `llm` | 50M | 100M | Prevents OOM kills |
-| `product-catalog` | 20M | 80M | Requires more memory to start |
-| `product-catalog` GOMEMLIMIT | 16MiB | 64MiB | Go runtime memory limit |
-
-</details>
 
 1. Initialize data volumes for persisting telemetry data and follow the provided instructions to export the data mount environment variables:
 
