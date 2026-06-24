@@ -63,6 +63,24 @@ cp patches/harbor_models_task_task.py \
 
 ## Constructing Dataset
 
+> \[!WARNING\]
+> **The released Harbor tasks were not produced by this exact pipeline.** During
+> data collection our OpenSearch instance was hit by `DELETE INDEX` /
+> `DELETE BY QUERY` ransomware attacks that wiped portions of the daily Jaeger /
+> OTel indices captured in our scheduled snapshots. To salvage the affected
+> snapshots we ran a one-off, *post hoc* recovery procedure — detecting each wipe
+> from the snapshot size curve, replaying the missing data, and consolidating it
+> into per-snapshot `-consolidated` snapshots that the Harbor entrypoint then
+> restored. The published tasks are built on that recovered, consolidated data.
+>
+> The steps documented below describe the **intended, clean pipeline**: with a
+> properly firewalled/secured OpenSearch instance the scheduled snapshots are
+> already complete and point-in-time-correct, so no recovery or consolidation is
+> needed and the Harbor entrypoint restores the scheduled snapshot directly.
+> Reproducing from scratch
+> should therefore *not* require the recovery steps, and the corresponding scripts
+> have been removed from this repo.
+
 <details>
 <summary>:warning: Modifications to the OpenTelemetry Demo</summary>
 
@@ -113,23 +131,8 @@ docker compose -f opentelemetry-demo/docker-compose.yml up --force-recreate --re
 
 3. Run the incident schedule using the following command, saving snapshots at regular intervals:
 
-> \[!TIP\]
-> Specifying the TZ environment variable configures the logger to print times in the local timezone.
-
 ```bash
-# Option 1: Run the incident schedule immediately
-TZ="America/New_York" uv run python run_incident_schedule.py \
-  --schedule schedules/incident_schedule_dev_quick_1.json \
-  --data-dir DATA_DIR \
-  --snapshot-interval 1
-
-# Example:
-# TZ="America/New_York" uv run python run_incident_schedule.py \
-#   -s schedules/incident_schedule_dev_quick.json \
-#   --data-dir data-0210s \
-#   --snapshot-interval 1
-
-# Option 2: Run the script at a scheduled time using the `atd` tool
+# Run the script at a scheduled time using the `atd` tool
 TZ="America/New_York" at midnight -f run_scheduled.sh
 ```
 
@@ -187,37 +190,7 @@ uv run python generate_answers.py -od out-test-0503-3 -dd data-0418 -e high --co
 uv run python build_harbor_tasks.py -od out-test-0503-3 -dd data-0418 --templates-dir harbor-template --force
 ```
 
-8. Recover wipe-affected OpenSearch indices and build per-snapshot consolidated
-   snapshots so the Harbor entrypoint can restore point-in-time-correct state
-   (everything queryable before T, nothing after). The OpenSearch instance has
-   been hit by `DELETE INDEX` / `DELETE BY QUERY` ransomware events that leave
-   gaps in the daily indices captured by each scheduled snapshot — the runbook
-   below walks the snapshot size curve to detect every wipe and replay the
-   missing data.
-
-> \[!IMPORTANT\]
-> Run [**RESTORE_HISTORICAL_INDICES.md**](RESTORE_HISTORICAL_INDICES.md) phases 0–5
-> first (load the stack, build `data-XXXX/restore_manifest.json`, restore peak
-> snapshots, consolidate into daily indices, and persist the result as
-> `post_consolidation_<date>` in the repo). `per_snapshot_consolidate.py` below
-> consumes the manifest produced in phase 1.
-
-> \[!IMPORTANT\]
-> Run `per_snapshot_consolidate.py` **before** `build_and_push_snapshots.py`
-> so the `-consolidated` snapshots end up baked into the Docker image. The
-> Harbor entrypoint restores `${SNAPSHOT_NAME}-consolidated`, so without this
-> step the image will error on snapshot restore at task startup.
-
-```bash
-# First run: build a -consolidated sibling for every entry in used_snapshots.json.
-uv run python per_snapshot_consolidate.py DATA_DIR OUTPUT_DIR/harbor/used_snapshots.json
-
-# Incremental: when a new Harbor dataset adds used-snapshot entries, fill in the
-# missing -consolidated siblings without rebuilding the existing ones.
-uv run python per_snapshot_consolidate.py DATA_DIR OUTPUT_DIR/harbor/used_snapshots.json --fill-missing
-```
-
-9. Build and push the Harbor Docker image with the (now consolidated) snapshot
+8. Build and push the Harbor Docker image with the snapshot
    data baked in:
 
 ```bash
@@ -237,20 +210,6 @@ uv run python build_and_push_snapshots.py --data-dir DATA_DIR
 ```bash
 # Loads the latest snapshot (lexicographic sort works because names are timestamp-prefixed)
 ./load_snapshot.sh DATA_DIR "$(ls -1 DATA_DIR/prometheus/snapshots | sort | tail -n 1)"
-```
-
-To skip the named-snapshot restore and bring up an empty cluster (so you can
-restore a different snapshot manually — e.g. the consolidated post-recovery
-state — without hitting `cannot restore index ... because an open index with
-same name already exists in the cluster`):
-
-```bash
-LATEST=$(ls -1 DATA_DIR/prometheus/snapshots | sort | tail -n 1)
-RESTORE_NAMED_SNAPSHOT=false ./load_snapshot.sh DATA_DIR "$LATEST"
-# Stack is up with an empty OpenSearch cluster. Restore whichever snapshot you want:
-curl -X POST 'http://localhost:9200/_snapshot/scheduled_backups/post_consolidation_2026-04-26/_restore?wait_for_completion=true' \
-  -H 'Content-Type: application/json' \
-  -d '{"indices": "*", "include_global_state": false}'
 ```
 
 2. Please following the instructions below for each telemetry type to find golden signals:

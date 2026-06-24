@@ -302,7 +302,7 @@ curl -s -X PUT "http://opensearch:9200/_snapshot/scheduled_backups?verify=false"
 sleep 2
 
 # Restore the snapshot (no need to close indices — opensearch-data starts empty)
-curl -s -X POST "http://opensearch:9200/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}-consolidated/_restore?wait_for_completion=true" \
+curl -s -X POST "http://opensearch:9200/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}/_restore?wait_for_completion=true" \
     -H 'Content-Type: application/json' \
     -d '{"indices": "*", "include_global_state": false}' \
     || echo "[entrypoint] Warning: OpenSearch snapshot restore failed (may not exist for this snapshot)"

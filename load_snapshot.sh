@@ -28,9 +28,8 @@ set -euo pipefail
 #   4. Starts services with snapshot-mode configs (read-only Prometheus, OTel Collector, Jaeger)
 #   5. Restores the named OpenSearch snapshot (Jaeger traces + OTel logs).
 #      Set RESTORE_NAMED_SNAPSHOT=false to skip this — useful when you intend to
-#      restore a different snapshot manually (e.g. post_consolidation_<date> or
-#      ${SNAPSHOT_NAME}-consolidated) into the empty cluster afterwards, and want
-#      to avoid the overlap-on-existing-index error from a double restore.
+#      restore a different snapshot manually into the empty cluster afterwards,
+#      and want to avoid the overlap-on-existing-index error from a double restore.
 #
 # Note: Jaeger traces are stored in OpenSearch, so they are captured
 # automatically by the OpenSearch snapshot — no separate Jaeger data needed.
@@ -112,8 +111,7 @@ sleep 30
 
 # ── 6. Restore OpenSearch snapshot (includes Jaeger traces + OTel logs) ────
 # Always register the snapshot repository so subsequent manual restores
-# (e.g. post_consolidation_<date>) can find it even when we skip the named
-# snapshot restore below.
+# can find it even when we skip the named snapshot restore below.
 echo "[load_snapshot] Registering OpenSearch snapshot repository..."
 curl -s -X PUT 'http://localhost:9200/_snapshot/scheduled_backups' \
     -H 'Content-Type: application/json' \
@@ -134,7 +132,7 @@ if [ "${RESTORE_NAMED_SNAPSHOT:-true}" = "true" ]; then
 else
     echo "[load_snapshot] RESTORE_NAMED_SNAPSHOT=false — skipping named snapshot restore."
     echo "[load_snapshot] Cluster left empty; restore your chosen snapshot manually, e.g.:"
-    echo "[load_snapshot]   curl -X POST 'http://localhost:9200/_snapshot/scheduled_backups/post_consolidation_<date>/_restore?wait_for_completion=true' \\"
+    echo "[load_snapshot]   curl -X POST 'http://localhost:9200/_snapshot/scheduled_backups/<snapshot_name>/_restore?wait_for_completion=true' \\"
     echo "[load_snapshot]     -H 'Content-Type: application/json' -d '{\"indices\": \"*\", \"include_global_state\": false}'"
 fi
 

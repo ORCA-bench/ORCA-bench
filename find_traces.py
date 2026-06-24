@@ -161,8 +161,8 @@ def main() -> None:
     right_minutes = args.right_window if args.right_window is not None else args.window
 
     # Hardcoded service list — Jaeger /services only reflects whatever the live
-    # jaeger-main-jaeger-service-* indices currently contain, which is unreliable
-    # after partial OpenSearch wipes (see RESTORE_HISTORICAL_INDICES.md).
+    # jaeger-main-jaeger-service-* indices currently contain, which can be
+    # incomplete depending on the loaded snapshot window.
     services = [
         "accounting",
         "ad",
