@@ -112,15 +112,6 @@ cp patches/harbor_models_task_task.py \
 docker compose -f opentelemetry-demo/docker-compose.yml up --force-recreate --remove-orphans --detach
 ```
 
-> \[!NOTE\]
-> Once the images are built and containers are started you can access:
-> - Web store: http://localhost:8080/
-> - Grafana: http://localhost:8080/grafana/
-> - Load Generator UI: http://localhost:8080/loadgen/
-> - Jaeger UI: http://localhost:8080/jaeger/ui/
-> - Tracetest UI: http://localhost:11633/, only when using make run-tracetesting
-> - Flagd configurator UI: http://localhost:8080/feature
-
 > \[!TIP\]
 > To check the health of the telemetry data, please run:
 > ```bash
@@ -292,7 +283,11 @@ uv run python label_metrics.py -f FEATURE_FLAG -od OUTPUT_DIR \
 <details>
   <summary>Instructions for frontend symptoms</summary>
 
-<!-- See Claude Code conversation `dev-1-questions` -->
+1. Repeat steps 1 and 2 from [Constructing Dataset](#constructing-dataset).
+
+2. Open the web store at http://localhost:8080/.
+
+3. Use the flagd configurator UI at http://localhost:8080/feature to fire feature flags. Then observe the effect on the web store.
 
 </details>
 
