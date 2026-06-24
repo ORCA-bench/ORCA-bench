@@ -64,6 +64,9 @@ docs = [
 
 # [project.urls] redacted for double-blind review.
 
+[project.scripts]
+harbor-export = "harbor_utils.export_predictions:cli_main"
+
 [tool.ruff]
 
 exclude = [
@@ -157,7 +160,7 @@ include = ["."]
 exclude = ["opentelemetry-demo", "opentelemetry.io", ".venv"]
 pythonVersion = "3.10.4"
 
-# No source package: this project is a dependency container for the flat
-# collection of scripts at the repo root, so there is nothing to discover/build.
-[tool.setuptools]
-py-modules = []
+# Source packages live under src/ (currently harbor_utils). The flat collection
+# of scripts at the repo root import these as installed modules.
+[tool.setuptools.packages.find]
+where = ["src"]
