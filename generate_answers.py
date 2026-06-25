@@ -6,10 +6,9 @@ Step 2 of the three-script pipeline (``generate_task_specs.py`` ->
 For each task spec under ``output_dir/task_specs/``, this script:
 
   * Skips control tasks → ``{"events": []}``
-  * With ``--no-llm`` (or for any granularity listed in
-    ``TRUSTED_GRANULARITIES``, currently empty), trusts the authored answer
+  * With ``--no-llm``, trusts the authored answer
     → ``{"events": [{"root_cause": authored_flag, "event_time": incident_dt}]}``
-  * Otherwise (every non-control granularity by default):
+  * Otherwise (every non-control task by default):
       - Enumerates candidate events from ``data_dir/events/`` whose
         ``wall_clock_utc`` is in
         ``[start_of_local_day(reported_dt), min(current_dt, end_of_local_day(reported_dt)))``
@@ -60,8 +59,6 @@ from task_spec import (
 from utils import get_base_parser, setup_logging
 
 logger = logging.getLogger(__name__)
-
-TRUSTED_GRANULARITIES: tuple[str, ...] = ()
 
 # Feature flags that are too generic to stand as a ground-truth answer when a
 # more specific incident is also present. Dropped from a task's answer set only
@@ -187,7 +184,7 @@ def _prompt_path(
 
 
 def _trivial_answer(spec: TaskSpec) -> dict:
-    """Build the answer for a control / easy / medium / --no-llm task."""
+    """Build the answer for a control / no-incident / --no-llm task."""
     if spec.section == "control" or spec.no_incident or spec.flag is None:
         return {"events": []}
     return {
@@ -261,14 +258,11 @@ async def process_spec(spec_path: Path, ctx: _Ctx) -> None:
     logger.info(f"Reading spec from {spec_path}")
     answer_path = ctx.answers_dir / f"{spec.task_id}.json"
 
-    # Trivial paths: control / no_incident / --no-llm. Granularities listed
-    # in ``TRUSTED_GRANULARITIES`` (currently empty) also short-circuit; set
-    # that tuple to e.g. ("easy", "medium") to skip the LLM for those.
+    # Trivial paths: control / no_incident / --no-llm.
     if (
         spec.section == "control"
         or spec.no_incident
         or spec.flag is None
-        or spec.granularity in TRUSTED_GRANULARITIES
         or ctx.no_llm
     ):
         answer = {**_trivial_answer(spec), "task_spec": spec.to_dict()}
@@ -279,7 +273,7 @@ async def process_spec(spec_path: Path, ctx: _Ctx) -> None:
         answer_path.write_text(json.dumps(answer, indent=2))
         return
 
-    # LLM path: hard / medium / universal.
+    # LLM path: medium (broad feature) / hard (flag-agnostic).
     # Window spans the local day of the *reported* time (what the agent sees in
     # its prompt), not of ``current_dt``. For broad sections without a
     # point-in-time reported_dt, fall back to the start of the reported period.
@@ -295,15 +289,6 @@ async def process_spec(spec_path: Path, ctx: _Ctx) -> None:
     window_lo = start_of_local_day(reported_anchor)
     window_hi = min(spec.current_dt, end_of_local_day(reported_anchor))
     candidates = candidate_events_in_window(ctx.event_timestamps, window_lo, window_hi)
-
-    # NOTE: force-including the authored event is disabled for now. For
-    # ``hard``/``medium``/``universal`` questions the authored event may
-    # not actually be the most plausible match for the reported issue, and
-    # we want the LLM's judgement to stand. Re-enable later if we want the
-    # answer to be a superset of the authored event.
-    # authored = ctx.event_timestamps.get(spec.event_id) if spec.event_id else None
-    # if authored is not None and authored not in candidates:
-    #     candidates = [authored, *candidates]
 
     # Drop candidates without a matching rubric, or with no frontend
     # symptoms documented. The reported issue is always user-facing, so an
@@ -421,32 +406,6 @@ async def process_spec(spec_path: Path, ctx: _Ctx) -> None:
     parsed = json.loads(raw)
     verdicts = parsed.get("plausible_events") or []
     verdict_by_id = {v["event_id"]: v for v in verdicts}
-
-    # NOTE: force-including the authored event when the LLM voted false is
-    # disabled for now. See the matching note above the candidate-set
-    # construction. Re-enable later if we want the answer to be a superset
-    # of the authored event.
-    # if spec.event_id and spec.event_id in by_id:
-    #     v = verdict_by_id.get(spec.event_id)
-    #     if v is None:
-    #         logger.warning(
-    #             f"{spec.task_id}: LLM dropped authored event {spec.event_id!r} "
-    #             f"from output; force-including"
-    #         )
-    #         verdict_by_id[spec.event_id] = {
-    #             "event_id": spec.event_id,
-    #             "plausible": True,
-    #             "reason": "Authored event force-included (LLM omitted it).",
-    #         }
-    #     elif not v.get("plausible"):
-    #         logger.warning(
-    #             f"{spec.task_id}: LLM voted authored event {spec.event_id!r} as "
-    #             f"not plausible; force-including"
-    #         )
-    #         v["plausible"] = True
-    #         v["reason"] = "[force-included by generate_answers.py] " + v.get(
-    #             "reason", ""
-    #         )
 
     plausible_event_ids = [
         eid for eid, v in verdict_by_id.items() if v.get("plausible")

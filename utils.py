@@ -181,13 +181,14 @@ def model_alias(agent_model_display: str) -> str:
     return MODEL_ALIASES.get(agent_model_display, agent_model_display)
 
 
-# Granularity rename: upstream ``task_meta.granularity`` uses
-# {easy, hard, universal}; we relabel to the user-facing
-# {easy, medium, hard} ladder so plots and tables read naturally.
+# Granularity: generation now emits the final user-facing ladder
+# {easy, medium, hard} directly (easy=detailed, medium=broad feature area,
+# hard=flag-agnostic), so this map is a passthrough. Kept as an explicit
+# identity for clarity and for normalizing legacy data via ``.get(g, g)``.
 GRANULARITY_ALIASES: dict[str, str] = {
     "easy": "easy",
-    "hard": "medium",
-    "universal": "hard",
+    "medium": "medium",
+    "hard": "hard",
 }
 
 

@@ -43,7 +43,8 @@ EXACT_PHRASINGS = ("at", "around")
 PERIOD_CATEGORIES = ("same-period", "previous-period", "next-period")
 DAY_CATEGORIES = ("same-day", "previous-day")
 
-# Flag-agnostic universal questions appended to every incident's task set.
+# Flag-agnostic questions appended to every incident's task set, emitted at the
+# ``hard`` granularity (the hardest tier — no hint about which flag is at fault).
 UNIVERSAL_QUESTIONS: list[str] = [
     "users are reporting site issues",
 ]

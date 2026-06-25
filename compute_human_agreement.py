@@ -111,7 +111,9 @@ def main() -> None:
 
     with args.sampled_tasks.open() as f:
         sampled: dict[str, dict] = json.load(f)
-    granularity_aliases = {"easy": "easy", "hard": "medium", "universal": "hard"}
+    # Generation now emits the final {easy, medium, hard} ladder directly;
+    # identity map (kept to normalize any legacy data via ``.get``).
+    granularity_aliases = {"easy": "easy", "medium": "medium", "hard": "hard"}
     task_difficulty = {
         t: granularity_aliases.get(v["difficulty"], v["difficulty"])
         for t, v in sampled.items()

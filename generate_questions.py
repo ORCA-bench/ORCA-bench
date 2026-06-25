@@ -126,13 +126,13 @@ comparisons. Counter-example: "page latency rose from 10 ms to 190 ms" \
 is NOT perceivable — a sub-200ms change is invisible to humans and \
 only shows up in dashboards.
 
-For each affected feature area, emit one or more **hard** descriptions \
+For each affected feature area, emit one or more **medium** descriptions \
 naming the broad feature area the user is impacted in (one or a few \
 alternate phrasings per area). For each distinct user-visible issue you \
-identify, additionally emit a **medium** and an **easy** variant of that \
-same underlying issue. Granularity levels:
+identify, additionally emit an **easy** variant of that same underlying \
+issue. Granularity levels:
 
-- **hard**: a single short clause from the customer's perspective \
+- **medium**: a single short clause from the customer's perspective \
   describing the BROAD feature area affected (e.g., "ads", "cart", \
   "product page", "recommendations", "checkout"), NOT the specific \
   symptom or action. MAX 7 WORDS. Must start with a user-perspective \
@@ -146,28 +146,24 @@ same underlying issue. Granularity levels:
   cannot view product pages", "users are unable to pay", "users are \
   having payment issues", "customers cannot complete payment", \
   "shoppers are unable to pay", "users say product page not loading \
-  properly". Emit at least ONE hard per affected feature area. \
+  properly". Emit at least ONE medium per affected feature area. \
   You MAY emit a small number (typically 1–3) of alternate phrasings \
   for the same feature area to capture different customer voices — \
   vary the subject ("users"/"customers"/"shoppers") and the verbs. \
   Never emit one per individual symptom.
-- **medium**: a single short, vague clause. No product names, page names, error \
-  codes, messages, users, regions, or locales. \
-  Example: "product page is having issues".
 - **easy**: name the product / page / feature, the concrete symptom, the \
   specific error or error-message string the user sees, and (when applicable) \
   the affected user, region, or locale. \
   Example: "Product page for National Park Foundation Explorascope is having \
   X issue and is showing Y errors with Z message for W user".
 
-The medium / easy variants for the same underlying issue must \
-describe the SAME root cause (the same feature flag) and must be emitted \
-together as a pair (one issue's medium/easy before moving on to the next \
-issue). The hard variants describe higher-level feature impact and are \
-NOT bound 1:1 to those pairs — emit them once per affected feature area, \
-independently of the pairs (you may place them before, after, or \
-interleaved with the pairs). Use the lowercase granularity tokens \
-exactly: "easy", "medium", "hard".
+Each **easy** variant describes one specific user-visible issue and must \
+describe the SAME root cause (the same feature flag) as this incident. The \
+**medium** variants describe higher-level feature impact and are NOT bound \
+1:1 to the easy variants — emit them once per affected feature area, \
+independently (you may place them before, after, or interleaved with the \
+easy variants). Use the lowercase granularity tokens exactly: \
+"easy", "medium".
 {prior_questions_section}
 Return your answer as JSON matching the provided schema.
 """
@@ -200,7 +196,7 @@ ISSUES_SCHEMA = {
                 "properties": {
                     "granularity": {
                         "type": "string",
-                        "enum": ["easy", "medium", "hard"],
+                        "enum": ["easy", "medium"],
                     },
                     "question": {"type": "string"},
                 },
@@ -392,7 +388,7 @@ def generate_questions(
                 by_gran.setdefault(gran, []).append(q)
             lines = [
                 f"- [{gran}] {q}"
-                for gran in ("hard", "medium", "easy")
+                for gran in ("medium", "easy")
                 for q in by_gran.get(gran, [])
             ]
             prior_questions_section = (

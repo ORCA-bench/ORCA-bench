@@ -344,16 +344,17 @@ def load_yaml_config(path: Path) -> V2Config:
 
 
 # ───────────────────────────── Loaders ─────────────────────────────
-_KEEP_GRANULARITIES: tuple[str, ...] = ("hard", "medium", "easy")
+_KEEP_GRANULARITIES: tuple[str, ...] = ("medium", "easy")
 
 
 def load_questions(args: Any, schedule: Path) -> list[dict]:
     """Load question JSON files; sample one question per (event, granularity).
 
-    For each event we uniformly sample one question at each of ``hard``,
-    ``medium``, and ``easy``. A single ``universal`` question is added
-    downstream so the final per-event budget is 4 questions (universal +
-    hard + medium + easy). Sampling is reproducible when ``--seed`` is set.
+    For each event we uniformly sample one question at each of ``medium``
+    (broad feature area) and ``easy`` (detailed). A single flag-agnostic
+    question — labeled ``hard`` — is added downstream so the final per-event
+    budget is 3 questions (easy + medium + hard). Sampling is reproducible
+    when ``--seed`` is set.
     """
     questions_dir = args.output_dir / "questions"
     effort = args.effort or "medium"
@@ -686,12 +687,12 @@ def iter_broad_day(
 ) -> None:
     """Generate broad day tasks for one question (one or more bundles).
 
-    ``universal`` questions are excluded from this section: at day-level
-    granularity ("sometime today / yesterday") with a flag-agnostic prompt,
-    almost every active flag in the day is plausible — the resulting answer
-    sets are too broad to be useful.
+    Flag-agnostic ``hard`` (universal) questions are excluded from this
+    section: at day-level granularity ("sometime today / yesterday") with a
+    flag-agnostic prompt, almost every active flag in the day is plausible —
+    the resulting answer sets are too broad to be useful.
     """
-    if question.get("granularity") == "universal":
+    if question.get("universal"):
         return
     qid = question["id"]
     earliest = ctx.snapshot_times[0] if ctx.snapshot_times else None
@@ -1015,7 +1016,8 @@ def main() -> None:
     if not questions:
         return
 
-    # Augment with one universal question per event.
+    # Augment with one flag-agnostic question per event, labeled ``hard``
+    # (the hardest tier — no hint about which flag is at fault).
     seen: dict[str, tuple[dict, str]] = {}
     for q in questions:
         eid = q["event"]["id"]
@@ -1026,9 +1028,10 @@ def main() -> None:
         idx = universal_rng.randrange(len(UNIVERSAL_QUESTIONS))
         questions.append(
             {
-                "id": f"{eid}-univ{idx:02d}-universal",
+                "id": f"{eid}-univ{idx:02d}-hard",
                 "question": UNIVERSAL_QUESTIONS[idx],
-                "granularity": "universal",
+                "granularity": "hard",
+                "universal": True,
                 "event": event,
                 "answer": answer,
             }

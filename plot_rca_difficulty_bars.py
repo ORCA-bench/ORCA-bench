@@ -1,9 +1,9 @@
 r"""Two-panel RCA-by-difficulty bar chart: RCA Accuracy (Exact) and RCA Depth.
 
 Side-by-side grouped bar charts (x-groups = agent_model) for two metrics,
-broken out by prompt difficulty. The user-facing ``_granularity`` values are
-already ``easy``/``medium``/``hard`` (``utils.GRANULARITY_ALIASES`` rewrites
-the upstream ``easy``/``hard``/``universal`` labels).
+broken out by prompt difficulty. Generation emits the ``_granularity`` ladder
+``easy``/``medium``/``hard`` directly (``utils.GRANULARITY_ALIASES`` is now an
+identity passthrough).
 
 1. **RCA Accuracy (Exact) ↑** — ``feature_flag_all_match`` mean per
    difficulty (Easy/Medium/Hard) on incident tasks, plus a **Control** bar

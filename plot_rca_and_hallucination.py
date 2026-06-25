@@ -3,14 +3,15 @@ r"""1×3 figure: RCA Accuracy (Medium), RCA Accuracy (Hard), Hallucination Rate.
 Side-by-side bar charts (one bar per agent_model) for three slices of the
 incident-task data. We show the two harder difficulty tiers (Medium and
 Hard); Easy is omitted here because it looks deceptively good and pulls
-attention from the realistic setting. The user-facing ``_granularity``
-values are already ``easy``/``medium``/``hard`` (``utils.GRANULARITY_ALIASES``
-rewrites upstream ``easy``/``hard``/``universal``).
+attention from the realistic setting. Generation emits the ``_granularity``
+ladder ``easy``/``medium``/``hard`` directly (``utils.GRANULARITY_ALIASES``
+is now an identity passthrough).
 
 1. **RCA Accuracy (Medium)** — ``feature_flag_all_match`` mean restricted
-   to ``_granularity == "medium"``: vague time, specific symptom.
+   to ``_granularity == "medium"``: a broad feature-area complaint.
 2. **RCA Accuracy (Hard)** — same metric restricted to
-   ``_granularity == "hard"``: vague time, generic user complaint.
+   ``_granularity == "hard"``: a flag-agnostic question (no hint which
+   feature flag failed).
 3. **Hallucination Rate** — ``hallucinate_any`` mean across all incident
    tasks (lower is better, ↓; the RCA panels are higher is better, ↑).
 
