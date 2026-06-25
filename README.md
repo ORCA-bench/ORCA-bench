@@ -166,17 +166,33 @@ uv run python generate_questions.py --schedule SCHEDULE_PATH -od OUTPUT_DIR
 # Example: uv run python generate_questions.py --schedule schedules/incident_schedule_dev_single_2.json -od out-0402-3
 ```
 
-7. Create Harbor tasks and share to the HuggingFace repo at https://huggingface.co/datasets/orca-bench/sre-2d-harbor-tasks:
+7. Create Harbor tasks and publish them to the [Harbor Hub](https://hub.harborframework.com/datasets/orca-bench/ORCA-bench):
 
 ```bash
-# NOTE: build_harbor_tasks.py writes `OUTPUT_DIR/harbor/used_snapshots.json` listing the snapshots actually referenced by tasks.
 uv run python generate_task_specs.py \
   -od out-test-0503-3 -dd data-0418 -e high \
   --config configs/harbor_tasks_v2_share2w.yaml --force
 uv run python generate_answers.py -od out-test-0503-3 -dd data-0418 -e high --concurrency 1600
 
-# NOTE: to build the Harbor tasks with the telemetry-only environment, pass `--templates-dir harbor-template-telemetry-only`
-uv run python build_harbor_tasks.py -od out-test-0503-3 -dd data-0418 --templates-dir harbor-template --force
+# build_harbor_tasks.py writes OUTPUT_DIR/harbor/:
+#   - tasks/<hash>/            one Harbor task per question; task.toml [task].name is a
+#                              hash of the task id so the published name doesn't leak the
+#                              feature flag, and all metadata is mirrored into [metadata].
+#   - dataset.toml             ready-to-publish manifest (no separate `harbor dataset init`
+#                              / `harbor add --scan` needed).
+#   - tasks.csv                maps the real task_id -> hashed package_name.
+#   - used_snapshots.json, task_snapshot_map.json
+# NOTE: for the telemetry-only environment, pass `--templates-dir harbor-template-telemetry-only`
+uv run python build_harbor_tasks.py -od out-test-0503-3 -dd data-0418 \
+  --templates-dir harbor-template --force \
+  --dataset-name orca-bench/ORCA-bench \
+  --dataset-description "An agent benchmark for root cause analysis" \
+  --dataset-author "Your Name <your@email.com>"
+
+# Upload the task content to the Harbor Hub, then publish the dataset manifest
+# (the script prints these two commands when it finishes):
+uv run harbor add out-test-0503-3/harbor/tasks --scan
+uv run harbor publish out-test-0503-3/harbor/dataset.toml
 ```
 
 8. Build and push the Harbor Docker image with the snapshot
