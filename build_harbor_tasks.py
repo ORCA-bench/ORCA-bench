@@ -675,7 +675,7 @@ def main() -> None:
     print(f"Wrote {len(out.task_dirs)} task(s) -> {tasks_dir}")
     print(f"Wrote dataset manifest ({len(out.dataset_refs)} tasks) -> {dataset_path}")
     print("\nNext steps:")
-    print(f"  harbor add {tasks_dir} --scan       # upload task content to harbor hub")
+    print(f"  harbor publish {tasks_dir}       # publish the tasks")
     print(f"  harbor publish {dataset_path}       # publish the dataset")
 
 
