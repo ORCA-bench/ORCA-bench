@@ -7,8 +7,6 @@ Supports two modes:
 
 2. **Post-hoc single-trial**:
        python check_prediction.py --expected expected.json --predictions report.md [--rubric rubric.json]
-
-Falls back to string-match scoring when OPENAI_API_KEY is not set.
 """
 
 import argparse
@@ -1147,8 +1145,8 @@ async def main() -> None:
         "--mode",
         type=str,
         choices=["string_match", "llm_judge"],
-        default="string_match",
-        help="Scoring mode: string_match or llm_judge (default: string_match).",
+        default="llm_judge",
+        help="Scoring mode: string_match or llm_judge (default: llm_judge).",
     )
     parser.add_argument("--reward", type=str, default="/logs/verifier/reward.txt")
     parser.add_argument("--details", type=str, default="/logs/verifier/details.json")

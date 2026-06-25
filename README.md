@@ -57,7 +57,11 @@ cp patches/opentelemetry-demo.env opentelemetry-demo/.env
 1. Please go to https://cloud.digitalocean.com/gen-ai/model-access-keys -> Create model access key. Then configure the following environment variables:
 
 ```bash
+# Set Gradient AI API key to access GradientAI models via LiteLLM
 export GRADIENT_AI_API_KEY=$MODEL_ACCESS_KEY
+
+# Set OpenAI API key for LLM judge in Harbor task verifier
+export OPENAI_API_KEY=$MODEL_ACCESS_KEY
 ```
 
 2. Patch LiteLLM to support `reasoning_effort` and Anthropic `cache_control` passthrough for Gradient AI:
