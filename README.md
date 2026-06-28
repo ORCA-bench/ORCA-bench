@@ -316,23 +316,38 @@ uv run python label_metrics.py -f FEATURE_FLAG -od OUTPUT_DIR \
 1. Launch the Harbor tasks using the following command:
 
 ```bash
-# Stop all containers from previous runs to avoid Docker container naming conflicts
-docker stop $(docker ps -q)
-# Clear harbor cache
-uv run harbor cache clean
-
 # Launch jobs (note: this script pre-pulls the Docker image with the snapshot to /root/.cache/sre-snapshot-cache so that we can bind-mount it to all tasks).
 # Each config pairs one task dataset with the snapshot image whose `/app/` matches its environment, so run them on separate machines for parallel sweeps:
-#   Machine A — full template
+#   Telemetry + code
 SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
     ./run_harbor_cached.sh -c configs/harbor_job_orca_bench.yaml
-#   Machine B — telemetry-only
+
+#   Telemetry-only
 SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-telemetry-only \
     ./run_harbor_cached.sh -c configs/harbor_job_orca_bench_telemetry_only.yaml
-#   Machine C — code-only
-SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:code-only \
-    ./run_harbor_cached.sh -c configs/harbor_job_orca_bench_code_only.yaml
 ```
+
+<details>
+<summary>Steps without shell scripts</summary>
+
+> [!NOTE]
+> Substitute the telemetry-only image and config for the telemetry-only results.
+
+```bash
+# Stage the snapshot's /app/ to a host-side cache keyed by image id.
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template
+docker pull "$SNAPSHOT_IMAGE"
+CACHE_DIR="$HOME/.cache/sre-snapshot-cache/$(docker image inspect "$SNAPSHOT_IMAGE" -f '{{.Id}}' | cut -d: -f2 | cut -c1-12)"
+[ -z "$(ls -A "$CACHE_DIR" 2>/dev/null)" ] && { mkdir -p "$CACHE_DIR"; CID=$(docker create "$SNAPSHOT_IMAGE"); docker cp "$CID:/app/." "$CACHE_DIR/"; docker rm "$CID"; }
+
+# Bind-mount the cache (read-only) into every trial at the same host path
+# (target=source, so the entrypoint can `cp -al` without translating it).
+SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" uv run harbor run \
+    --mounts-json "[{\"type\":\"bind\",\"source\":\"$CACHE_DIR\",\"target\":\"$CACHE_DIR\",\"read_only\":true}]" \
+    -c configs/harbor_job_orca_bench.yaml
+```
+
+</details>
 
 3. Export predictions from Harbor jobs:
 
