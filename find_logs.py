@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Find error-relevant logs from OpenSearch for all incidents in a data directory.
+"""Find logs from OpenSearch for all incidents in a data directory.
 
 Reads event JSON files from ``data-dir/events/``, then queries OpenSearch for
-logs within a time window around each incident, filtering for error severity
-(>= 17) and error-related keywords in the log body. Outputs matching logs and
-a per-service summary.
+all logs within a time window around each incident. We deliberately do *not*
+filter by error severity or error-related keywords: keyword/severity matching
+produced too many false positives (benign lines mentioning "error", "timeout",
+etc.) and false negatives (real symptoms that don't use any of those words), so
+we return the full window and leave relevance judgements to downstream analysis.
+Outputs the matching logs and a per-service summary.
 
 Examples::
 
@@ -43,119 +46,31 @@ OPENSEARCH_BASE = "http://localhost:9200"
 BATCH_SIZE = 10000
 SCROLL_TTL = "2m"
 
-# Error-related keywords to match in log body
-ERROR_KEYWORDS = [
-    # HTTP status codes
-    "500",
-    "503",
-    "400",
-    "401",
-    "403",
-    "404",
-    "429",
-    "502",
-    "504",
-    # Connection/network
-    "connection refused",
-    "ECONNREFUSED",
-    "ECONNRESET",
-    "ETIMEDOUT",
-    "broken pipe",
-    "EOF",
-    "hangup",
-    "unreachable",
-    "reset",
-    "dns",
-    "resolve",
-    # Application errors
-    "error",
-    "fatal",
-    "critical",
-    "panic",
-    "crash",
-    "abort",
-    "segfault",
-    "OOM",
-    "out of memory",
-    "killed",
-    "terminated",
-    # Retry/circuit-breaker
-    "retry",
-    "backoff",
-    "circuit open",
-    "rate limit",
-    "throttle",
-    "overload",
-    "unavailable",
-    # Upstream/proxy (Envoy)
-    "upstream_reset",
-    "upstream connect error",
-    "no healthy upstream",
-    "overflow",
-    "timeout",
-    "refused",
-    # Runtime exceptions
-    "traceback",
-    "stacktrace",
-    "null",
-    "nil",
-    "undefined",
-    "NoneType",
-    "segmentation fault",
-    "deadlock",
-    # General
-    "fail",
-    "exception",
-]
-
 
 def build_query(start_iso: str, end_iso: str) -> dict:
-    """Build an OpenSearch bool query for error-relevant logs in a time range."""
-    if False:
-        keyword_clauses = [{"match_phrase": {"body": kw}} for kw in ERROR_KEYWORDS]
+    """Build an OpenSearch query for all logs in a time range.
 
-        return {
-            "size": BATCH_SIZE,
-            "query": {
-                "bool": {
-                    "must": [
-                        {
-                            "range": {
-                                "@timestamp": {
-                                    "gte": start_iso,
-                                    "lte": end_iso,
-                                }
+    We intentionally return the full time window rather than filtering by
+    severity or keywords, which produced too many false positives/negatives.
+    """
+    return {
+        "size": BATCH_SIZE,
+        "query": {
+            "bool": {
+                "must": [
+                    {
+                        "range": {
+                            "@timestamp": {
+                                "gte": start_iso,
+                                "lte": end_iso,
                             }
                         }
-                    ],
-                    "should": [
-                        {"range": {"severity.number": {"gte": 17}}},
-                        *keyword_clauses,
-                    ],
-                    "minimum_should_match": 1,
-                }
-            },
-            "sort": [{"@timestamp": "asc"}],
-        }
-    else:
-        return {
-            "size": BATCH_SIZE,
-            "query": {
-                "bool": {
-                    "must": [
-                        {
-                            "range": {
-                                "@timestamp": {
-                                    "gte": start_iso,
-                                    "lte": end_iso,
-                                }
-                            }
-                        }
-                    ]
-                }
-            },
-            "sort": [{"@timestamp": "asc"}],
-        }
+                    }
+                ]
+            }
+        },
+        "sort": [{"@timestamp": "asc"}],
+    }
 
 
 def fetch_error_logs(start_iso: str, end_iso: str) -> list[dict]:
