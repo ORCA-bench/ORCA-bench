@@ -17,8 +17,7 @@ pip install uv
 uv sync --all-groups
 ```
 
-<details>
-  <summary>Additional setup instructions for data collection</summary>
+### Additional setup instructions for data collection
 
 The telemetry data collection was performed on a DigitalOcean Droplet with 32 GB / 8 CPUs.
 
@@ -52,10 +51,17 @@ cp patches/opensearch-config.yml opentelemetry-demo/src/jaeger/
 cp patches/opentelemetry-demo.env opentelemetry-demo/.env
 ```
 
-</details>
+### Additional setup instructions for Harbor
+
+Patch Harbor's `Task.checksum` to ignore `environment/.trials/`. The harbor-template entrypoint stages each trial's OpenTelemetry demo + live OpenSearch data under `environment/.trials/<PROJECT_HASH>/`; without this patch, `dirhash` walks into another in-flight trial's snapshot tree and races OpenSearch's segment renames, raising `FileNotFoundError` mid-scan. The unpatched checksum is also non-deterministic for the same reason.
+
+```bash
+cp patches/harbor_models_task_task.py \
+  "$(uv run python -c "import harbor.models.task.task as m; print(m.__file__)")"
+```
 
 <details>
-  <summary>Additional setup instructions for Harbor + GradientAI evaluation</summary>
+<summary>**Using GradientAI's serverless inference from DigitalOcean**</summary>
 
 1. Please go to https://cloud.digitalocean.com/gen-ai/model-access-keys -> Create model access key. Then configure the following environment variables:
 
@@ -63,8 +69,9 @@ cp patches/opentelemetry-demo.env opentelemetry-demo/.env
 # Set Gradient AI API key to access GradientAI models via LiteLLM
 export GRADIENT_AI_API_KEY=$MODEL_ACCESS_KEY
 
-# Set OpenAI API key for LLM judge in Harbor task verifier
+# Set OpenAI API key and base URL for LLM judge in Harbor task verifier
 export OPENAI_API_KEY=$MODEL_ACCESS_KEY
+export OPENAI_BASE_URL=https://inference.do-ai.run/v1
 ```
 
 2. Patch LiteLLM to support `reasoning_effort` and Anthropic `cache_control` passthrough for Gradient AI:
@@ -72,13 +79,6 @@ export OPENAI_API_KEY=$MODEL_ACCESS_KEY
 ```bash
 cp patches/litellm_gradient_ai_chat_transformation.py \
   "$(uv run python -c "import litellm; print(litellm.__path__[0])")/llms/gradient_ai/chat/transformation.py"
-```
-
-3. Patch Harbor's `Task.checksum` to ignore `environment/.trials/`. The harbor-template entrypoint stages each trial's OpenTelemetry demo + live OpenSearch data under `environment/.trials/<PROJECT_HASH>/`; without this patch, `dirhash` walks into another in-flight trial's snapshot tree and races OpenSearch's segment renames, raising `FileNotFoundError` mid-scan. The unpatched checksum is also non-deterministic for the same reason.
-
-```bash
-cp patches/harbor_models_task_task.py \
-  "$(uv run python -c "import harbor.models.task.task as m; print(m.__file__)")"
 ```
 
 </details>
