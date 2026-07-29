@@ -169,16 +169,16 @@ tar --zstd -xf data-0418.tar.zst
 ```bash
 uv run python generate_questions.py --schedule SCHEDULE_PATH -od OUTPUT_DIR
 
-# Example: uv run python generate_questions.py --schedule schedules/incident_schedule_dev_single_2.json -od out-0402-3
+# Example: uv run python generate_questions.py --schedule schedules/incident_schedule_dev_single_2.json -od OUTPUT_DIR
 ```
 
 7. Create Harbor tasks and publish them to the [Harbor Hub](https://hub.harborframework.com/datasets/orca-bench/ORCA-bench):
 
 ```bash
 uv run python generate_task_specs.py \
-  -od out-test-0503-3 -dd data-0418 -e high \
+  -od OUTPUT_DIR -dd data-0418 -e high \
   --config configs/harbor_tasks_v2_share2w.yaml --force
-uv run python generate_answers.py -od out-test-0503-3 -dd data-0418 -e high --concurrency 1600
+uv run python generate_answers.py -od OUTPUT_DIR -dd data-0418 -e high --concurrency 1600
 
 # build_harbor_tasks.py writes OUTPUT_DIR/harbor/:
 #   - tasks/<hash>/            one Harbor task per question; task.toml [task].name is a
@@ -189,7 +189,7 @@ uv run python generate_answers.py -od out-test-0503-3 -dd data-0418 -e high --co
 #   - tasks.csv                maps the real task_id -> hashed package_name.
 #   - used_snapshots.json, task_snapshot_map.json
 # NOTE: for the telemetry-only environment, pass `--templates-dir harbor-template-telemetry-only`
-uv run python build_harbor_tasks.py -od out-test-0503-3 -dd data-0418 \
+uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd data-0418 \
   --templates-dir harbor-template --force \
   --dataset-name orca-bench/ORCA-bench \
   --dataset-description "An agent benchmark for root cause analysis" \
@@ -197,8 +197,8 @@ uv run python build_harbor_tasks.py -od out-test-0503-3 -dd data-0418 \
 
 # Upload the task content to the Harbor Hub, then publish the dataset manifest
 # (the script prints these two commands when it finishes):
-uv run harbor add out-test-0503-3/harbor/tasks --scan
-uv run harbor publish out-test-0503-3/harbor/dataset.toml
+uv run harbor add OUTPUT_DIR/harbor/tasks --scan
+uv run harbor publish OUTPUT_DIR/harbor/dataset.toml
 ```
 
 8. Build and push the Harbor Docker image with the snapshot
@@ -235,9 +235,6 @@ uv run python build_and_push_snapshots.py --data-dir DATA_DIR
 
 ```bash
 uv run python find_traces.py -dd DATA_DIR -od OUTPUT_DIR
-
-# Example:
-#   uv run python find_traces.py -dd data-0216-copy -od out-0323-2
 ```
 
 - [ ] Add instructions to prompt Claude and save the output to `OUTPUT_DIR/json/{event_id}-{feature_flag}.json`.
@@ -251,9 +248,6 @@ uv run python find_traces.py -dd DATA_DIR -od OUTPUT_DIR
 
 ```bash
 uv run python find_logs.py -dd DATA_DIR -od OUTPUT_DIR
-
-# Example:
-#   uv run python find_logs.py -dd data-0216-copy -od out-0323-2
 ```
 
 - [ ] Add instructions to prompt Claude and save the output to `OUTPUT_DIR/json/{event_id}-{feature_flag}.json`.
@@ -270,7 +264,7 @@ uv run python find_metrics_family.py -f FEATURE_FLAG -t UTC_TIME -od OUTPUT_DIR 
 
 # Example:
 #   uv run python find_metrics_family.py -f productCatalogFailure \
-#     -t "2026-04-02 06:25:59 UTC" -od metrics-0401 -n 3
+#     -t "2026-04-02 06:25:59 UTC" -od OUTPUT_DIR -n 3
 ```
 
 - Review the per-run JSON files and PDF plots manually. Fix misclassified types (e.g., `"created (fixed after human verification)"`). Mark dubious entries as `inconclusive`.
@@ -283,7 +277,7 @@ uv run python onset_metrics.py -f FEATURE_FLAG -t UTC_TIME -od OUTPUT_DIR \
 
 # Example:
 #   uv run python onset_metrics.py -f productCatalogFailure \
-#     -t "2026-04-02 06:25:59 UTC" -od metrics-0401/metrics_onset \
+#     -t "2026-04-02 06:25:59 UTC" -od OUTPUT_DIR \
 #     -dir metrics-0401/metrics -m opus -e max
 ```
 
@@ -297,7 +291,7 @@ uv run python label_metrics.py -f FEATURE_FLAG -od OUTPUT_DIR \
 
 # Example:
 #   uv run python label_metrics.py -f productCatalogFailure \
-#     -od metrics-0401 -dir metrics-0401/metrics_onset -m opus -e max
+#     -od OUTPUT_DIR -dir metrics-0401/metrics_onset -m opus -e max
 ```
 
 </details>
@@ -377,7 +371,7 @@ uv run python run_llm_judge.py -od OUTPUT_DIR -e high -bs 1000 --concurrency 100
   <summary>Obtain scores on human eval sample only</summary>
 
 ```bash
-uv run python run_llm_judge.py -od out-0517 -e high -bs 1600 --concurrency 1600 --sampled-tasks-file human-eval-sample/output/sampled_tasks.json
+uv run python run_llm_judge.py -od OUTPUT_DIR -e high -bs 1600 --concurrency 1600 --sampled-tasks-file human-eval-sample/output/sampled_tasks.json
 ```
 
 </details>
@@ -390,25 +384,25 @@ uv run python run_llm_judge.py -od out-0517 -e high -bs 1600 --concurrency 1600 
 uv run python compute_human_agreement.py \
   --scores-a human_verified_scores.json \
   --scores-b human_verified_scores_ag.json \
-  -od out-0522 -e high
+  -od OUTPUT_DIR -e high
 
 # Scatter grid (rows=difficulty, cols=model) of human vs. LLM judge scores,
 # one PDF per annotator's score file
-uv run python plot_human_vs_llm_scatter.py -od out-0522 -e high --human-scores human_verified_scores_ag.json
-uv run python plot_human_vs_llm_scatter.py -od out-0522 -e high --human-scores human_verified_scores.json
+uv run python plot_human_vs_llm_scatter.py -od OUTPUT_DIR -e high --human-scores human_verified_scores_ag.json
+uv run python plot_human_vs_llm_scatter.py -od OUTPUT_DIR -e high --human-scores human_verified_scores.json
 ```
 
 6. Format accuracy results:
 
 ```bash
 # Generate Figure 1: RCA accuracy and hallucination
-uv run python plot_rca_and_hallucination.py -od out-0619-3 -e high
+uv run python plot_rca_and_hallucination.py -od OUTPUT_DIR -e high
 
 # Generate Figure 4: PRCA performance by prompt difficulty
-uv run python plot_rca_difficulty_bars.py -od out-0619-3 -e high
+uv run python plot_rca_difficulty_bars.py -od OUTPUT_DIR -e high
 
 # Generate table of accuracy results for appendix
-uv run python format_acc.py -od out-0510 -e high
+uv run python format_acc.py -od OUTPUT_DIR -e high
 ```
 
 <details>
@@ -428,10 +422,10 @@ uv run python format_acc.py -od out-0510 -e high
 # Step 1 (recover_outputs) parses asciinema recording.cast to sidestep the
 # terminus-2 40-row pane truncation that inflates apparent error rates 4-5x
 # in trajectory.json. Steps 2-3 then judge + aggregate per-agent outcomes.
-uv run python recover_outputs.py        -od out-0619-3 -jd jobs-sub
+uv run python recover_outputs.py        -od OUTPUT_DIR -jd jobs-sub
 
 # Generate CSV of tool calls per trial
-uv run python format_tool_calls.py -od out-0619-3 -jd jobs-sub
+uv run python format_tool_calls.py -od OUTPUT_DIR -jd jobs-sub
 ```
 
 * Plot per-model command-category Markov-chain transition diagrams. `--models`
@@ -444,22 +438,20 @@ uv run python format_tool_calls.py -od out-0619-3 -jd jobs-sub
 
 ```bash
 # Main-paper figure: Opus 4.7 and GLM-5
-uv run python format_markov_chain.py -od out-0619-3 -jd jobs-sub \
+uv run python format_markov_chain.py -od OUTPUT_DIR -jd jobs-sub \
     --models opus-4.7 glm-5 --min-prob 0.10 --fig-name markov_chain.pdf
 
 # Appendix figure: Sonnet 4.6, GPT-5.5, DeepSeek-V4-Pro
-uv run python format_markov_chain.py -od out-0619-3 -jd jobs-sub \
+uv run python format_markov_chain.py -od OUTPUT_DIR -jd jobs-sub \
     --models 4.6-sonnet gpt-5.5 deepseek-v4-pro --min-prob 0.10 --fig-name markov_chain_appendix.pdf
 ```
 
-* Generate plot of token and tool-calling efficiency:
+* Generate retrieval plot (mean telemetry commands, per-type failure rate, per-type any-match rate):
 
 ```bash
 # Classify telemetry calls into success, empty, error
-uv run python classify_telemetry_calls.py -od out-0518-sample100 --concurrency 800 -e high -bs 100 -bn 1
-# Classify telemetry calls into unique or redundant
-uv run python classify_redundant_calls.py -od out-0518-sample100 --concurrency 800 -e high -bs 100 -bn 1
+uv run python classify_telemetry_calls.py -od OUTPUT_DIR --concurrency 800 -e high -bs 100 -bn 1
 
-# Generate Figure 7: Token & tool-calling efficiency
-uv run python plot_efficiency.py
+# Generate Figure 8: Retrieval diagnostics
+uv run python plot_retrieval.py -od OUTPUT_DIR -jd jobs-sub
 ```
