@@ -84,24 +84,28 @@ cp patches/harbor_models_task_task.py \
 
 ## Constructing Dataset
 
-> \[!WARNING\]
-> **The released Harbor tasks were not produced by this exact pipeline.** During
-> data collection our OpenSearch instance was hit by `DELETE INDEX` /
-> `DELETE BY QUERY` ransomware attacks that wiped portions of the daily Jaeger /
-> OTel indices captured in our scheduled snapshots. To salvage the affected
-> snapshots we ran a one-off, *post hoc* recovery procedure — detecting each wipe
-> from the snapshot size curve, replaying the missing data, and consolidating it
-> into per-snapshot `-consolidated` snapshots that the Harbor entrypoint then
-> restored. The published tasks are built on that recovered, consolidated data.
->
-> The steps documented below describe the **intended, clean pipeline**: with a
-> properly firewalled/secured OpenSearch instance the scheduled snapshots are
-> already complete and point-in-time-correct, so no recovery or consolidation is
-> needed and the Harbor entrypoint restores the scheduled snapshot directly.
-> Reproducing from scratch should therefore *not* require the recovery steps. For
-> complete provenance, the exact post-hoc recovery procedure we ran (the runbook
-> and its scripts) is preserved under
-> [`opensearch-recovery/`](opensearch-recovery/).
+<details>
+  <summary>⚠️ Disclaimer: the released Harbor tasks were not produced by this exact pipeline</summary>
+
+**The released Harbor tasks were not produced by this exact pipeline.** During
+data collection our OpenSearch instance was hit by `DELETE INDEX` /
+`DELETE BY QUERY` ransomware attacks that wiped portions of the daily Jaeger /
+OTel indices captured in our scheduled snapshots. To salvage the affected
+snapshots we ran a one-off, *post hoc* recovery procedure — detecting each wipe
+from the snapshot size curve, replaying the missing data, and consolidating it
+into per-snapshot `-consolidated` snapshots that the Harbor entrypoint then
+restored. The published tasks are built on that recovered, consolidated data.
+
+The steps documented below describe the **intended, clean pipeline**: with a
+properly firewalled/secured OpenSearch instance the scheduled snapshots are
+already complete and point-in-time-correct, so no recovery or consolidation is
+needed and the Harbor entrypoint restores the scheduled snapshot directly.
+Reproducing from scratch should therefore *not* require the recovery steps. For
+complete provenance, the exact post-hoc recovery procedure we ran (the runbook
+and its scripts) is preserved under
+[`opensearch-recovery/`](opensearch-recovery/).
+
+</details>
 
 1. Initialize data volumes for persisting telemetry data and follow the provided instructions to export the data mount environment variables:
 
