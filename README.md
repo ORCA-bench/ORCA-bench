@@ -61,7 +61,7 @@ cp patches/harbor_models_task_task.py \
 ```
 
 <details>
-<summary>**Using GradientAI's serverless inference from DigitalOcean**</summary>
+<summary>Using GradientAI's serverless inference from DigitalOcean</summary>
 
 1. Please go to https://cloud.digitalocean.com/gen-ai/model-access-keys -> Create model access key. Then configure the following environment variables:
 
