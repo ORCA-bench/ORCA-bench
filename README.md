@@ -237,7 +237,24 @@ uv run python build_and_push_snapshots.py --data-dir DATA_DIR
 uv run python find_traces.py -dd DATA_DIR -od OUTPUT_DIR
 ```
 
-- [ ] Add instructions to prompt Claude and save the output to `OUTPUT_DIR/json/{event_id}-{feature_flag}.json`.
+- Below we provide an example prompt for the event with `event_id="dev-1-productCatalogFailure"` and `feature_flag="productCatalogFailure"`:
+
+```
+You are given a list of traces: @OUTPUT_DIR/traces/traces-dev-1-productCatalogFailure-error.json
+
+The trace data contains both incident signal and background noise. You MUST classify each group of traces and only include signal in the Timeline:
+
+- **Signal**: Errors directly caused by the feature flag described in the rubric.
+- **Noise (background)**: `flagd.evaluation.v1.Service/EventStream` spans with DEADLINE_EXCEEDED — these are normal ~10-minute long-poll reconnection cycles for feature flag streaming. They appear in EVERY observation window regardless of incidents. Always exclude these.
+- **Noise (co-occurring)**: Errors caused by OTHER feature flags active in the same window. Identify these by looking for `feature_flag.evaluation` span events where a different flag key has variant `on`. Mention these briefly in the Timeline as "co-occurring incidents" but do not attribute them to the incident under analysis.
+- **Noise (pre-incident)**: Errors with timestamps before the incident time. These cannot be caused by the feature flag and should be noted as pre-existing.
+
+If there are NO signal traces (e.g., the incident causes latency degradation, not errors), explicitly state this and explain why the error-based trace query found no relevant signal.
+
+Use the code base at @opentelemetry-demo/, the official documentation at @opentelemetry.io and the Grafana API at localhost:8080/grafana/
+```
+
+After several back and forth, please instruct the agent to save the output to `OUTPUT_DIR/json/{event_id}-{feature_flag}.json` following the schema at [incident_schema_2w.json](incident_schema_2w.json).
 
 </details>
 
@@ -250,7 +267,17 @@ uv run python find_traces.py -dd DATA_DIR -od OUTPUT_DIR
 uv run python find_logs.py -dd DATA_DIR -od OUTPUT_DIR
 ```
 
-- [ ] Add instructions to prompt Claude and save the output to `OUTPUT_DIR/json/{event_id}-{feature_flag}.json`.
+- Below we provide an example prompt for the event with `event_id="dev-1-productCatalogFailure"` and `feature_flag="productCatalogFailure"`:
+
+```
+You are given a list of logs: @OUTPUT_DIR/logs/unique-logs-dev-1-productCatalogFailure-error.json
+                                                                              
+Are there any logs that indicate the productCatalogFailure feature flag is turned on?
+                                                                              
+Use the code base at @opentelemetry-demo/, the official documenation at @opentelemetry.io and the Grafana API at localhost:8080/grafana/
+```
+
+After several back and forth, please instruct the agent to save the output to `OUTPUT_DIR/json/{event_id}-{feature_flag}.json` following the schema at [incident_schema_2w.json](incident_schema_2w.json).
 
 </details>
 
