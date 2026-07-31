@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import unittest
 
-from leaderboard.ci.submit import hub_metadata
+import re
+
+from leaderboard.ci.submit import (
+    LEADERBOARD_PACKAGE,
+    LEADERBOARD_PACKAGE_ID,
+    hub_metadata,
+    row_create_payload,
+)
 
 
 class HubMetadataTests(unittest.TestCase):
@@ -67,6 +74,45 @@ class HubMetadataTests(unittest.TestCase):
             }
         }
         self.assertEqual(hub_metadata(submission)["reasoning_effort"], "medium")
+
+
+class RowCreatePayloadTests(unittest.TestCase):
+    """The row-create API selects the package by id, not by slug -- see #3,
+    where a `package` slug produced HTTP 400 after the PR had already merged."""
+
+    # The pattern the hub enforces on a `package` selector.
+    HUB_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_.-]*$")
+
+    def _submission(self) -> dict:
+        return {
+            "metadata": {
+                "agent_display": "Terminus 2",
+                "model_display": "Claude Sonnet 4.6",
+                "agent_org": "Harbor",
+                "model_org": "Anthropic",
+                "date": "2026-05-05",
+            },
+            "metrics": {"accuracy": 72.72, "accuracy_stderr": 1.62},
+            "trials": ["trial-a", "trial-b"],
+        }
+
+    def test_display_slug_would_be_rejected_by_the_hub(self):
+        """Guards the reason for the id indirection: if the package is ever
+        renamed to lowercase this fails, signalling the workaround can go."""
+        self.assertIsNone(self.HUB_SLUG_RE.match(LEADERBOARD_PACKAGE))
+
+    def test_payload_selects_by_package_id_not_slug(self):
+        payload = row_create_payload(self._submission())
+        self.assertEqual(payload["package_id"], LEADERBOARD_PACKAGE_ID)
+        self.assertNotIn("package", payload)
+
+    def test_payload_carries_row_metrics_and_trials(self):
+        payload = row_create_payload(self._submission())
+        (row,) = payload["rows"]
+        self.assertEqual(row["metrics"]["accuracy"], 72.72)
+        self.assertEqual(row["trial_ids"], ["trial-a", "trial-b"])
+        self.assertEqual(row["status"], "display")
+        self.assertNotIn("notes", row["metadata"])
 
 
 if __name__ == "__main__":

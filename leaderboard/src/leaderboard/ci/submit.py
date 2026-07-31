@@ -30,6 +30,14 @@ from leaderboard.core.metrics import RESOURCE_HEADERS, format_resource_cells
 LEADERBOARD_PACKAGE = "orca-bench/ORCA-bench"
 LEADERBOARD_NAME = "orca-bench"
 
+# The hub APIs validate a `package` slug against a lowercase-only pattern
+# (/^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_.-]*$/), which the uppercase in
+# "ORCA-bench" fails -- so the slug above can be used for display but never as
+# an API selector. Select the package by id instead; the API accepts
+# `package_id` (or `leaderboard_id`) in its place. Same workaround as
+# `harbor hub leaderboard create`, see SETUP.md.
+LEADERBOARD_PACKAGE_ID = "6d2769e3-f6e9-4496-9830-ea8997cb9e6d"
+
 LEADERBOARD_URL = (
     f"{HUB_URL}/datasets/{LEADERBOARD_PACKAGE}/latest"
     f"?tab=leaderboard&leaderboard={LEADERBOARD_NAME}"
@@ -60,8 +68,8 @@ def hub_metadata(submission: dict) -> dict:
     }
 
 
-def submit_row(submission: dict, api_key: str) -> dict:
-    """POST one leaderboard row and return the created row (raises on failure)."""
+def row_create_payload(submission: dict) -> dict:
+    """The leaderboard-row-create request body for one submission."""
     row = {
         # Whitelist Hub-allowed keys and drop nulls: optional metadata (e.g.
         # reasoning_effort) is typed but not required, and a null fails its
@@ -75,7 +83,16 @@ def submit_row(submission: dict, api_key: str) -> dict:
         # includes disqualified / credited trials (reward overrides in metrics).
         "trial_ids": submission["trials"],
     }
-    payload = {"package": LEADERBOARD_PACKAGE, "name": LEADERBOARD_NAME, "rows": [row]}
+    return {
+        "package_id": LEADERBOARD_PACKAGE_ID,
+        "name": LEADERBOARD_NAME,
+        "rows": [row],
+    }
+
+
+def submit_row(submission: dict, api_key: str) -> dict:
+    """POST one leaderboard row and return the created row (raises on failure)."""
+    payload = row_create_payload(submission)
     req = urllib.request.Request(
         f"{SUPABASE_URL}/functions/v1/leaderboard-row-create",
         data=json.dumps(payload).encode(),

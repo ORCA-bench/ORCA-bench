@@ -79,9 +79,25 @@ leaderboard over a private dataset shows scores nobody can reproduce.
 
 ### Gotcha: `package` vs `package_id`
 
+**The hub never accepts `orca-bench/ORCA-bench` as an API selector.** Every
+endpoint validates a `package` slug against a lowercase-only pattern —
+
+```
+/^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_.-]*$/
+```
+
+— which the uppercase in `ORCA-bench` fails. The slug is fine for display and
+for hub URLs, but anything that talks to the API must select the package by id
+(`package_id`, or `leaderboard_id` where supported). This bit twice: once on
+`leaderboard create`, and again on `leaderboard-row-create` in `ci/submit.py`,
+which is why `LEADERBOARD_PACKAGE_ID` exists alongside `LEADERBOARD_PACKAGE`.
+
+Renaming the dataset package to lowercase would remove the need for the
+indirection entirely; `tests/test_submit.py` asserts the slug is *not* hub-valid,
+so that test fails the day it is renamed, flagging the workaround as removable.
+
 The definition is checked in as [`leaderboard.json`](leaderboard.json), but it
-**cannot be passed to `create` as-is**. The CLI validates the `package` slug
-against a pattern that rejects the uppercase in `ORCA-bench`:
+**cannot be passed to `create` as-is** — the CLI reports:
 
 ```
 Error: invalid leaderboard.json:
