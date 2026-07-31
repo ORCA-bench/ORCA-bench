@@ -115,10 +115,42 @@ def matching_agent(config: dict, sf: dict) -> dict | None:
     return None
 
 
+def timeout_multiplier_ok(config: dict) -> bool:
+    """True when the run used unscaled timeouts.
+
+    harbor omits `timeout_multiplier` from the recorded config when it was
+    never set, and an unset multiplier *is* 1.0 -- so None means "default", not
+    "unknown". Rejecting it would fail every run made with a config that simply
+    doesn't mention the key (e.g. a bare `harbor run`). Actual scaling is still
+    caught here and by the _MULTIPLIERS / override checks alongside it.
+    """
+    tm = config.get("timeout_multiplier")
+    return tm is None or tm == 1.0
+
+
+def dataset_entry_failure(config: dict) -> str:
+    """'' when the job ran DATASET at the pinned version, else why not.
+
+    The job config always names its datasets, but does not always record a
+    resolved `ref` (harbor 0.15.0 writes only `name` + `task_names`). When the
+    ref is absent the version is pinned by the per-trial task-digest check
+    instead, which compares every trial's task sha256 against the canonical
+    DATASET@DATASET_REF task list -- a stronger guarantee than one dataset-level
+    label, since it verifies content per task.
+    """
+    entries = [d for d in config.get("datasets", []) if d.get("name") == DATASET]
+    if not entries:
+        return f"did not run {DATASET}"
+    refs = [d.get("ref") for d in entries if d.get("ref") is not None]
+    if refs and DATASET_REF not in refs:
+        return "ref mismatch"
+    return ""
+
+
 def trial_config_failures(config: dict) -> list[str]:
     """Per-trial config checks (config.agent is a single agent here)."""
     fails: list[str] = []
-    if config.get("timeout_multiplier") != 1.0:
+    if not timeout_multiplier_ok(config):
         fails.append(f"timeout_multiplier={config.get('timeout_multiplier')}")
     fails += _section_overrides(config, _MULTIPLIERS)
     fails += _section_overrides(config.get("agent") or {}, _AGENT_OVERRIDES, "agent.")
@@ -208,7 +240,7 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
         (
             f"got {c.get('timeout_multiplier')}"
             for c in configs.values()
-            if c.get("timeout_multiplier") != 1.0 or _section_overrides(c, _MULTIPLIERS)
+            if not timeout_multiplier_ok(c) or _section_overrides(c, _MULTIPLIERS)
         ),
         "",
     )
@@ -237,14 +269,11 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     )
     res.checks.append(Check("No resource overrides", not r_bad, r_bad))
 
-    ref_ok = all(
-        any(
-            d.get("name") == DATASET and d.get("ref") == DATASET_REF
-            for d in c.get("datasets", [])
-        )
-        for c in configs.values()
+    ref_bad = next(
+        (m for c in configs.values() if (m := dataset_entry_failure(c))),
+        "",
     )
-    res.checks.append(Check("Valid dataset reference", ref_ok, "" if ref_ok else "ref mismatch"))
+    res.checks.append(Check("Valid dataset reference", not ref_bad, ref_bad))
 
     # The canonical task list for DATASET@DATASET_REF. Fetched once and used
     # twice: its length is the expected task count (no hardcoded constant to go
