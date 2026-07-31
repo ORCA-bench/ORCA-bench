@@ -60,6 +60,8 @@ cp patches/harbor_models_task_task.py \
   "$(uv run python -c "import harbor.models.task.task as m; print(m.__file__)")"
 ```
 
+The patch tracks `harbor.models.task.task` verbatim except for the `ignore=[".trials/"]` argument, so re-copy it from the installed module and re-apply that one hunk whenever harbor is upgraded. As of harbor 0.20.0 `Task.checksum` raises a `DeprecationWarning` in favor of `TrialLock.task.digest`, but `trial/trial.py` still calls it once per trial, so the patch remains required until that call goes away.
+
 <details>
 <summary>Using GradientAI's serverless inference from DigitalOcean</summary>
 
