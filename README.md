@@ -322,21 +322,29 @@ uv run python label_metrics.py -f FEATURE_FLAG -od OUTPUT_DIR \
 
 ```bash
 # Launch jobs (note: this script pre-pulls the Docker image with the snapshot to /root/.cache/sre-snapshot-cache so that we can bind-mount it to all tasks).
-# Each config pairs one task dataset with the snapshot image whose `/app/` matches its environment, so run them on separate machines for parallel sweeps:
-#   Telemetry + code
+# Each config pairs one task dataset with the snapshot image whose `/app/` matches its environment.
 SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
     ./run_harbor_cached.sh -c configs/harbor_job_orca_bench.yaml
+```
 
-#   Telemetry-only
-SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-telemetry-only \
-    ./run_harbor_cached.sh -c configs/harbor_job_orca_bench_telemetry_only.yaml
+`configs/harbor_job_orca_bench.yaml` sources tasks from the HuggingFace
+registry and is the config for local development. For a run you intend to
+[submit to the leaderboard](#submitting-to-the-leaderboard), use
+[`job-config.yaml`](./job-config.yaml) at the repo root instead — it pins the
+dataset as published on the Harbor Hub, which is what CI validates against:
+
+```bash
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
+    ./run_harbor_cached.sh -c job-config.yaml \
+      --ve OPENAI_API_KEY="$OPENAI_API_KEY" \
+      --upload --public
 ```
 
 <details>
 <summary>Steps without shell scripts</summary>
 
 > [!NOTE]
-> Substitute the telemetry-only image and config for the telemetry-only results.
+> Substitute `job-config.yaml` for a run you intend to submit to the leaderboard.
 
 ```bash
 # Stage the snapshot's /app/ to a host-side cache keyed by image id.
@@ -464,3 +472,41 @@ uv run python classify_telemetry_calls.py -od OUTPUT_DIR --concurrency 800 -e hi
 # Generate Figure 8: Retrieval diagnostics
 uv run python plot_retrieval.py -od OUTPUT_DIR -jd jobs-sub
 ```
+
+## Submitting to the leaderboard
+
+Results land on the [ORCA-bench leaderboard](https://hub.harborframework.com/datasets/orca-bench/ORCA-bench/latest?tab=leaderboard&leaderboard=orca-bench)
+through a pull request. See [`leaderboard/SUBMIT.md`](./leaderboard/SUBMIT.md)
+for the full walkthrough; the short version:
+
+1. **Run and upload.** Use [`job-config.yaml`](./job-config.yaml) at the repo
+   root — it pins the dataset as published on the Harbor Hub, which is what CI
+   validates against. Add `--upload --public` so the trials are readable from
+   the hub:
+
+```bash
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
+    ./run_harbor_cached.sh -c job-config.yaml \
+      -a <agent> -m <provider/model> \
+      --ve OPENAI_API_KEY="$OPENAI_API_KEY" \
+      --upload --public
+```
+
+2. **Open the PR.** The `lb` CLI turns finished jobs into one submission JSON
+   and one PR per (agent, agent version, model, reasoning effort):
+
+```bash
+cd leaderboard
+uv run lb submit https://hub.harborframework.com/jobs/<uuid> [more...]
+```
+
+3. **Follow the PR.** CI checks the submission against the job config the hub
+   recorded with your run — dataset ref, task coverage, `timeout_multiplier`,
+   and per-trial task digests — then promotes it to a bot PR carrying the
+   computed metrics. A maintainer merges that, and your row appears on the
+   leaderboard.
+
+Accuracy is the **mean graded reward** over all trials (ORCA-bench verifiers
+emit a normalized reward in `[0, 1]`, not pass/fail), reported with a standard
+error. Maintainers setting the repo up for the first time should read
+[`leaderboard/SETUP.md`](./leaderboard/SETUP.md).

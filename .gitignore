@@ -6,6 +6,9 @@
 /out-*/
 /out/
 
+# Harbor job output (jobs_dir in job-config.yaml; uploaded to the hub instead)
+/jobs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
