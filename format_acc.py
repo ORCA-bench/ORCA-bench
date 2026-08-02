@@ -106,7 +106,10 @@ sonnet_df[
         | sonnet_df["traces_any_match"]
     )
     & (sonnet_df["flag"] == "recommendationCacheFailure")
-][["task_name", "flag", "score", "_report_path", "_score_path"] + list(Q_COLS.values())]
+][
+    ["task_name", "flag", "rca_depth", "_report_path", "_score_path"]
+    + list(Q_COLS.values())
+]
 
 
 # %%
@@ -119,7 +122,7 @@ def agg_group(g: pd.DataFrame, task_type: str) -> dict:
         "Judge Model": g["_display_model"].iloc[0],
         "Task Type": task_type,
         "N": len(g),
-        "RCA Depth % (out of 3)": fmt_mean_score_pct(g["score"].tolist()),
+        "RCA Depth % (out of 3)": fmt_mean_score_pct(g["rca_depth"].tolist()),
     }
     for label, qfield in Q_COLS.items():
         vals = g[qfield].where(g[qfield].notna(), None).tolist()
@@ -144,51 +147,3 @@ print()
 csv_path = args.output_dir / "accuracy.csv"
 pd.DataFrame(table_data).to_csv(csv_path, index=False)
 logger.info(f"Saved CSV to {csv_path}")
-
-
-# %%
-def dist_group(g: pd.DataFrame, task_type: str) -> dict:
-    """Tally score distribution (0–3) for one group.
-
-    Buckets by ``best_score`` (max across rubrics) because the per-trial
-    ``score`` is a float mean and would silently miss integer buckets on
-    multi-rubric tasks. ``best_score`` mirrors the historical pre-per-rubric
-    "overall score" semantic.
-    """
-    counts = g["best_score"].value_counts()
-    n = len(g)
-    row = {
-        "Agent": g["_agent"].iloc[0],
-        "Agent Model": g["_agent_model"].iloc[0],
-        "Effort": g["_effort"].iloc[0] or "-",
-        "Judge Model": g["_display_model"].iloc[0],
-        "Task Type": task_type,
-        "N": n,
-    }
-    for s in (0, 1, 2, 3):
-        c = int(counts.get(s, 0))
-        row[f"Score {s}"] = f"{c} ({c / n * 100:.1f}%)"
-    return row
-
-
-# %%
-dist_data: list[dict] = []
-for _, g in df.sort_values(GROUP_COLS).groupby(GROUP_COLS, observed=True):
-    incident_g = g[~g[TASK_TYPE_COL]]
-    control_g = g[g[TASK_TYPE_COL]]
-    if len(incident_g):
-        dist_data.append(dist_group(incident_g, "incident"))
-    if len(control_g):
-        dist_data.append(dist_group(control_g, "control"))
-print("## Score Distribution\n")
-print(
-    "> Buckets are sourced from `best_score` (max across rubrics) so multi-rubric "
-    "trials with fractional `score` means don't silently miss integer buckets.\n"
-)
-print(tabulate(dist_data, headers="keys", tablefmt="github"))
-print()
-
-# %%
-dist_csv_path = args.output_dir / "score_distribution.csv"
-pd.DataFrame(dist_data).to_csv(dist_csv_path, index=False)
-logger.info(f"Saved CSV to {dist_csv_path}")

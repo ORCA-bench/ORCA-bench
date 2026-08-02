@@ -145,19 +145,19 @@ async def process_trial(
                 "reasoning_effort": reasoning_effort,
                 "batch_size": bs,
                 "batch_number": batch_num,
-                "score": 0,
+                "rca_depth": 0,
                 "rubric_used": bool(rubric_data),
                 "flag": flag,
             }
             _atomic_write_json(out_path, payload)
             return trial_id, payload
 
-    # Materialize the post-hoc score (mean across rubrics) so the runtime log
-    # and the saved JSON both surface it. Downstream consumers (load_trials in
-    # utils.py) re-derive it from ``nested`` anyway, but having it at the top
+    # Materialize the post-hoc rca_depth (mean across rubrics) so the runtime
+    # log and the saved JSON both surface it. Downstream consumers (load_trials
+    # in utils.py) re-derive it from ``nested`` anyway, but having it at the top
     # level matches the historical schema and makes per-trial files greppable.
     agg = aggregate_judge_response(result["nested"], mode=result.get("mode"))
-    score = agg["score"] if agg["score"] is not None else 0
+    rca_depth = agg["rca_depth"] if agg["rca_depth"] is not None else 0
     payload = {
         "trial_id": trial_id,
         "task_name": task_name,
@@ -166,7 +166,7 @@ async def process_trial(
         "batch_number": batch_num,
         "flag": flag,
         **result,
-        "score": score,
+        "rca_depth": rca_depth,
     }
     _atomic_write_json(out_path, payload)
     prompt_text = result.get("judge_prompt")
@@ -217,7 +217,7 @@ async def process_batch(
             continue
         logger.info(
             f"  [{i + 1}/{len(batch)}] {result.get('task_name', '')}: "
-            f"score={result.get('score', 'N/A')}/3 "
+            f"rca_depth={result.get('rca_depth', 'N/A')}/3 "
             f"(mode={result.get('mode', '?')})"
         )
     logger.info(f"Batch {batch_num}/{n_batches}: scored={n_scored} skipped={n_skipped}")

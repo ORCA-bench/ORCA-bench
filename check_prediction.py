@@ -610,9 +610,9 @@ _PER_RUBRIC_SCHEMA: dict[str, Any] = {
 
 def build_judge_output_schema(rubrics_data: list[dict]) -> dict:
     """Build a strict JSON Schema for the judge output: one verdict per rubric,
-    each carrying its own ``score`` integer. The trial-level overall score is
-    derived post-hoc from the per-rubric scores (mean -> ``score``, max ->
-    ``best_score``) by :func:`aggregate_judge_response`.
+    each carrying its own ``score`` integer. The trial-level ``rca_depth`` is
+    derived post-hoc as the mean of the per-rubric scores by
+    :func:`aggregate_judge_response`.
 
     The rubrics array length is unconstrained in the schema (Anthropic's
     structured-output endpoint rejects ``minItems``/``maxItems`` on arrays);
@@ -791,7 +791,7 @@ def aggregate_judge_response(parsed: dict, *, mode: str | None = None) -> dict:
     is credited if it matches any one of the listed rubrics), with ``None``
     skipped — sections without clusters in any rubric stay ``None``.
 
-    For ``feature_flag`` we expose ``_all_match`` (did the agent name every
+    For ``feature_flag`` we expose ``rca_accuracy`` (did the agent name every
     listed root cause?) and ``hallucinate_any`` (did the agent name a root
     cause that doesn't match **any** of the listed plausible root causes?).
     Hallucination requires the report to be non-empty — pass
@@ -800,11 +800,9 @@ def aggregate_judge_response(parsed: dict, *, mode: str | None = None) -> dict:
     the synthesized nested otherwise looks identical to a fully wrong LLM
     judgment).
 
-    Overall scoring is derived from per-rubric integer scores: ``score`` is
-    the float mean across rubrics (the canonical number consumed by
-    formatters) and ``best_score`` is the integer max (preserves the
-    historical best-match number). Both are ``None`` when there are no
-    rubrics.
+    Overall scoring is derived from per-rubric integer scores: ``rca_depth``
+    is the float mean across rubrics (the canonical number consumed by
+    formatters), and is ``None`` when there are no rubrics.
 
     The per-rubric rollups are also returned under ``per_rubric`` for
     downstream analysis that needs to know which specific rubric matched.
@@ -821,10 +819,9 @@ def aggregate_judge_response(parsed: dict, *, mode: str | None = None) -> dict:
         return all(defined) if defined else None
 
     per_rubric_scores = [r["score"] for r in per_rubric]
-    score = (
+    rca_depth = (
         sum(per_rubric_scores) / len(per_rubric_scores) if per_rubric_scores else None
     )
-    best_score = max(per_rubric_scores) if per_rubric_scores else None
 
     # No-incident control tasks synthesize a single "(no_incident)" rubric in
     # judge() / string_match_fallback. Hallucination is undefined there
@@ -852,9 +849,7 @@ def aggregate_judge_response(parsed: dict, *, mode: str | None = None) -> dict:
         )
         or False,
         "hallucinate_any": hallucinate_any,
-        "feature_flag_all_match": _all_skip_none(
-            [r["feature_flag_match"] for r in per_rubric]
-        ),
+        "rca_accuracy": _all_skip_none([r["feature_flag_match"] for r in per_rubric]),
         "mechanism_match": _any_skip_none([r["mechanism_match"] for r in per_rubric])
         or False,
         "metrics_all_match": _any_skip_none(
@@ -869,9 +864,30 @@ def aggregate_judge_response(parsed: dict, *, mode: str | None = None) -> dict:
         "traces_any_match": _any_skip_none([r["traces_any_match"] for r in per_rubric]),
         "per_rubric": per_rubric,
         "per_rubric_scores": per_rubric_scores,
-        "score": score,
-        "best_score": best_score,
+        "rca_depth": rca_depth,
     }
+
+
+_REWARD_METRIC_KEYS = ("rca_accuracy", "hallucinate_any")
+
+
+def build_rewards(agg: dict, reward: float) -> dict[str, float | int]:
+    """Flat {name: number} payload for ``/logs/verifier/reward.json``.
+
+    Harbor requires a flat dict of numbers (``harbor.models.verifier.result
+    .VerifierResult``) and hard-codes its primary-score lookup to the
+    ``reward`` key, so that key is always present. Rollup values that are
+    ``None`` — e.g. ``hallucinate_any`` on control tasks, where hallucination
+    is undefined — are omitted, because a JSON ``null`` fails harbor's
+    validation outright. Note that harbor aggregates a missing key as 0
+    rather than excluding the trial.
+    """
+    rewards: dict[str, float | int] = {"reward": reward}
+    for key in _REWARD_METRIC_KEYS:
+        value = agg.get(key)
+        if value is not None:
+            rewards[key] = int(value)
+    return rewards
 
 
 def _synth_rubric_verdict(feature_flag: str, score: int) -> dict:
@@ -902,8 +918,8 @@ def string_match_fallback(expected: dict, predictions: str) -> dict:
     scoring 3 iff the report is empty.
 
     Returns ``{"rubrics": [...]}`` — same shape as the parsed LLM judge
-    response — so that ``aggregate_judge_response`` can derive ``score``
-    (mean) and ``best_score`` (max) uniformly.
+    response — so that ``aggregate_judge_response`` can derive ``rca_depth``
+    (the mean across rubrics) uniformly.
     """
     events: list[dict] = expected.get("events") or []
     if not events:
@@ -1025,8 +1041,8 @@ async def judge(
     Returns:
         A dict with keys ``mode``, ``model``, ``nested``, and (for the LLM
         judge mode) ``reasoning_summary``, ``rubric_used``, ``judge_prompt``,
-        ``judge_response_raw``. All scoring (``score`` mean, ``best_score``
-        max, and per-section rollups) is derived post-hoc from ``nested`` by
+        ``judge_response_raw``. All scoring (the ``rca_depth`` mean and the
+        per-section rollups) is derived post-hoc from ``nested`` by
         :func:`aggregate_judge_response`.
 
     """
@@ -1094,10 +1110,10 @@ async def judge(
     )
     parsed = parse_judge_response(raw_response)
 
-    # Per-section rollups and overall scores (``score`` mean, ``best_score``
-    # max) are NOT spread into the result — they're pure post-hoc derivations
-    # from ``nested`` via ``aggregate_judge_response``, applied by formatters
-    # at load time so schema changes don't require rewriting saved JSONs.
+    # Per-section rollups and the ``rca_depth`` mean are NOT spread into the
+    # result — they're pure post-hoc derivations from ``nested`` via
+    # ``aggregate_judge_response``, applied by formatters at load time so
+    # schema changes don't require rewriting saved JSONs.
     return {
         "mode": "llm_judge",
         "model": model,
@@ -1148,8 +1164,10 @@ async def main() -> None:
         default="llm_judge",
         help="Scoring mode: string_match or llm_judge (default: llm_judge).",
     )
-    parser.add_argument("--reward", type=str, default="/logs/verifier/reward.txt")
-    parser.add_argument("--details", type=str, default="/logs/verifier/details.json")
+    parser.add_argument("--reward", type=str, default="/logs/verifier/reward.json")
+    parser.add_argument(
+        "--details", type=str, default="/logs/verifier/reward-details.json"
+    )
     args = parser.parse_args()
 
     expected_path = Path(args.expected)
@@ -1206,21 +1224,21 @@ async def main() -> None:
                 reasoning_effort=args.effort,
             )
 
-        # Derive ``score`` (mean) and ``reward`` from ``nested`` so all modes
-        # share one scoring path.
+        # Derive ``rca_depth`` (mean) and ``reward`` from ``nested`` so all
+        # modes share one scoring path.
         agg = aggregate_judge_response(result["nested"], mode=result.get("mode"))
-        score = agg["score"] or 0.0
-        reward = score / 3.0
+        rca_depth = agg["rca_depth"] or 0.0
+        reward = rca_depth / 3.0
 
-        # Write reward
+        # Write rewards
         reward_path.parent.mkdir(parents=True, exist_ok=True)
-        reward_path.write_text(str(reward))
+        reward_path.write_text(json.dumps(build_rewards(agg, reward)))
 
         # Write details
         details_path.parent.mkdir(parents=True, exist_ok=True)
         details_path.write_text(json.dumps(result, indent=2))
 
-        print(f"Score: {score:.2f}/3 (reward: {reward})")
+        print(f"RCA depth: {rca_depth:.2f}/3 (reward: {reward})")
         print(f"Mode: {result['mode']}")
         if result.get("reasoning_summary"):
             print(f"Reasoning summary: {result['reasoning_summary']}")
@@ -1230,7 +1248,7 @@ async def main() -> None:
 
     except Exception as exc:
         reward_path.parent.mkdir(parents=True, exist_ok=True)
-        reward_path.write_text("0.0")
+        reward_path.write_text(json.dumps({"reward": 0.0}))
         details_path.parent.mkdir(parents=True, exist_ok=True)
         details_path.write_text(
             json.dumps(

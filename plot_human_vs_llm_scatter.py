@@ -88,7 +88,7 @@ def main() -> None:
                     "model": str(r["_agent_model"]),
                     "difficulty": r["_granularity"],
                     "human_score": h,
-                    "llm_score": r["score"],
+                    "llm_score": r["rca_depth"],
                 }
             )
     merged = pd.DataFrame(rows)

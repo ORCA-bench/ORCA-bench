@@ -155,7 +155,7 @@ def main() -> None:
                 {
                     "difficulty": r["_granularity"],
                     "human_avg": h,
-                    "llm_score": r["score"],
+                    "llm_score": r["rca_depth"],
                 }
             )
     judge_df = pd.DataFrame(judge_rows)

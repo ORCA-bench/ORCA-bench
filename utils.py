@@ -102,7 +102,7 @@ def parse_snapshot_time(name: str) -> datetime:
 # check_prediction.aggregate_judge_response() and materialized on the
 # DataFrame at load time by load_data.
 Q_COLS: dict[str, str] = {
-    "RCA Accuracy": "feature_flag_all_match",
+    "RCA Accuracy": "rca_accuracy",
     "% Complete Hallucination": "hallucinate_any",
     "Mechanism": "mechanism_match",
     "Inc. Time": "incident_time_within_10min",
@@ -117,7 +117,7 @@ Q_COLS: dict[str, str] = {
 ROLLUP_KEYS: list[str] = [
     "incident_time_within_10min",
     "hallucinate_any",
-    "feature_flag_all_match",
+    "rca_accuracy",
     "mechanism_match",
     "metrics_all_match",
     "metrics_any_match",
@@ -125,8 +125,7 @@ ROLLUP_KEYS: list[str] = [
     "logs_any_match",
     "traces_all_match",
     "traces_any_match",
-    "score",
-    "best_score",
+    "rca_depth",
 ]
 
 
@@ -198,9 +197,9 @@ def load_trials(scores_dir: Path, reasoning_effort: str | None) -> list[dict]:
     Each returned dict has ``_display_model``, ``_trial_id``, and
     ``_score_path`` (absolute path to the ``judge-*.json`` source file)
     injected. Aggregated rollups from ``aggregate_judge_response`` (including
-    ``score``, ``best_score``, and every key in :data:`ROLLUP_KEYS`) are also
-    spread onto each trial dict so non-DataFrame callers can read them
-    directly without going through ``load_data``.
+    ``rca_depth`` and every key in :data:`ROLLUP_KEYS`) are also spread onto
+    each trial dict so non-DataFrame callers can read them directly without
+    going through ``load_data``.
     """
     from check_prediction import aggregate_judge_response
 
