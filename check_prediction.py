@@ -944,7 +944,7 @@ def string_match_fallback(expected: dict, predictions: str) -> dict:
 async def _judge_control(
     client: Any,
     predictions: str,
-    task_meta: dict,
+    expected: dict,
     *,
     model: str,
     reasoning_effort: str | None,
@@ -955,9 +955,12 @@ async def _judge_control(
     quiet window ``(quiet_window_start, quiet_window_end)`` around
     ``current_time``. An empty report is a trivial pass (no LLM call).
 
-    Falls back to the legacy binary rule (empty -> 3, else 0) when
-    ``task_meta`` lacks the required fields — e.g. legacy in-container
-    verifier calls that don't thread task_meta.
+    ``expected["current"]`` is required — a control task built by
+    ``build_harbor_tasks.py`` always carries it, so a ``KeyError`` here means
+    the task was built by an older pipeline and cannot be scored.
+    ``quiet_window_start`` / ``quiet_window_end`` are optional: either bound is
+    absent when the quiet window is open-ended on that side, which the prompt
+    renders as ``"null"`` (i.e. -inf / +inf).
     """
     if not predictions.strip():
         return {
@@ -966,17 +969,9 @@ async def _judge_control(
             "nested": {"rubrics": [_synth_rubric_verdict("(no_incident)", 3)]},
         }
 
-    current = task_meta.get("current")
-    if not current or client is None:
-        score = 3 if len(predictions.strip()) == 0 else 0
-        return {
-            "mode": "no_incident",
-            "model": model,
-            "nested": {"rubrics": [_synth_rubric_verdict("(no_incident)", score)]},
-        }
-
-    qstart = task_meta.get("quiet_window_start")
-    qend = task_meta.get("quiet_window_end")
+    current = expected["current"]
+    qstart = expected.get("quiet_window_start")
+    qend = expected.get("quiet_window_end")
     margin = timedelta(minutes=CONTROL_QUIET_WINDOW_MARGIN_MIN)
     qstart_adj = (
         (datetime.fromisoformat(qstart) + margin).isoformat()
@@ -1029,14 +1024,13 @@ async def judge(
     rubrics_data: list[dict],
     model: str = DEFAULT_MODEL,
     reasoning_effort: str | None = None,
-    task_meta: dict | None = None,
 ) -> dict:
     """Run the LLM judge over one or more ground-truth rubrics, or
     short-circuit for no-incident and empty-report tasks.
 
-    ``task_meta`` provides the queried time ``current`` and the quiet-window
-    bounds for control tasks. When omitted (legacy callers) the control path
-    falls back to the historical binary rule (empty report -> 3, else 0).
+    For control tasks (``expected["events"] == []``) the queried time
+    ``expected["current"]`` and the optional quiet-window bounds drive
+    :func:`_judge_control`.
 
     Returns:
         A dict with keys ``mode``, ``model``, ``nested``, and (for the LLM
@@ -1051,7 +1045,7 @@ async def judge(
         return await _judge_control(
             client,
             predictions,
-            task_meta or {},
+            expected,
             model=model,
             reasoning_effort=reasoning_effort,
         )

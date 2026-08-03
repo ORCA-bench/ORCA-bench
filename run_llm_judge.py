@@ -130,7 +130,6 @@ async def process_trial(
                 rubric_data,
                 model=model,
                 reasoning_effort=reasoning_effort,
-                task_meta=task_meta,
             )
         except Exception as exc:
             logger.error(f"Trial {trial_id} ({task_name}) failed: {exc}")
