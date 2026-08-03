@@ -25,8 +25,8 @@ Usage:
 
 Examples::
 
-    # One panel per agent-model group, restricted to trials in
-    # out-0531/all-predictions.json, written to out-0531/figures/markov_chain.pdf
+    # One panel per agent-model group, restricted to the scored trials under
+    # --jobs-dir, written to out-0531/figures/markov_chain.pdf
     uv run python format_markov_chain.py -jd jobs -od out-0531
 
     # Highlight two models in the main-paper figure and put the rest in a
@@ -39,7 +39,6 @@ Examples::
         --models 4.6-sonnet gpt-5.5 deepseek-v4-pro --fig-name markov_chain_appendix.pdf
 """
 
-import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -61,6 +60,7 @@ from utils import (
     CODE_CATEGORIES,
     TELEM_DATA_CATEGORIES,
     TELEM_DISCOVERY_CATEGORIES,
+    find_trial_dirs,
     get_base_parser,
     load_invalid_trial_ids,
     model_alias,
@@ -487,10 +487,15 @@ def main() -> None:
         load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
     )
 
-    preds_path = args.output_dir / "all-predictions.json"
-    with preds_path.open() as f:
-        valid_trial_ids = set(json.load(f).keys())
-    print(f"Restricting to {len(valid_trial_ids)} trial(s) in {preds_path}")
+    # Restrict to trials the analysis layer considers scored — the same set
+    # utils.load_trials builds — so the transition counts cover exactly the
+    # trials that appear in the accuracy tables.
+    valid_trial_ids = {
+        d.name
+        for d in find_trial_dirs(args.jobs_dir)
+        if (d / "verifier" / "reward-details.json").is_file()
+    }
+    print(f"Restricting to {len(valid_trial_ids)} scored trial(s) in {args.jobs_dir}")
 
     rows = collect_tool_calls(
         args.jobs_dir, csv_dir=None, valid_trial_ids=valid_trial_ids
