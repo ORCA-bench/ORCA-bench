@@ -452,13 +452,6 @@ def main() -> None:
     parser = get_base_parser()
     parser.description = "Plot per-agent Markov-chain command-transition diagrams."
     parser.add_argument(
-        "--jobs-dir",
-        "-jd",
-        type=Path,
-        default=Path("jobs"),
-        help="Path to the Harbor jobs directory (default: jobs)",
-    )
-    parser.add_argument(
         "--min-prob",
         type=float,
         default=MIN_TRANS_PROB,

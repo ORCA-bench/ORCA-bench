@@ -55,10 +55,10 @@ def get_base_parser() -> ArgumentParser:
         "--jobs-dir",
         "-jd",
         type=Path,
-        default=None,
+        default=Path("jobs"),
         help=(
-            "Harbor job directory holding one subdirectory per trial. Scores are "
-            "read from each trial's verifier/reward-details.json."
+            "Path to the Harbor jobs directory, or a tree of them (default: jobs). "
+            "Analysis scripts read each trial's verifier/reward-details.json from here."
         ),
     )
     parser.add_argument(

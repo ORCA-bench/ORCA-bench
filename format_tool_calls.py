@@ -37,6 +37,7 @@ from utils import (
     TELEM_ALL_CATEGORIES,
     TELEM_DATA_CATEGORIES,
     classify_cmd,
+    find_trial_dirs,
     format_group_label,
     get_base_parser,
     load_invalid_trial_ids,
@@ -334,13 +335,6 @@ def main() -> None:
     parser = get_base_parser()
     parser.description = "Plot pie charts of tool call distribution per agent."
     parser.add_argument(
-        "--jobs-dir",
-        "-jd",
-        type=Path,
-        default=Path("jobs"),
-        help="Path to the Harbor jobs directory (default: jobs)",
-    )
-    parser.add_argument(
         "--xlsx",
         action="store_true",
         help="Also write per-group tool_calls-*.xlsx files (skipped by default).",
@@ -352,10 +346,15 @@ def main() -> None:
         load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
     )
 
-    preds_path = args.output_dir / "all-predictions.json"
-    with preds_path.open() as f:
-        valid_trial_ids = set(json.load(f).keys())
-    print(f"Restricting to {len(valid_trial_ids)} trial(s) in {preds_path}")
+    # Restrict to trials the analysis layer considers scored — the same set
+    # utils.load_trials builds — so tool-call stats cover exactly the trials
+    # that appear in the accuracy tables.
+    valid_trial_ids = {
+        d.name
+        for d in find_trial_dirs(args.jobs_dir)
+        if (d / "verifier" / "reward-details.json").is_file()
+    }
+    print(f"Restricting to {len(valid_trial_ids)} scored trial(s) in {args.jobs_dir}")
 
     rows = collect_tool_calls(
         args.jobs_dir, csv_dir=csv_dir, valid_trial_ids=valid_trial_ids
