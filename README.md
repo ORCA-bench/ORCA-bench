@@ -395,21 +395,12 @@ uv run python run_llm_judge.py -od OUTPUT_DIR -e high -bs 1600 --concurrency 160
 
 </details>
 
-5. Validate the LLM judge against human-verified scores on the human-eval sample. Each annotator (e.g. KC, AG) maintains their own `human_verified_scores*.json` file of independently re-scored task--model pairs:
+5. Validate the LLM judge against human-verified scores on the human-eval sample.
 
-```bash
-# (a) Pairwise inter-annotator agreement + (b) LLM judge vs. average human score,
-# broken down by difficulty (Spearman rho, quadratic-weighted Cohen's kappa)
-uv run python compute_human_agreement.py \
-  --scores-a human_verified_scores.json \
-  --scores-b human_verified_scores_ag.json \
-  -od OUTPUT_DIR -e high
-
-# Scatter grid (rows=difficulty, cols=model) of human vs. LLM judge scores,
-# one PDF per annotator's score file
-uv run python plot_human_vs_llm_scatter.py -od OUTPUT_DIR -e high --human-scores human_verified_scores_ag.json
-uv run python plot_human_vs_llm_scatter.py -od OUTPUT_DIR -e high --human-scores human_verified_scores.json
-```
+   > `compute_human_agreement.py` and `plot_human_vs_llm_scatter.py` were removed when the
+   > analysis layer moved to reading scores from each trial's `verifier/` directory. They joined
+   > `human_verified_scores*.json` on the readable task id, which a trial directory does not
+   > carry. To be restored against the new task naming.
 
 6. Format accuracy results:
 

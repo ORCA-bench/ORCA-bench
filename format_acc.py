@@ -17,19 +17,19 @@
 # %%
 r"""Compute average accuracy across Score and Q1-Q6 columns per model.
 
-Reads score JSON files from ``<output_dir>/scores/`` and prints a markdown
-table with one row per judge model showing mean Score and Q1-Q6 accuracy.
+Reads each trial's ``verifier/reward-details.json`` under ``--jobs-dir`` and
+prints a markdown table with one row per judge model showing mean Score and
+Q1-Q6 accuracy. ``--output-dir`` is where the CSVs are written.
 
 Examples::
 
     cd examples/otel-demo
-    uv run python format_acc.py -od out-0318
-    uv run python format_acc.py -od out-0318 --effort high
+    uv run python format_acc.py -jd jobs/2026-05-05__04-10-26 -od out-0318
+    uv run python format_acc.py -jd jobs/2026-05-05__04-10-26 -od out-0318 --effort high
 
 """
 
 # %%
-import json
 import logging
 from pathlib import Path
 
@@ -67,27 +67,23 @@ if True:
     args = parser.parse_args()
     setup_logging(args.log_level)
     output_dir = args.output_dir
+    jobs_dir = args.jobs_dir
     effort = args.effort
     filter_xlsx = args.filter_xlsx
 else:
     output_dir = Path("out-0423-2")
+    jobs_dir = Path("jobs")
     effort = "high"
     filter_xlsx = None
 
 # %%
-df = load_data(output_dir, effort, filter_xlsx)
+# Scores come from each trial's verifier/reward-details.json; output_dir is
+# only the write location for the CSVs below. ``_report_path`` is set by
+# load_trials, so no all-predictions.json join is needed.
+df = load_data(jobs_dir, effort, filter_xlsx)
 
 # %%
 df.columns
-
-# %%
-with (output_dir / "all-predictions.json").open() as f:
-    preds = json.load(f)
-trial_df = pd.DataFrame([p["result"] for p in preds.values()])[
-    ["trial_name", "trial_uri"]
-]
-df = df.merge(trial_df, left_on="trial_id", right_on="trial_name", how="left")
-df["_report_path"] = df["trial_uri"].str.removeprefix("file://") + "/verifier/report.md"
 
 # %%
 df["_agent_model"].unique()
@@ -144,6 +140,7 @@ print(tabulate(table_data, headers="keys", tablefmt="github"))
 print()
 
 # %%
-csv_path = args.output_dir / "accuracy.csv"
+csv_path = output_dir / "accuracy.csv"
+output_dir.mkdir(parents=True, exist_ok=True)
 pd.DataFrame(table_data).to_csv(csv_path, index=False)
 logger.info(f"Saved CSV to {csv_path}")

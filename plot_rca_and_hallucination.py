@@ -116,7 +116,7 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging(args.log_level)
 
-    df = load_data(args.output_dir, args.effort, args.filter_xlsx)
+    df = load_data(args.jobs_dir, args.effort, args.filter_xlsx)
     df = df[~df["_is_control"]]
     if df.empty:
         logger.error("No incident trials found.")

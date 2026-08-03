@@ -966,6 +966,7 @@ async def _judge_control(
         return {
             "mode": "no_incident_llm_judge",
             "model": model,
+            "reasoning_effort": reasoning_effort,
             "nested": {"rubrics": [_synth_rubric_verdict("(no_incident)", 3)]},
         }
 
@@ -1008,6 +1009,7 @@ async def _judge_control(
     return {
         "mode": "no_incident_llm_judge",
         "model": model,
+        "reasoning_effort": reasoning_effort,
         "reasoning_summary": reasoning_summary,
         "judge_prompt": prompt,
         "judge_response_raw": raw_response,
@@ -1088,6 +1090,7 @@ async def judge(
         return {
             "mode": "empty_report",
             "model": model,
+            "reasoning_effort": reasoning_effort,
             "rubric_used": bool(rubrics_data),
             "nested": {"rubrics": synthetic_per_rubric},
         }
@@ -1111,6 +1114,7 @@ async def judge(
     return {
         "mode": "llm_judge",
         "model": model,
+        "reasoning_effort": reasoning_effort,
         "reasoning_summary": reasoning_summary,
         "rubric_used": bool(rubrics_data),
         "judge_prompt": prompt,
