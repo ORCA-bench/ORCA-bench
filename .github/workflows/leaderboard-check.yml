@@ -44,30 +44,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --project leaderboard
 
-      # The subset metrics label each task from its task.toml, which means
-      # downloading the pinned dataset's task packages (~210 MB). harbor caches
-      # them by digest, so caching that directory makes it a once-per-pin cost
-      # instead of once per static-analysis run and again at promote.
-      #
-      # Keyed on core/hub.py, which is where DATASET_REF lives. The restore-key
-      # prefix means an unrelated edit to that file still restores the previous
-      # cache -- harbor then re-downloads only the digests that actually moved,
-      # rather than all 755 packages.
-      #
-      # Restore-only: the cache backend requires `contents: write` to reserve a
-      # key (`actions: write` is not enough -- it was tried, and the post step
-      # still failed with "cache write denied: token has no writable scopes"
-      # while the token showed Actions: write). This job runs on
-      # pull_request_target over contributor-supplied data, so it keeps
-      # `contents: read`; promote, which already holds `contents: write` to push
-      # branches, does the saving.
-      - name: Restore task packages
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/harbor/tasks/packages
-          key: harbor-tasks-${{ hashFiles('leaderboard/src/leaderboard/core/hub.py') }}
-          restore-keys: harbor-tasks-
-
       # A submission PR must add/change EXACTLY ONE file matching the strict
       # allowlist (one path segment, safe charset -- the name is
       # contributor-controlled and later touches shells and API URLs). Anything
@@ -227,20 +203,6 @@ jobs:
       - name: Install dependencies
         if: steps.guard.outputs.fresh == 'true'
         run: uv sync --project leaderboard
-
-      # This job both restores and SAVES the shared task-package cache: it is
-      # the one that already holds `contents: write`, which the cache backend
-      # requires to reserve a key. It recomputes the metrics anyway, so it needs
-      # the same labels. static-analysis (which runs first, and restores
-      # read-only) therefore gets a warm cache from the *previous* submission
-      # rather than this run -- fine, since the fetch is only worth seconds.
-      - name: Cache task packages
-        if: steps.guard.outputs.fresh == 'true'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/harbor/tasks/packages
-          key: harbor-tasks-${{ hashFiles('leaderboard/src/leaderboard/core/hub.py') }}
-          restore-keys: harbor-tasks-
 
       - name: Fetch the submission (data only) from the PR head
         if: steps.guard.outputs.fresh == 'true'

@@ -71,8 +71,11 @@ def _fetch_labels() -> dict[str, TaskLabel]:
     """Download the pinned dataset's tasks and read their `[metadata]`.
 
     Mirrors utils.load_task_metadata: harbor caches task packages by digest
-    under TASK_CACHE_DIR, so repeat runs in a warm environment hit no network
-    (CI caches that directory keyed on DATASET_REF).
+    under TASK_CACHE_DIR, so repeat runs in a warm environment hit no network.
+    CI is always cold -- an actions/cache step was tried and removed, because
+    the cache backend refused every write ("token has no writable scopes") even
+    with `contents: write` granted. It costs little: the whole static-analysis
+    step, this fetch plus the per-trial checks plus the metrics, measures ~30s.
     """
     from harbor.models.task.id import PackageTaskId
     from harbor.tasks.client import TaskClient
