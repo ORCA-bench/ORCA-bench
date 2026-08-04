@@ -223,8 +223,14 @@ DISPLAY_SUFFIX = "_display"
 
 
 def format_measurement(mean: float, stderr: float) -> str:
-    """The cell text for one metric: percentages, mean ± one standard error."""
-    return f"{mean:.2f} ± {stderr:.2f}"
+    """The cell for one metric: percentages, mean ± one standard error.
+
+    Markdown, with the mean bold so the eye lands on it rather than the error
+    bar. That means the `_display` columns must be declared `type: "markdown"`
+    in leaderboard.json -- a `text` column renders the asterisks literally. It
+    also renders correctly in the PR and merge comments, which are markdown too.
+    """
+    return f"**{mean:.2f}** ± {stderr:.2f}"
 
 
 # Comment-table headers for the resource totals, shared by every renderer

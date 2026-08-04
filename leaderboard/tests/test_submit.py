@@ -7,6 +7,7 @@ import unittest
 import re
 
 from leaderboard.ci.submit import (
+    format_date,
     LEADERBOARD_NAME,
     LEADERBOARD_PACKAGE,
     hub_metadata,
@@ -39,6 +40,8 @@ class HubMetadataTests(unittest.TestCase):
                 "agent_org": "Harbor",
                 "model_org": "Anthropic",
                 "date": "2026-07-14",
+                # Derived here, not authored by the submitter.
+                "date_display": "Jul 14, 2026",
                 "pr": "[#72](https://example.com/72)",
             },
         )
@@ -119,3 +122,21 @@ class RowCreatePayloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FormatDateTests(unittest.TestCase):
+    """The Date column shows this string verbatim. A `date` column instead
+    renders a locale datetime and shifts the timezone -- `2026-05-05` came out
+    as `5/4/2026, 8:00:00 PM`, a day early with a spurious clock time."""
+
+    def test_formats_as_abbreviated_month_day_year(self):
+        self.assertEqual(format_date("2026-06-07"), "Jun 7, 2026")
+        self.assertEqual(format_date("2026-05-05"), "May 5, 2026")
+        self.assertEqual(format_date("2026-12-25"), "Dec 25, 2026")
+
+    def test_day_is_not_zero_padded(self):
+        self.assertEqual(format_date("2026-01-01"), "Jan 1, 2026")
+
+    def test_the_date_is_not_shifted(self):
+        """The whole point: the calendar date in must be the one out."""
+        self.assertEqual(format_date("2026-05-05"), "May 5, 2026")

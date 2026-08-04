@@ -33,6 +33,10 @@
       "pr": {
         "type": "string",
         "minLength": 1
+      },
+      "date_display": {
+        "type": "string",
+        "minLength": 1
       }
     },
     "required": [
@@ -126,15 +130,44 @@
     },
     {
       "id": "reasoning_effort",
-      "header": "Reasoning Effort",
+      "header": "Effort",
       "accessor": "metadata.reasoning_effort",
       "type": "text"
+    },
+    {
+      "id": "rca_accuracy_incident_medium",
+      "header": "RCA Accuracy (Medium)",
+      "accessor": "metrics.rca_accuracy_incident_medium",
+      "display_accessor": "metrics.rca_accuracy_incident_medium_display",
+      "display_type": "markdown",
+      "type": "number",
+      "align": "right"
+    },
+    {
+      "id": "rca_accuracy_incident_hard",
+      "header": "RCA Accuracy (Hard)",
+      "accessor": "metrics.rca_accuracy_incident_hard",
+      "display_accessor": "metrics.rca_accuracy_incident_hard_display",
+      "display_type": "markdown",
+      "type": "number",
+      "align": "right"
+    },
+    {
+      "id": "hallucinate_any_incident",
+      "header": "Hallucination Rate",
+      "accessor": "metrics.hallucinate_any_incident",
+      "display_accessor": "metrics.hallucinate_any_incident_display",
+      "display_type": "markdown",
+      "type": "number",
+      "align": "right"
     },
     {
       "id": "date",
       "header": "Date",
       "accessor": "metadata.date",
-      "type": "date"
+      "type": "date",
+      "display_accessor": "metadata.date_display",
+      "display_type": "text"
     },
     {
       "id": "agent_org",
@@ -149,25 +182,10 @@
       "type": "text"
     },
     {
-      "id": "rca_accuracy_incident_medium_display",
-      "header": "RCA Accuracy (Medium)",
-      "accessor": "metrics.rca_accuracy_incident_medium_display",
-      "type": "text",
-      "align": "right"
-    },
-    {
-      "id": "rca_accuracy_incident_hard_display",
-      "header": "RCA Accuracy (Hard)",
-      "accessor": "metrics.rca_accuracy_incident_hard_display",
-      "type": "text",
-      "align": "right"
-    },
-    {
-      "id": "hallucinate_any_incident_display",
-      "header": "Hallucination Rate",
-      "accessor": "metrics.hallucinate_any_incident_display",
-      "type": "text",
-      "align": "right"
+      "id": "pr",
+      "header": "PR",
+      "accessor": "metadata.pr",
+      "type": "markdown"
     },
     {
       "id": "total_tokens",
@@ -182,12 +200,6 @@
       "accessor": "metrics.total_cost_usd",
       "type": "number",
       "align": "right"
-    },
-    {
-      "id": "pr",
-      "header": "PR",
-      "accessor": "metadata.pr",
-      "type": "markdown"
     }
   ],
   "rank_by": [

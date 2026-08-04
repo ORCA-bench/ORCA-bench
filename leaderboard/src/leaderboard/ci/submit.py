@@ -19,6 +19,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 from harbor.auth.constants import SUPABASE_URL
@@ -52,19 +53,41 @@ HUB_METADATA_KEYS = frozenset(
         "agent_org",
         "model_org",
         "date",
+        "date_display",
         "reasoning_effort",
         "pr",
     }
 )
 
 
+def format_date(iso_date: str) -> str:
+    """`2026-06-07` -> `Jun 7, 2026`, the Date column's rendered form.
+
+    Stored as its own field because a `date` column renders a locale datetime
+    and shifts the timezone -- `2026-05-05` came out as `5/4/2026, 8:00:00 PM`,
+    a day early with a spurious clock time. The board wants the calendar date
+    the run carries, nothing more. `date` itself stays the column's sort
+    accessor, so ordering remains chronological rather than alphabetical.
+    """
+    d = datetime.strptime(iso_date, "%Y-%m-%d")
+    return f"{d:%b} {d.day}, {d.year}"
+
+
 def hub_metadata(submission: dict) -> dict:
-    """Return metadata keys allowed by the Hub leaderboard schema (non-null)."""
-    return {
+    """Return metadata keys allowed by the Hub leaderboard schema (non-null).
+
+    `date_display` is derived here rather than carried in the submission file:
+    it is a rendering detail, so submitters neither fill it in nor can get it
+    wrong.
+    """
+    md = {
         k: v
         for k, v in submission["metadata"].items()
         if k in HUB_METADATA_KEYS and v is not None
     }
+    if md.get("date"):
+        md["date_display"] = format_date(md["date"])
+    return md
 
 
 def row_create_payload(submission: dict) -> dict:

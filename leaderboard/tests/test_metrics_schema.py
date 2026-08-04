@@ -60,21 +60,42 @@ class MetricsSchemaTests(unittest.TestCase):
         extra = allowed - _expected_metric_keys()
         self.assertFalse(extra, f"metrics_schema declares unused keys {sorted(extra)}")
 
-    def _metric_columns(self) -> set[str]:
+    def _metric_accessors(self, field: str = "accessor") -> set[str]:
         return {
-            c["accessor"].split(".", 1)[1]
+            c[field].split(".", 1)[1]
             for c in _definition()["columns"]
-            if c["accessor"].startswith("metrics.")
+            if c.get(field, "").startswith("metrics.")
         }
 
-    def test_every_display_metric_has_a_column(self):
-        missing = _display_keys() - self._metric_columns()
-        self.assertFalse(missing, f"no leaderboard column for {sorted(missing)}")
+    def test_every_display_metric_is_shown(self):
+        """Each metric's formatted string must be some column's
+        display_accessor -- that is the cell the reader sees."""
+        missing = _display_keys() - self._metric_accessors("display_accessor")
+        self.assertFalse(missing, f"no leaderboard column shows {sorted(missing)}")
 
-    def test_columns_show_only_display_and_resource_metrics(self):
-        """Means and stderrs are stored for machines, not shown: a column on a
-        raw mean would render a bare number beside the mean ± se cell."""
-        extra = self._metric_columns() - _display_keys() - {"total_tokens", "total_cost_usd"}
+    def test_metric_columns_sort_on_the_numeric_mean(self):
+        """A metric column's `accessor` decides its ordering. Pointing it at the
+        display string would sort "9.5" above "26.6"; the numeric mean sorts
+        correctly and the string is shown via display_accessor."""
+        props = _definition()["metrics_schema"]["properties"]
+        for c in _definition()["columns"]:
+            if not c.get("display_accessor", "").startswith("metrics."):
+                continue
+            key = c["accessor"].split(".", 1)[1]
+            self.assertEqual(
+                props[key]["type"], "number", f"column {c['id']} sorts on a non-number"
+            )
+
+    def test_display_cells_render_markdown(self):
+        """format_measurement bolds the mean, so the cell must be rendered as
+        markdown -- a text column would show the asterisks literally."""
+        for c in _definition()["columns"]:
+            if c.get("display_accessor", "").endswith(tuple(_display_keys())):
+                self.assertEqual(c.get("display_type"), "markdown", f"column {c['id']}")
+
+    def test_columns_expose_no_stray_metric(self):
+        shown = self._metric_accessors() | self._metric_accessors("display_accessor")
+        extra = shown - _expected_metric_keys()
         self.assertFalse(extra, f"unexpected metric columns {sorted(extra)}")
 
     def test_ranking_uses_a_numeric_metric(self):

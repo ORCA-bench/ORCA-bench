@@ -11,6 +11,7 @@ from leaderboard.core.metrics import (
     RewardRangeError,
     compute_metrics,
     compute_subset_metrics,
+    format_measurement,
     submission_by_task,
 )
 from leaderboard.core.task_groups import TaskLabel
@@ -219,8 +220,10 @@ class PublishedMetricsTests(unittest.TestCase):
             self.assertIn(key + STDERR_SUFFIX, m)
             self.assertEqual(
                 m[key + DISPLAY_SUFFIX],
-                f"{m[key]:.2f} ± {m[key + STDERR_SUFFIX]:.2f}",
+                format_measurement(m[key], m[key + STDERR_SUFFIX]),
             )
+            # The mean is bold so the eye lands on it, not the error bar.
+            self.assertTrue(m[key + DISPLAY_SUFFIX].startswith("**"))
 
     def test_publishes_nothing_else(self):
         """The board is exactly three metrics; a stray key would be rejected by
