@@ -6,6 +6,7 @@ Usage:
 
 import json
 import random
+import tomllib
 import urllib.request
 from argparse import ArgumentParser
 from fnmatch import fnmatch
@@ -31,6 +32,16 @@ TASK_META_FIELDS = [
     "flag",
     "description",
 ]
+
+
+def _parse_task_metadata(text: str) -> dict:
+    """Extract ``[metadata]`` from a task.toml.
+
+    ``build_harbor_tasks.py`` mirrors the task metadata into ``task.toml``'s
+    ``[metadata]`` table; it no longer writes the side-car ``task_meta.json``
+    this used to read.
+    """
+    return tomllib.loads(text).get("metadata", {})
 
 
 def _load_registry(registry_source: str | Path) -> list[dict]:
@@ -61,7 +72,11 @@ def _fetch_registry_data(
     task_names: set[str],
     revision: str = "main",
 ) -> tuple[dict[str, dict], dict[str, dict], dict[str, list[dict]]]:
-    """Load task_meta.json, expected.json, and per-event rubrics for each task.
+    """Load task metadata, expected.json, and per-event rubrics for each task.
+
+    Task metadata comes from ``task.toml``'s ``[metadata]`` table — the
+    side-car ``task_meta.json`` this used to read is no longer written by
+    ``build_harbor_tasks.py``.
 
     Tasks built by ``examples/otel-demo/build_harbor_tasks.py`` carry one
     rubric per plausible event under ``tests/rubrics/<event_id>.json``;
@@ -109,29 +124,34 @@ def _fetch_registry_data(
                 continue
             hf_locators[name] = (repo_id, task["path"])
 
-    def _fetch(name: str, relpath: str) -> dict:
+    def _locate(name: str, relpath: str) -> Path:
+        """Resolve ``relpath`` within a task to a readable local file."""
         if is_local:
-            return json.loads(Path(f"{local_bases[name]}/{relpath}").read_text())
+            return Path(f"{local_bases[name]}/{relpath}")
         repo_id, base = hf_locators[name]
-        local_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=f"{base}/{relpath}",
-            repo_type="dataset",
-            revision=revision,
+        return Path(
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=f"{base}/{relpath}",
+                repo_type="dataset",
+                revision=revision,
+            )
         )
-        return json.loads(Path(local_path).read_text())
+
+    def _fetch(name: str, relpath: str) -> dict:
+        return json.loads(_locate(name, relpath).read_text())
 
     names = sorted(local_bases.keys() | hf_locators.keys())
     task_meta: dict[str, dict] = {}
     expected: dict[str, dict] = {}
     rubrics: dict[str, list[dict]] = {}
     for name in names:
-        for label, relpath, out in (
-            ("task_meta.json", "task_meta.json", task_meta),
-            ("expected.json", "tests/expected.json", expected),
+        for label, relpath, parse, out in (
+            ("task.toml [metadata]", "task.toml", _parse_task_metadata, task_meta),
+            ("expected.json", "tests/expected.json", json.loads, expected),
         ):
             try:
-                out[name] = _fetch(name, relpath)
+                out[name] = parse(_locate(name, relpath).read_text())
             except Exception as e:
                 print(f"Warning: Could not fetch {label} for {name}: {e}")
                 out[name] = {}

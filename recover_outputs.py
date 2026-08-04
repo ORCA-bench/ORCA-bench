@@ -126,13 +126,6 @@ def main() -> None:
         "recording.cast, sidestepping terminus-2's 40-row pane truncation."
     )
     parser.add_argument(
-        "--jobs-dir",
-        "-jd",
-        type=Path,
-        default=Path("jobs"),
-        help="Path to the Harbor jobs directory (default: jobs)",
-    )
-    parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite existing per-trial recovered_outputs/{trial_id}.json.",

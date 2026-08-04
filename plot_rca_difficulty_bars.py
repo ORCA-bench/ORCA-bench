@@ -5,12 +5,12 @@ broken out by prompt difficulty. Generation emits the ``_granularity`` ladder
 ``easy``/``medium``/``hard`` directly (``utils.GRANULARITY_ALIASES`` is now an
 identity passthrough).
 
-1. **RCA Accuracy (Exact) ↑** — ``feature_flag_all_match`` mean per
+1. **RCA Accuracy (Exact) ↑** — ``rca_accuracy`` mean per
    difficulty (Easy/Medium/Hard) on incident tasks, plus a **Control** bar
-   showing control-task accuracy (control-task ``score``; RCA Accuracy is 0 on
-   control tasks by construction, so the control accuracy is the meaningful
+   showing control-task accuracy (control-task ``rca_depth``; RCA Accuracy is 0
+   on control tasks by construction, so the control accuracy is the meaningful
    number, matching the control "Partial RCA" column of ``tab:full-rca-control``).
-2. **RCA Depth (Partial) ↑** — ``score`` (0–3) mean per difficulty
+2. **RCA Depth (Partial) ↑** — ``rca_depth`` (0–3) mean per difficulty
    (Easy/Medium/Hard) on incident tasks, scaled to a percentage of 3. No
    control bar (RCA Depth has no score for control tasks).
 
@@ -235,7 +235,7 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging(args.log_level)
 
-    df = load_data(args.output_dir, args.effort, args.filter_xlsx)
+    df = load_data(args.jobs_dir, args.effort, args.filter_xlsx)
     incident_df = df[~df["_is_control"]]
     control_df = df[df["_is_control"]]
     if incident_df.empty:
@@ -255,7 +255,10 @@ def main() -> None:
     # Panel 0 — RCA Accuracy: a Control bar (control-task score, the meaningful
     # control accuracy) followed by per-difficulty RCA Accuracy on incident tasks.
     exact_cells: list[tuple[str, list[float], list[float], list[int]]] = [
-        ("control", *_bar_stats(control_df, "score", model_order, scale=100.0 / 3.0))
+        (
+            "control",
+            *_bar_stats(control_df, "rca_depth", model_order, scale=100.0 / 3.0),
+        )
     ]
     for gran in incident_grans:
         sub = incident_df[incident_df["_granularity"] == gran]
@@ -269,7 +272,7 @@ def main() -> None:
     for gran in incident_grans:
         sub = incident_df[incident_df["_granularity"] == gran]
         depth_cells.append(
-            (gran, *_bar_stats(sub, "score", model_order, scale=100.0 / 3.0))
+            (gran, *_bar_stats(sub, "rca_depth", model_order, scale=100.0 / 3.0))
         )
 
     fig, axes = plt.subplots(1, 2, figsize=(ICLR_WIDTH, 1.5), sharey=True)

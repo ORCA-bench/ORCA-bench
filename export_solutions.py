@@ -59,15 +59,19 @@ def main() -> None:
         rubric_data = json.loads(rubric_path.read_text())
         flag = rubric_data.get("feature_flag", "")
         incident_time = rubric_data.get("incident_time", "")
+        if not flag:
+            # Without a feature_flag the entry would be control-shaped
+            # (``events: []``), and the control judge needs a ``current`` that
+            # an oracle rubric doesn't carry. Every real rubric has one.
+            logger.warning(f"Rubric {rubric_path.name} has no feature_flag, skipping")
+            continue
 
         all_data[stem] = {
             "predictions": sol_path.read_text(),
             "result": {"task_name": stem},
             "task_meta": {"flag": flag},
             "expected": {
-                "events": (
-                    [{"root_cause": flag, "event_time": incident_time}] if flag else []
-                ),
+                "events": [{"root_cause": flag, "event_time": incident_time}],
             },
             "rubric": [rubric_data],
         }

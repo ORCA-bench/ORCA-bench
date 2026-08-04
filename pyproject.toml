@@ -31,7 +31,7 @@ dependencies = [
     "python-dotenv",
     "huggingface-hub",
     "python-slugify",
-    "harbor",
+    "harbor>=0.20.0",
     "gradient>=3.10.1",
     "matplotlib>=3.10.8",
     "openpyxl>=3.1.5",

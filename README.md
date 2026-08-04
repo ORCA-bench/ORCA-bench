@@ -60,6 +60,8 @@ cp patches/harbor_models_task_task.py \
   "$(uv run python -c "import harbor.models.task.task as m; print(m.__file__)")"
 ```
 
+The patch tracks `harbor.models.task.task` verbatim except for the `ignore=[".trials/"]` argument, so re-copy it from the installed module and re-apply that one hunk whenever harbor is upgraded. As of harbor 0.20.0 `Task.checksum` raises a `DeprecationWarning` in favor of `TrialLock.task.digest`, but `trial/trial.py` still calls it once per trial, so the patch remains required until that call goes away.
+
 <details>
 <summary>Using GradientAI's serverless inference from DigitalOcean</summary>
 
@@ -362,65 +364,56 @@ SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" uv run harbor run \
 
 </details>
 
-3. Export predictions from Harbor jobs:
+2. Format accuracy results.
 
-> [!TIP]
-> To share traces to HuggingFace:
-> ```bash
-> uv run harbor traces export --path JOBS_DIR --push --repo HF_REPO_ID --recursive --episodes last
-> ```
+These scripts read scores straight out of the job tree: for every trial they
+load `<trial>/verifier/reward-details.json` (written by the verifier),
+`<trial>/config.json` for the agent and model, and the task's `task.toml`
+`[metadata]` — section, granularity, phrasing, flag — downloaded from the
+Harbor Hub and cached under `~/.cache/harbor/tasks`, so the first run needs an
+authenticated session (`harbor auth login` or `HARBOR_API_KEY`) and later runs
+are offline.
 
-```bash
-uv run harbor-export JOBS_DIR -od OUTPUT_DIR \
-  --registry-url https://huggingface.co/datasets/.../registry.json
-```
-
-4. Obtain LLM judge scores using GPT 5.4 (high):
-
-> [!IMPORTANT]
-> You may get errors like `2026-05-18T00:09:35+0000 - ERROR - Trial d6-big-cartfailure-on-univ00-uni__EHeBeZo (d6-big-cartfailure-on-univ00-universal_ttd480m_range30m_off+60m) failed: Unterminated string starting at: line 1 column 2297 (char 2296)`. Please re-run the following command until there are no more errors.
-
-```bash
-uv run python run_llm_judge.py -od OUTPUT_DIR -e high -bs 1000 --concurrency 1000
-```
-
-<details>
-  <summary>Obtain scores on human eval sample only</summary>
-
-```bash
-uv run python run_llm_judge.py -od OUTPUT_DIR -e high -bs 1600 --concurrency 1600 --sampled-tasks-file human-eval-sample/output/sampled_tasks.json
-```
-
-</details>
-
-5. Validate the LLM judge against human-verified scores on the human-eval sample. Each annotator (e.g. KC, AG) maintains their own `human_verified_scores*.json` file of independently re-scored task--model pairs:
-
-```bash
-# (a) Pairwise inter-annotator agreement + (b) LLM judge vs. average human score,
-# broken down by difficulty (Spearman rho, quadratic-weighted Cohen's kappa)
-uv run python compute_human_agreement.py \
-  --scores-a human_verified_scores.json \
-  --scores-b human_verified_scores_ag.json \
-  -od OUTPUT_DIR -e high
-
-# Scatter grid (rows=difficulty, cols=model) of human vs. LLM judge scores,
-# one PDF per annotator's score file
-uv run python plot_human_vs_llm_scatter.py -od OUTPUT_DIR -e high --human-scores human_verified_scores_ag.json
-uv run python plot_human_vs_llm_scatter.py -od OUTPUT_DIR -e high --human-scores human_verified_scores.json
-```
-
-6. Format accuracy results:
+`-jd/--jobs-dir` is what they **read** and accepts either a single job
+directory (`jobs/2026-05-05__04-10-26`) or a tree of them (`jobs`), in which
+case every job is pooled into one table. `-od/--output-dir` is only where CSVs
+and figures are **written**. `-e/--effort` filters on the judge's reasoning
+effort, not the agent's.
 
 ```bash
 # Generate Figure 1: RCA accuracy and hallucination
-uv run python plot_rca_and_hallucination.py -od OUTPUT_DIR -e high
+uv run python plot_rca_and_hallucination.py -jd JOBS_DIR -od OUTPUT_DIR -e high
 
 # Generate Figure 4: PRCA performance by prompt difficulty
-uv run python plot_rca_difficulty_bars.py -od OUTPUT_DIR -e high
+uv run python plot_rca_difficulty_bars.py -jd JOBS_DIR -od OUTPUT_DIR -e high
 
 # Generate table of accuracy results for appendix
-uv run python format_acc.py -od OUTPUT_DIR -e high
+uv run python format_acc.py -jd JOBS_DIR -od OUTPUT_DIR -e high
+
+# Same table stratified by prompt difficulty, plus per-difficulty bar plots
+uv run python format_acc_by_granularity.py -jd JOBS_DIR -od OUTPUT_DIR -e high
 ```
+
+<details>
+<summary>Scoring trials that predate <code>verifier/reward-details.json</code></summary>
+
+Older runs wrote a bare-float `verifier/reward.txt` and a summary
+`verifier/details.json` that carries no rubric detail. If you also have the
+`judge-*.json` files `run_llm_judge.py` produced for those trials, convert them
+in place — the judge verdicts are reused as-is, so this costs no LLM calls:
+
+```bash
+uv run python backfill_verifier_outputs.py \
+  --jobs-dir JOBS_DIR --scores-dir SCORES_DIR --dry-run   # preview
+uv run python backfill_verifier_outputs.py \
+  --jobs-dir JOBS_DIR --scores-dir SCORES_DIR
+```
+
+Trials are paired with score files by directory name. It writes `reward.json`
+and `reward-details.json`, removes the stale `reward.txt` / `details.json`, and
+leaves `report.md` and the run logs untouched.
+
+</details>
 
 <details>
 <summary>Instructions for generating Figure 5: Code+telemetry vs. telemetry only</summary>
@@ -431,7 +424,7 @@ uv run python format_acc.py -od OUTPUT_DIR -e high
 
 </details>
 
-7. Generate token and tool-usage figures:
+3. Generate token and tool-usage figures:
 
 * Pre-process Terminus-2 trajectories using the following command:
 
