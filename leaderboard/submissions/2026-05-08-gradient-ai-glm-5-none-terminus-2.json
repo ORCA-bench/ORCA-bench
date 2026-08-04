@@ -14,7 +14,8 @@
     "model_display": "GLM-5",
     "model_org": "Z.ai",
     "date": "2026-05-08",
-    "reasoning_effort": null
+    "reasoning_effort": null,
+    "pr": "[#24](https://github.com/ORCA-bench/ORCA-bench/pull/24)"
   },
   "metrics": {
     "rca_accuracy_incident_medium": 16.51,
