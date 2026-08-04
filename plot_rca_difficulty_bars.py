@@ -254,12 +254,7 @@ def main() -> None:
 
     # Panel 0 — RCA Accuracy: a Control bar (control-task score, the meaningful
     # control accuracy) followed by per-difficulty RCA Accuracy on incident tasks.
-    exact_cells: list[tuple[str, list[float], list[float], list[int]]] = [
-        (
-            "control",
-            *_bar_stats(control_df, "rca_depth", model_order, scale=100.0 / 3.0),
-        )
-    ]
+    exact_cells: list[tuple[str, list[float], list[float], list[int]]] = []
     for gran in incident_grans:
         sub = incident_df[incident_df["_granularity"] == gran]
         exact_cells.append(
@@ -268,7 +263,12 @@ def main() -> None:
 
     # Panel 1 — RCA Depth (partial): per-difficulty mean score on incident
     # tasks only (no control bar).
-    depth_cells: list[tuple[str, list[float], list[float], list[int]]] = []
+    depth_cells: list[tuple[str, list[float], list[float], list[int]]] = [
+        (
+            "control",
+            *_bar_stats(control_df, "rca_depth", model_order, scale=100.0 / 3.0),
+        )
+    ]
     for gran in incident_grans:
         sub = incident_df[incident_df["_granularity"] == gran]
         depth_cells.append(
