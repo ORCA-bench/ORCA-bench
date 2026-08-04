@@ -1,12 +1,19 @@
 # ORCA-bench: How Ready Are Language Model Agents for Oncall?
 
-<!-- [Dataset](https://hub.harborframework.com/datasets/orca-bench/ORCA-bench/latest) · [Website](https://orca-bench.github.io) · Paper (TBD) -->
-[Dataset](https://hub.harborframework.com/datasets/orca-bench/ORCA-bench/latest) · [Website](https://orca-bench.github.io)
+[![Dataset](https://img.shields.io/badge/Dataset-Harbor%20Hub-0b7285?style=flat-square&logo=harbor&logoColor=white)](https://hub.harborframework.com/datasets/orca-bench/orca-bench/latest)
+[![Website](https://img.shields.io/badge/Website-orca--bench.github.io-1c7ed6?style=flat-square&logo=githubpages&logoColor=white)](https://orca-bench.github.io)
+[![arXiv](https://img.shields.io/badge/arXiv-2607.28545-b31b1b?style=flat-square&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2607.28545)
 
-<!-- This repo contains the instructions to reproduce the dataset construction and evaluation in our paper [ORCA-bench: How Ready Are Language Model Agents for Oncall?]().
+This repo contains the instructions to reproduce the dataset construction and evaluation in our paper [ORCA-bench: How Ready Are Language Model Agents for Oncall?](https://arxiv.org/abs/2607.28545).
 
 ```bibtex
-``` -->
+@article{gong2026orca,
+  title={ORCA-bench: How Ready Are Language Model Agents for Oncall?},
+  author={Gong, Albert and Choi, Kyuseong and Agarwal, Abhineet and Schechner, Jason and Huang, Ryan and Agrawal, Raj and Agarwal, Anish and Dwivedi, Raaz},
+  journal={arXiv preprint arXiv:2607.28545},
+  year={2026}
+}
+```
 
 ## Setup Instructions
 
@@ -156,7 +163,7 @@ uv run python generate_questions.py --schedule SCHEDULE_PATH -od OUTPUT_DIR
 # Example: uv run python generate_questions.py --schedule schedules/incident_schedule_dev_single_2.json -od OUTPUT_DIR
 ```
 
-7. Create Harbor tasks and publish them to the [Harbor Hub](https://hub.harborframework.com/datasets/orca-bench/ORCA-bench):
+7. Create Harbor tasks and publish them to the [Harbor Hub](https://hub.harborframework.com/datasets/orca-bench/orca-bench):
 
 ```bash
 uv run python generate_task_specs.py \
@@ -175,7 +182,7 @@ uv run python generate_answers.py -od OUTPUT_DIR -dd data-0418 -e high --concurr
 # NOTE: for the telemetry-only environment, pass `--templates-dir harbor-template-telemetry-only`
 uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd data-0418 \
   --templates-dir harbor-template --force \
-  --dataset-name orca-bench/ORCA-bench \
+  --dataset-name orca-bench/orca-bench \
   --dataset-description "An agent benchmark for root cause analysis" \
   --dataset-author "Your Name <your@email.com>"
 
@@ -468,7 +475,7 @@ uv run python plot_retrieval.py -od OUTPUT_DIR -jd jobs-sub
 
 ## Submitting to the leaderboard
 
-Results land on the [ORCA-bench leaderboard](https://hub.harborframework.com/datasets/orca-bench/ORCA-bench/latest?tab=leaderboard&leaderboard=orca-bench)
+Results land on the [ORCA-bench leaderboard](https://hub.harborframework.com/datasets/orca-bench/orca-bench/latest?tab=leaderboard&leaderboard=orca-bench)
 through a pull request. See [`leaderboard/SUBMIT.md`](./leaderboard/SUBMIT.md)
 for the full walkthrough; the short version:
 
