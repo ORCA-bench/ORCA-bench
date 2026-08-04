@@ -14,7 +14,8 @@
     "model_display": "GPT-5.5",
     "model_org": "OpenAI",
     "date": "2026-05-05",
-    "reasoning_effort": "medium"
+    "reasoning_effort": "medium",
+    "pr": "[#13](https://github.com/ORCA-bench/ORCA-bench/pull/13)"
   },
   "metrics": {
     "accuracy": 52.93,
