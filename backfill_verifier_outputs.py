@@ -18,9 +18,16 @@ recursively for ``judge-<model>-<effort>-<trial_dir_name>.json``. A trial with
 no score file is skipped (reported, not an error); a trial matching more than
 one is skipped as ambiguous.
 
-For each paired trial this writes ``reward.json`` + ``reward-details.json`` and
+For each paired trial this writes ``reward.json`` + ``reward-details.json``,
+repoints ``result.json``'s ``verifier_result.rewards`` at the same scores, and
 deletes the stale ``reward.txt`` + ``details.json``. ``report.md``, ``log.txt``
 and ``test-stdout.txt`` are left alone — they are the real container transcript.
+
+``result.json`` has to move with ``reward.json``: ``harbor upload`` rebuilds each
+Hub trial from ``result.json`` alone and never re-reads the ``verifier/`` files,
+which upload as opaque artifacts. Rewriting only ``reward.json`` publishes the
+pre-backfill reward to the Hub — and to anything reading it, such as a
+leaderboard — while the new score is visible only by downloading the trial.
 
 Usage::
 
@@ -67,6 +74,11 @@ _WRAPPER_KEYS = frozenset(
 )
 
 STALE_FILES = ("reward.txt", "details.json")
+
+# The trial-level result file harbor writes next to ``verifier/``. ``harbor
+# upload`` parses it into a ``TrialResult`` and publishes its
+# ``verifier_result.rewards`` as the Hub trial's reward.
+RESULT_FILE = "result.json"
 
 
 def build_score_index(
@@ -118,30 +130,57 @@ def load_judge_result(score_path: Path, trial_name: str) -> dict:
     return result
 
 
-def render_outputs(result: dict) -> tuple[str, str, float]:
-    """Return ``(reward_json, details_json, rca_depth)`` exactly as the verifier writes them.
+def render_outputs(result: dict) -> tuple[dict[str, float | int], str, str, float]:
+    """Return ``(rewards, reward_json, details_json, rca_depth)`` exactly as the
+    verifier writes them.
 
     Mirrors ``check_prediction.main()``: the reward payload is compact JSON and
-    the details are ``indent=2``, neither with a trailing newline.
+    the details are ``indent=2``, neither with a trailing newline. ``rewards`` is
+    the same mapping the reward JSON encodes, handed back so it can also be
+    written into ``result.json`` without re-parsing.
     """
     agg = aggregate_judge_response(result["nested"], mode=result.get("mode"))
     rca_depth = agg["rca_depth"] or 0.0
     reward = rca_depth / 3.0
+    rewards = build_rewards(agg, reward)
     return (
-        json.dumps(build_rewards(agg, reward)),
+        rewards,
+        json.dumps(rewards),
         json.dumps(result, indent=2),
         rca_depth,
     )
 
 
+def update_result_rewards(trial_dir: Path, rewards: dict[str, float | int]) -> None:
+    """Point ``result.json``'s ``verifier_result.rewards`` at the new scores.
+
+    Only that field is replaced, so anything else harbor recorded for the trial
+    (timings, agent result, exception info) survives untouched. Serialized with
+    ``indent=4`` and no trailing newline to match harbor's own
+    ``model_dump_json(indent=4)``.
+    """
+    path = trial_dir / RESULT_FILE
+    payload = json.loads(path.read_text())
+    verifier_result = payload.get("verifier_result") or {}
+    verifier_result["rewards"] = rewards
+    payload["verifier_result"] = verifier_result
+    path.write_text(json.dumps(payload, indent=4))
+
+
 def backfill_trial(trial_dir: Path, score_path: Path, *, dry_run: bool) -> str:
-    """Rewrite one trial's ``verifier/`` dir. Returns the judge ``mode``."""
+    """Rewrite one trial's ``verifier/`` dir and ``result.json``. Returns the
+    judge ``mode``."""
     verifier_dir = trial_dir / "verifier"
     if not verifier_dir.is_dir():
         raise FileNotFoundError(f"verifier dir missing: {verifier_dir}")
+    # Checked before anything is written: a trial whose result.json is missing
+    # cannot be published with the new score, and half-converting it would leave
+    # reward.json and result.json disagreeing.
+    if not (trial_dir / RESULT_FILE).is_file():
+        raise FileNotFoundError(f"{RESULT_FILE} missing: {trial_dir / RESULT_FILE}")
 
     result = load_judge_result(score_path, trial_dir.name)
-    reward_text, details_text, rca_depth = render_outputs(result)
+    rewards, reward_text, details_text, rca_depth = render_outputs(result)
     mode = result.get("mode", "?")
     logger.debug(f"{trial_dir.name}: {mode} rca_depth={rca_depth:.2f} {reward_text}")
 
@@ -150,6 +189,7 @@ def backfill_trial(trial_dir: Path, score_path: Path, *, dry_run: bool) -> str:
 
     (verifier_dir / "reward.json").write_text(reward_text)
     (verifier_dir / "reward-details.json").write_text(details_text)
+    update_result_rewards(trial_dir, rewards)
     for stale in STALE_FILES:
         (verifier_dir / stale).unlink(missing_ok=True)
     return mode
@@ -221,7 +261,7 @@ def main() -> None:
     )
 
     modes: Counter[str] = Counter()
-    skipped, failed = [], []
+    skipped, failed, converted = [], [], []
     for trial_dir in trial_dirs:
         if trial_dir.name in ambiguous:
             names_ = [p.name for p in ambiguous[trial_dir.name]]
@@ -234,6 +274,7 @@ def main() -> None:
             continue
         try:
             modes[backfill_trial(trial_dir, score_path, dry_run=args.dry_run)] += 1
+            converted.append(trial_dir)
         except Exception as exc:
             logger.warning(f"{trial_dir.name}: {type(exc).__name__}: {exc}")
             failed.append(trial_dir.name)
@@ -248,16 +289,31 @@ def main() -> None:
     if args.dry_run or not modes:
         return
 
-    # Authoritative check that harbor will accept every reward.json we wrote.
+    # Authoritative check that harbor will accept what we wrote, and that the
+    # file the Hub actually scores from agrees with the one on disk. Parsing
+    # result.json with harbor's own model is the same step `harbor upload`
+    # takes, so a trial that passes here is a trial that publishes the new score.
+    from harbor.models.trial.result import TrialResult
     from harbor.models.verifier.result import VerifierResult
 
     checked = 0
-    for trial_dir in trial_dirs:
-        path = trial_dir / "verifier" / "reward.json"
-        if path.is_file():
-            VerifierResult(rewards=json.loads(path.read_text()))
-            checked += 1
-    logger.info(f"harbor VerifierResult accepts all {checked} reward.json file(s)")
+    for trial_dir in converted:
+        rewards = json.loads((trial_dir / "verifier" / "reward.json").read_text())
+        VerifierResult(rewards=rewards)
+        published = TrialResult.model_validate_json(
+            (trial_dir / RESULT_FILE).read_text()
+        ).verifier_result
+        if published is None or published.rewards != rewards:
+            raise ValueError(
+                f"{trial_dir.name}: {RESULT_FILE} would publish "
+                f"{published.rewards if published else None}, but reward.json says "
+                f"{rewards} — the Hub would score the wrong number"
+            )
+        checked += 1
+    logger.info(
+        f"harbor accepts all {checked} reward.json file(s); "
+        f"each {RESULT_FILE} publishes the same rewards"
+    )
 
 
 if __name__ == "__main__":
