@@ -14,7 +14,8 @@
     "model_display": "DeepSeek V4 Pro",
     "model_org": "DeepSeek",
     "date": "2026-05-18",
-    "reasoning_effort": null
+    "reasoning_effort": null,
+    "pr": "[#27](https://github.com/ORCA-bench/ORCA-bench/pull/27)"
   },
   "metrics": {
     "rca_accuracy_incident_medium": 15.6,
