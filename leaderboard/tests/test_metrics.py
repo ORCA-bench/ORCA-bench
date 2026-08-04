@@ -204,6 +204,27 @@ def _trials() -> list[dict]:
     ]
 
 
+class FormatMeasurementTests(unittest.TestCase):
+    """The cell format is user-visible, so pin it here rather than only
+    asserting self-consistency."""
+
+    def test_renders_percent_on_both_halves_with_one_decimal(self):
+        self.assertEqual(format_measurement(83.8, 1.2), "**83.8%** ± 1.2%")
+
+    def test_rounds_to_one_decimal(self):
+        self.assertEqual(format_measurement(26.61, 3.004), "**26.6%** ± 3.0%")
+
+    def test_pads_to_one_decimal(self):
+        """A whole number must not collapse to `1%` -- the column reads as a
+        measurement, so the precision stays visible."""
+        self.assertEqual(format_measurement(1.0, 0.7), "**1.0%** ± 0.7%")
+
+    def test_only_the_mean_is_bold(self):
+        cell = format_measurement(9.0, 2.0)
+        self.assertTrue(cell.startswith("**9.0%**"))
+        self.assertEqual(cell.count("**"), 2)
+
+
 class PublishedMetricsTests(unittest.TestCase):
     def test_each_metric_reports_mean_stderr_and_display(self):
         m = compute_subset_metrics(_trials(), {}, _LABELS)
