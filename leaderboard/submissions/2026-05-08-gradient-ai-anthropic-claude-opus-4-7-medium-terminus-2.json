@@ -14,7 +14,8 @@
     "model_display": "Claude Opus 4.7",
     "model_org": "Anthropic",
     "date": "2026-05-08",
-    "reasoning_effort": "medium"
+    "reasoning_effort": "medium",
+    "pr": "[#11](https://github.com/ORCA-bench/ORCA-bench/pull/11)"
   },
   "metrics": {
     "accuracy": 55.78,
