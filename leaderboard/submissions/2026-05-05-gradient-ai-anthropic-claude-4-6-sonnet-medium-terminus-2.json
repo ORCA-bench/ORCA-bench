@@ -1,0 +1,22 @@
+{
+  "source_jobs": [
+    "https://hub.harborframework.com/jobs/5452121b-41f8-52eb-97d3-116bd1e768cb"
+  ],
+  "source_filter": {
+    "agent": "terminus-2",
+    "agent_version": "2.0.0",
+    "model_name": "gradient_ai/anthropic-claude-4.6-sonnet",
+    "reasoning_effort": "medium"
+  },
+  "metadata": {
+    "agent_display": "Terminus 2",
+    "agent_org": "Harbor",
+    "model_display": "Claude Sonnet 4.6",
+    "model_org": "Anthropic",
+    "date": "2026-05-05",
+    "reasoning_effort": "medium"
+  },
+  "metrics": null,
+  "disqualified_trials": [],
+  "credited_trials": []
+}
