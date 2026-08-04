@@ -129,7 +129,7 @@ def add_task_package(
     re-serialize, preserving the other sections) but names the package by a hash
     of ``task_name`` so the identity published to harbor hub does not leak the
     feature flag. When ``metadata`` is given, its keys are merged into the
-    ``[metadata]`` section (on top of the template's difficulty/category/tags).
+    ``[metadata]`` section (on top of the template's category/tags).
     """
     config = TaskConfig.model_validate_toml(toml_path.read_text())
     config.task = PackageInfo(
@@ -155,6 +155,16 @@ def _parse_authors(authors: list[str] | None) -> list[Author]:
 
 
 # ───────────────────────────── Task building ─────────────────────────────
+# Public difficulty label derived from the question granularity. ``medium``
+# granularity tasks (broad feature-area complaints) are filtered out
+# downstream, so they get no difficulty label.
+_GRANULARITY_TO_DIFFICULTY: dict[str, str | None] = {
+    "easy": "easy",
+    "hard": "medium",
+    "universal": "hard",
+    "medium": None,
+}
+
 _CSV_COLUMNS: list[str] = [
     "task_id",
     "package_name",
@@ -254,6 +264,14 @@ def build_task(
         meta["description"] = spec.flag_description
     if spec.granularity is not None:
         meta["granularity"] = spec.granularity
+        if spec.granularity not in _GRANULARITY_TO_DIFFICULTY:
+            logger.warning(
+                f"{spec.task_id}: unknown granularity {spec.granularity!r}; "
+                "leaving difficulty unset"
+            )
+        difficulty = _GRANULARITY_TO_DIFFICULTY.get(spec.granularity)
+        if difficulty is not None:
+            meta["difficulty"] = difficulty
     if spec.quiet_window_start is not None:
         meta["quiet_window_start"] = spec.quiet_window_start.isoformat()
     if spec.quiet_window_end is not None:
@@ -590,7 +608,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dataset-name",
-        default="orca-bench/ORCA-bench",
+        default="orca-bench/orca-bench",
         help="Dataset manifest name in org/name format.",
     )
     parser.add_argument(

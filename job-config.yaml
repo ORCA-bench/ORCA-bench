@@ -88,5 +88,5 @@ agents:
 # REQUIRED: the dataset this leaderboard tracks, as published on the Harbor
 # Hub. Keep in lockstep with DATASET in leaderboard/src/leaderboard/core/hub.py.
 datasets:
-  - name: orca-bench/ORCA-bench
+  - name: orca-bench/orca-bench
     version: latest

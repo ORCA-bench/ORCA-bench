@@ -1,7 +1,6 @@
 version = "0.0"
 
 [metadata]
-difficulty = "hard"
 category = "sre"
 tags = ["root cause analysis", "telemetry"]
 
