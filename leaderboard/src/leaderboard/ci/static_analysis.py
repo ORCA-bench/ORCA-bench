@@ -95,7 +95,11 @@ class Result:
     resources: dict = field(default_factory=dict)
     subsets: dict = field(default_factory=dict)
     subset_counts: dict = field(default_factory=dict)
+    # Every trial the submission's filter matched, and the subset of those that
+    # produced a verdict and therefore entered the metric. They differ only when
+    # a trial errored before the verifier ran.
     n_trials: int = 0
+    n_scored: int = 0
     n_disqualified: int = 0
     n_credited: int = 0
     errors: Counter = field(default_factory=Counter)
@@ -313,7 +317,8 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
             count_msg,
         )
     )
-    res.n_trials = sum(len(rs) for rs in by_task.values())
+    res.n_trials = len(trials)
+    res.n_scored = sum(len(rs) for rs in by_task.values())
     res.accuracy, res.stderr = compute_metrics(by_task)
     res.stderr_basis = stderr_basis(by_task)
     res.resources = compute_resource_metrics(trials)
@@ -321,7 +326,7 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     # and the stored row can't disagree.
     labels = task_labels()
     res.subsets = compute_subset_metrics(trials, submission, labels)
-    res.subset_counts = subset_counts(trials, labels)
+    res.subset_counts = subset_counts(trials, labels, submission)
 
     if per_trial:
         # Fetch each trial's own config + task digest in-process -- the
@@ -376,6 +381,14 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
         out.append(f"| No error | {result.n_trials - sum(result.errors.values())} |")
         out += [f"| {et} | {n} |" for et, n in result.errors.most_common()]
         out.append(f"| **Total** | **{result.n_trials}** |\n")
+        # Without this the reader sees a Total that the accuracy below is not a
+        # mean over. Unscored trials are dropped from the metric, so say so.
+        if result.n_scored != result.n_trials:
+            out.append(
+                f"{result.n_trials - result.n_scored} trial(s) produced no verdict "
+                f"and are excluded from the metrics below, which are computed over "
+                f"{result.n_scored} scored trial(s).\n"
+            )
 
         effort = sf.get("reasoning_effort")
         resources = " | ".join(format_resource_cells(result.resources))
@@ -398,8 +411,9 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
                 + "\n"
             )
         out.append(
-            f"<sub>{ran} Accuracy is the mean graded reward over all trials; "
-            f"errored trials count `reward 0`. ± SE uses the "
+            f"<sub>{ran} Accuracy is the mean graded reward over the scored "
+            f"trials; a trial that produced no verdict is excluded, not counted "
+            f"as `reward 0`. ± SE uses the "
             f"{result.stderr_basis} estimator. The breakdown groups tasks by "
             f"`difficulty` and by whether they have an incident; RCA accuracy "
             f"is undefined on control tasks.</sub>"

@@ -45,8 +45,10 @@ time so you can inspect the files between steps.
 - **Cover every task.** A submission must include all tasks in the dataset,
   with at least `MIN_TRIALS_PER_TASK` trials each (pinned in
   [`ci/static_analysis.py`](src/leaderboard/ci/static_analysis.py); the expected
-  task count is read from the dataset registry, not hardcoded). Errored trials
-  count as `reward 0` — they are not excluded from the metric.
+  task count is read from the dataset registry, not hardcoded). A trial that
+  errored before producing a verdict is **excluded** from the metrics, so it
+  does not count toward coverage either — if it was a task's only trial, that
+  task is missing and the check fails. Re-run it.
 - **The judge needs its key.** ORCA-bench's verifier is an LLM judge
   (`check_prediction.py`). Pass `OPENAI_API_KEY` (and `OPENAI_BASE_URL` if your
   provider needs it) to the verifier with `--ve`. Unlike some benchmarks there
@@ -142,11 +144,19 @@ all trials), and a **Breakdown** of the same trials by task group. On red, fix
 the problem and push an update to the same file — the checks re-run.
 
 **How accuracy is computed.** ORCA-bench rewards are graded in `[0, 1]`, not
-pass/fail, so accuracy is the **mean reward** over all trials — a report
-scoring 0.33 contributes a third of a point, not a full success. `± SE` uses
-the within-task standard error when tasks have multiple trials, and the
+pass/fail, so accuracy is the **mean reward** over the **scored** trials — a
+report scoring 0.33 contributes a third of a point, not a full success. `± SE`
+uses the within-task standard error when tasks have multiple trials, and the
 between-task standard error when every task has exactly one; the comment
 footer says which.
+
+A trial that produced no verdict — the run died before the verifier scored it —
+is dropped rather than counted as `reward 0`, the same rule the analysis
+pipeline uses (`utils.load_trials`, which skips a trial with no
+`reward-details.json`). Averaging in a trial that was never judged would
+understate the result. The Trial Summary still lists every trial and its error,
+and says how many were excluded; a maintainer can override an errored trial via
+`credited_trials` / `disqualified_trials`, which wins over the exclusion.
 
 **What the breakdown splits.** Two per-trial metrics — `reward` (the graded
 score) and `rca_accuracy` (did the report name the root cause?) — over five

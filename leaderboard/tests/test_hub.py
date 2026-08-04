@@ -67,7 +67,8 @@ class TrialRewardTests(unittest.TestCase):
         self.assertEqual(trial_reward(row), 1.0)
 
     def test_no_evals_and_no_scalar_is_none(self):
-        """A genuinely errored trial: metrics._reward maps None to 0.0."""
+        """A genuinely errored trial. None is the signal metrics.submission_by_task
+        uses to exclude it from the metric."""
         self.assertIsNone(trial_reward(_row(None)))
 
     def test_zero_reward_is_preserved_not_confused_with_missing(self):

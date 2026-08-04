@@ -32,15 +32,30 @@ class RewardRangeError(ValueError):
 
 def is_success(reward) -> bool:
     """A trial 'succeeded' iff reward > 0. NOT the metric -- ORCA-bench rewards
-    are graded, so any partial credit counts here. Used only for the trial
-    error breakdown in the PR comment."""
+    are graded, so any partial credit counts here.
+
+    Unused: the PR comment's error breakdown is built from each row's
+    `error_type`, not from this. Kept as the canonical definition of "did this
+    trial score anything at all" for ad-hoc analysis.
+    """
     return bool(reward) and float(reward) > 0
 
 
 def _reward(r) -> float:
-    """A trial's reward as a float in [0, 1]. A missing reward (errored trial)
-    is 0.0 -- errored trials are not excluded from the metric."""
-    value = 0.0 if r is None else float(r)
+    """A trial's reward as a float in [0, 1].
+
+    `None` is not accepted: an unscored trial is dropped by `submission_by_task`
+    before it reaches here, so a `None` arriving means a caller bypassed that
+    filter and is about to average a trial that has no verdict. Raising keeps
+    the old "missing reward counts as 0" behaviour from creeping back in.
+    """
+    if r is None:
+        raise RewardRangeError(
+            "reward is None; unscored trials are excluded by submission_by_task "
+            "and must never reach the metric. Scoring one 0 would understate the "
+            "result by counting a trial that was never judged."
+        )
+    value = float(r)
     if not 0.0 <= value <= 1.0:
         raise RewardRangeError(
             f"reward {value} outside [0, 1]; ORCA-bench verifiers must emit a "
@@ -125,6 +140,13 @@ def submission_by_task(
     Un-overridden rewards come from the eval metric *named* `reward` (via
     core.hub.trial_reward), never the row's derived `reward` scalar -- the Hub
     derives that positionally and can publish a companion metric in its place.
+
+    Trials that produced no verdict at all are **excluded**, so the metric is a
+    mean over scored trials -- the same convention as utils.load_trials, which
+    the analysis pipeline (format_acc.py) uses. An override still wins over
+    exclusion: `credited_trials` on an errored trial is a maintainer's explicit
+    judgement and must not be silently discarded. The number excluded is
+    `len(trials)` minus the trials in `by_task`.
     """
     disq = {d["trial_id"] for d in (submission.get("disqualified_trials") or [])}
     credited = {d["trial_id"] for d in (submission.get("credited_trials") or [])}
@@ -140,7 +162,16 @@ def submission_by_task(
             by_task[t.get("task_name")].append(1)
             n_credited += 1
         else:
-            by_task[t.get("task_name")].append(trial_reward(t))
+            reward = trial_reward(t)
+            # An unscored trial (no evals -- the run died before the verifier
+            # produced a verdict) is dropped, not counted as 0. Matches
+            # utils.load_trials, which skips a trial with no reward-details.json
+            # or no nested.rubrics. A task left with no scored trial disappears
+            # from by_task and fails the coverage check, which is the intended
+            # loud failure.
+            if reward is None:
+                continue
+            by_task[t.get("task_name")].append(reward)
     return by_task, n_disq, n_credited
 
 
@@ -207,10 +238,13 @@ def compute_subset_metrics(
     they say nothing about whether the agent named the root cause, so rewriting
     `rca_accuracy` from them would invent a verdict no judge produced.
 
+    Unscored trials are excluded rather than counted as 0, matching
+    `submission_by_task` and utils.load_trials.
+
     Every subset is populated by construction -- a submission must cover all of
     the dataset's tasks, which span both kinds and all three difficulties -- so
-    an empty one means the labels and the trials disagree. That raises rather
-    than publishing a plausible-looking 0.00%.
+    an empty one means the labels and the trials disagree, or every trial in it
+    went unscored. That raises rather than publishing a plausible-looking 0.00%.
     """
     labels = task_labels() if labels is None else labels
     disq = {d["trial_id"] for d in (submission.get("disqualified_trials") or [])}
@@ -233,6 +267,11 @@ def compute_subset_metrics(
                     value = 1
                 else:
                     value = trial_metric(t, metric)
+                    # Unscored trials are excluded here too, exactly as in
+                    # submission_by_task -- a trial with no verdict has nothing
+                    # to contribute to any subset.
+                    if value is None:
+                        continue
                 by_task[t.get("task_name")].append(value)
             if not by_task:
                 raise EmptySubsetError(
@@ -269,12 +308,29 @@ def format_subset_table(metrics: dict, counts: dict[str, int] | None = None) -> 
     return rows
 
 
-def subset_counts(trials: list[dict], labels: dict[str, TaskLabel]) -> dict[str, int]:
-    """Trial count per subset, for the `n` column of the breakdown table."""
+def subset_counts(
+    trials: list[dict], labels: dict[str, TaskLabel], submission: dict | None = None
+) -> dict[str, int]:
+    """Trial count per subset, for the `n` column of the breakdown table.
+
+    Counts the trials that actually reach the metric, so `n` is the denominator
+    the percentage beside it was computed over: unscored trials are excluded,
+    but an overridden one still counts (the override wins over exclusion, as in
+    compute_subset_metrics).
+    """
+    submission = submission or {}
+    overridden = {
+        d["trial_id"]
+        for key in ("disqualified_trials", "credited_trials")
+        for d in (submission.get(key) or [])
+    }
     counts: dict[str, int] = {}
     for suffix, _label, predicate in SUBSETS:
         counts[suffix] = sum(
-            1 for t in trials if predicate(label_for(labels, t.get("task_name")))
+            1
+            for t in trials
+            if predicate(label_for(labels, t.get("task_name")))
+            and (t.get("id") in overridden or trial_reward(t) is not None)
         )
     return counts
 

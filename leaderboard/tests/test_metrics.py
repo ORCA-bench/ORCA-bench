@@ -109,14 +109,52 @@ class SubmissionByTaskTests(unittest.TestCase):
         acc, _ = compute_metrics(by_task)
         self.assertEqual(acc, 75.0)
 
-    def test_errored_trial_without_evals_still_scores_zero(self):
-        """A trial that produced no evals at all is an errored trial, not a
-        contract violation: it stays None and counts as 0."""
-        trials = [_trial("t-err", "org/a", None, evals=None)]
+    def test_unscored_trial_is_excluded_not_zeroed(self):
+        """A trial that produced no verdict is dropped, matching
+        utils.load_trials -- it must not drag the mean down as a 0."""
+        trials = [
+            _trial("t-ok", "org/a", 1.0),
+            _trial("t-err", "org/a", None, evals=None),
+        ]
         by_task, _, _ = submission_by_task(trials, {})
-        self.assertEqual(by_task["org/a"], [None])
+        self.assertEqual(by_task["org/a"], [1.0])
         acc, _ = compute_metrics(by_task)
-        self.assertEqual(acc, 0.0)
+        self.assertEqual(acc, 100.0)
+
+    def test_task_with_only_unscored_trials_disappears(self):
+        """So the coverage check fails loudly rather than the task silently
+        vanishing from the denominator."""
+        trials = [
+            _trial("t-ok", "org/a", 1.0),
+            _trial("t-err", "org/b", None, evals=None),
+        ]
+        by_task, _, _ = submission_by_task(trials, {})
+        self.assertEqual(sorted(by_task), ["org/a"])
+
+    def test_excluded_count_is_recoverable(self):
+        """The renderers report exclusions as len(trials) - trials in by_task;
+        pin that arithmetic."""
+        trials = [
+            _trial("t-ok", "org/a", 1.0),
+            _trial("t-err", "org/a", None, evals=None),
+        ]
+        by_task, _, _ = submission_by_task(trials, {})
+        self.assertEqual(len(trials) - sum(len(v) for v in by_task.values()), 1)
+
+    def test_credited_unscored_trial_still_counts(self):
+        """An override is an explicit maintainer judgement and beats exclusion."""
+        trials = [_trial("t-err", "org/a", None, evals=None)]
+        sub = {"credited_trials": [{"trial_id": "t-err", "reason": "spurious_fail"}]}
+        by_task, _, n_cred = submission_by_task(trials, sub)
+        self.assertEqual(by_task["org/a"], [1])
+        self.assertEqual(n_cred, 1)
+
+    def test_disqualified_unscored_trial_still_counts(self):
+        trials = [_trial("t-err", "org/a", None, evals=None)]
+        sub = {"disqualified_trials": [{"trial_id": "t-err", "reason": "spurious_pass"}]}
+        by_task, n_disq, _ = submission_by_task(trials, sub)
+        self.assertEqual(by_task["org/a"], [0])
+        self.assertEqual(n_disq, 1)
 
     def test_overrides_ignore_the_eval_metric(self):
         """The override join short-circuits before the reward is read."""
@@ -205,6 +243,16 @@ class SubsetMetricsTests(unittest.TestCase):
         m = compute_subset_metrics(_trials(), sub, _LABELS)
         self.assertEqual(m["accuracy_incident_hard"], 100.0)
 
+    def test_unscored_trial_is_excluded_from_subsets(self):
+        """Same rule as submission_by_task: no verdict, no contribution. The
+        easy subset must read 100%, not 50%."""
+        trials = _trials() + [
+            {"id": "t-err", "task_name": "org/inc-easy", "reward": None}
+        ]
+        m = compute_subset_metrics(trials, {}, _LABELS)
+        self.assertEqual(m["accuracy_incident_easy"], 100.0)
+        self.assertEqual(m["rca_accuracy_incident_easy"], 100.0)
+
     def test_empty_subset_raises_rather_than_reporting_zero(self):
         """Full task coverage is enforced upstream, so an empty subset means
         the labels and the trials disagree."""
@@ -256,10 +304,12 @@ class ComputeMetricsTests(unittest.TestCase):
         self.assertGreater(se, 0.0)
         self.assertEqual(stderr_basis(by_task), "between-task")
 
-    def test_missing_reward_counts_as_zero(self):
-        """Errored trials have no reward and are not excluded from the metric."""
-        acc, _ = compute_metrics({"org/a": [1.0, None]})
-        self.assertAlmostEqual(acc, 50.0)
+    def test_none_reward_is_rejected(self):
+        """submission_by_task drops unscored trials, so a None reaching
+        compute_metrics means that filter was bypassed. Fail loudly rather than
+        quietly reinstating the old "missing counts as 0" behaviour."""
+        with self.assertRaises(RewardRangeError):
+            compute_metrics({"org/a": [1.0, None]})
 
     def test_reward_outside_unit_interval_is_rejected(self):
         """A verifier emitting an un-normalized score must fail loudly rather
