@@ -43,10 +43,9 @@ from leaderboard.core.metrics import (
     compute_submission_metrics,
     compute_subset_metrics,
     format_resource_cells,
-    format_subset_table,
-    stderr_basis,
+    format_metrics_table,
     submission_by_task,
-    subset_counts,
+    metric_counts,
 )
 from leaderboard.core.task_groups import task_labels
 
@@ -89,12 +88,9 @@ class Check:
 @dataclass
 class Result:
     checks: list[Check] = field(default_factory=list)
-    accuracy: float = 0.0
-    stderr: float = 0.0
-    stderr_basis: str = ""
     resources: dict = field(default_factory=dict)
-    subsets: dict = field(default_factory=dict)
-    subset_counts: dict = field(default_factory=dict)
+    metrics: dict = field(default_factory=dict)
+    metric_counts: dict = field(default_factory=dict)
     # Every trial the submission's filter matched, and the subset of those that
     # produced a verdict and therefore entered the metric. They differ only when
     # a trial errored before the verifier ran.
@@ -319,14 +315,12 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     )
     res.n_trials = len(trials)
     res.n_scored = sum(len(rs) for rs in by_task.values())
-    res.accuracy, res.stderr = compute_metrics(by_task)
-    res.stderr_basis = stderr_basis(by_task)
     res.resources = compute_resource_metrics(trials)
     # The same breakdown compute_submission_metrics publishes, so the PR comment
     # and the stored row can't disagree.
     labels = task_labels()
-    res.subsets = compute_subset_metrics(trials, submission, labels)
-    res.subset_counts = subset_counts(trials, labels, submission)
+    res.metrics = compute_subset_metrics(trials, submission, labels)
+    res.metric_counts = metric_counts(trials, labels)
 
     if per_trial:
         # Fetch each trial's own config + task digest in-process -- the
@@ -391,32 +385,28 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
             )
 
         effort = sf.get("reasoning_effort")
-        resources = " | ".join(format_resource_cells(result.resources))
         out.append("**Submission Summary**")
         out.append(
-            "| Model [org] | Effort | Agent [org] | Date | Accuracy | ± SE | "
+            f"{md.get('model_display')} [{md.get('model_org')}] · {effort} · "
+            f"{md.get('agent_display')} [{md.get('agent_org')}] · {md.get('date')}\n"
+        )
+        out.append(
+            "\n".join(format_metrics_table(result.metrics, result.metric_counts)) + "\n"
+        )
+        # The blank line above matters: without it markdown folds the resource
+        # rows into the metrics table.
+        out.append(
+            "| "
             + " | ".join(RESOURCE_HEADERS)
-            + " |\n|" + " --- |" * (6 + len(RESOURCE_HEADERS))
+            + " |\n|" + " --- |" * len(RESOURCE_HEADERS)
         )
+        out.append("| " + " | ".join(format_resource_cells(result.resources)) + " |\n")
         out.append(
-            f"| {md.get('model_display')} [{md.get('model_org')}] | {effort} "
-            f"| {md.get('agent_display')} [{md.get('agent_org')}] | "
-            f"{md.get('date')} | {result.accuracy:.2f}% | {result.stderr:.2f}% "
-            f"| {resources} |\n"
-        )
-        if result.subsets:
-            out.append("**Breakdown**")
-            out.append(
-                "\n".join(format_subset_table(result.subsets, result.subset_counts))
-                + "\n"
-            )
-        out.append(
-            f"<sub>{ran} Accuracy is the mean graded reward over the scored "
-            f"trials; a trial that produced no verdict is excluded, not counted "
-            f"as `reward 0`. ± SE uses the "
-            f"{result.stderr_basis} estimator. The breakdown groups tasks by "
-            f"`difficulty` and by whether they have an incident; RCA accuracy "
-            f"is undefined on control tasks.</sub>"
+            f"<sub>{ran} Values are percentages, mean ± one standard error over "
+            f"the scored incident trials; a trial that produced no verdict is "
+            f"excluded rather than counted as 0. RCA Accuracy is higher-is-better, "
+            f"Hallucination Rate lower-is-better. `n` is the trial count each "
+            f"value was computed over.</sub>"
         )
     else:
         workflow = (

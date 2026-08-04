@@ -48,7 +48,7 @@ takes precedence when set — that's how CI supplies it.
 
 Published as `orca-bench/orca-bench` (755 tasks), pinned in
 [`core/hub.py`](src/leaderboard/core/hub.py) as
-`sha256:39149656128e6279e88d3b123374b6e9222bb71a98b55213ac6355a6f156a67a`.
+`sha256:2add497ac2f93468dba1b83977c295a784c89031754e6a35520195345ad62ada`.
 
 **The dataset is currently private.** That has one confusing consequence worth
 knowing before you debug anything: an *unauthenticated* caller gets
@@ -105,31 +105,41 @@ uv run harbor hub leaderboard create --config leaderboard.json --json
 ```
 
 The `metadata_schema` / `metrics_schema` are the contract merged submissions
-must satisfy. `metrics` = `accuracy` + `accuracy_stderr` (required), the
-per-subset breakdown, and the whole-submission resource totals (`total_tokens`
-= input + output, `total_cost_usd` — optional, omitted when the trials don't
-report the underlying telemetry). `metadata` = the display fields, plus the `pr`
-markdown link cell (`[#N](…)` → the promoted bot PR) that CI stamps in at
-promotion.
+must satisfy. `metadata` = the display fields, plus the `pr` markdown link cell
+(`[#N](…)` → the promoted bot PR) that CI stamps in at promotion.
 
-Note `accuracy` is the **mean graded reward** as a percentage, not a pass rate —
-ORCA-bench verifiers emit a normalized reward in `[0, 1]`.
+`metrics` is three published metrics, all over **incident** tasks only — the
+panels of `plot_rca_and_hallucination.py` — plus the whole-submission resource
+totals (`total_tokens` = input + output, `total_cost_usd` — optional, omitted
+when the trials don't report the underlying telemetry):
 
-The breakdown splits two per-trial eval metrics — `reward` and `rca_accuracy` —
-across task groups, labelled from each task's `task.toml` `[metadata]` at the
-pinned refs (see `core/task_groups.py`):
+| Key | Column | Subset |
+| --- | --- | --- |
+| `rca_accuracy_incident_medium` | RCA Accuracy (Medium) ↑ | incident ∩ difficulty=medium |
+| `rca_accuracy_incident_hard` | RCA Accuracy (Hard) ↑ | incident ∩ difficulty=hard |
+| `hallucinate_any_incident` | Hallucination Rate ↓ | all incident tasks |
 
-| | incident | control | easy | medium | hard |
-| --- | --- | --- | --- | --- | --- |
-| reward | `accuracy_incident` | `accuracy_control` | `accuracy_incident_easy` | `accuracy_incident_medium` | `accuracy_incident_hard` |
-| rca_accuracy | `rca_accuracy_incident` | — | `rca_accuracy_incident_easy` | `rca_accuracy_incident_medium` | `rca_accuracy_incident_hard` |
+Each is stored **three ways**, because a leaderboard cell renders exactly one
+field and the cells show `mean ± se`:
 
-A task is **control** iff its `events` list is empty, and the difficulty tiers
-come from the `difficulty` field — *not* `granularity`, which holds a second
-ladder (`easy`/`hard`/`universal`) for the same tiers. Control tasks carry a
-difficulty too, so the tier subsets are incident-only. `rca_accuracy` has no
-control column: control tasks have no root cause to name, so the verifier scores
-it 0 there by construction.
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `<key>` | number | the mean; ranks the board, machine-readable |
+| `<key>_stderr` | number | the standard error, machine-readable |
+| `<key>_display` | string | `"26.61 ± 3.00"` — the only one with a column |
+
+`rank_by` uses the numeric mean (`rca_accuracy_incident_medium`), never a
+display field: the Hub compares strings lexicographically, so ranking on
+`"9.5"` vs `"26.6"` would invert the board.
+
+Task labels come from each task's `task.toml` `[metadata]` at the pinned refs
+(see `core/task_groups.py`). A task is **control** iff its `events` list is
+empty, and the difficulty tiers come from the `difficulty` field — *not*
+`granularity`, which holds a second ladder (`easy`/`hard`/`universal`) for the
+same tiers. Control tasks carry a difficulty too, which is why the tier metrics
+intersect with "not control" rather than partitioning on difficulty alone. No
+metric covers control tasks: they have no root cause, so `rca_accuracy` is 0
+there by construction and `hallucinate_any` is not emitted at all.
 
 > **Push schema changes to the live hub *before* a row that uses them merges.**
 > `metrics_schema` sets `additionalProperties: false`, so `leaderboard-row-create`

@@ -5,11 +5,12 @@ from __future__ import annotations
 import unittest
 
 from leaderboard.core.metrics import (
+    DISPLAY_SUFFIX,
+    STDERR_SUFFIX,
     EmptySubsetError,
     RewardRangeError,
     compute_metrics,
     compute_subset_metrics,
-    stderr_basis,
     submission_by_task,
 )
 from leaderboard.core.task_groups import TaskLabel
@@ -172,20 +173,19 @@ class SubmissionByTaskTests(unittest.TestCase):
         self.assertEqual(n_disq, 1)
 
 
-def _scored(tid: str, task: str, reward, rca) -> dict:
-    """A trial row carrying both eval metrics, as the verifier publishes them."""
-    return {
-        "id": tid,
-        "task_name": task,
-        "reward": reward,
-        "evals": {
-            "reward": {"metrics": [{"reward": reward}]},
-            "rca_accuracy": {"metrics": [{"rca_accuracy": rca}]},
-        },
+def _scored(tid: str, task: str, reward, rca, halluc=None) -> dict:
+    """A trial row carrying the eval metrics the verifier publishes. Control
+    trials get no `hallucinate_any` -- the verifier omits it there."""
+    evals = {
+        "reward": {"metrics": [{"reward": reward}]},
+        "rca_accuracy": {"metrics": [{"rca_accuracy": rca}]},
     }
+    if halluc is not None:
+        evals["hallucinate_any"] = {"metrics": [{"hallucinate_any": halluc}]}
+    return {"id": tid, "task_name": task, "reward": reward, "evals": evals}
 
 
-# One task per (kind, difficulty) cell, so every subset is populated.
+# One task per (kind, difficulty) cell, so every metric's subset is populated.
 _LABELS = {
     "org/inc-easy": TaskLabel("easy", False),
     "org/inc-medium": TaskLabel("medium", False),
@@ -196,67 +196,78 @@ _LABELS = {
 
 def _trials() -> list[dict]:
     return [
-        _scored("t-easy", "org/inc-easy", 1.0, 1),
-        _scored("t-medium", "org/inc-medium", 0.5, 0),
-        _scored("t-hard", "org/inc-hard", 0.0, 0),
+        _scored("t-easy", "org/inc-easy", 1.0, 1, halluc=0),
+        _scored("t-medium", "org/inc-medium", 0.5, 1, halluc=0),
+        _scored("t-hard", "org/inc-hard", 0.0, 0, halluc=1),
         _scored("t-ctl", "org/ctl", 1.0, 0),
     ]
 
 
-class SubsetMetricsTests(unittest.TestCase):
-    def test_every_subset_is_reported(self):
+class PublishedMetricsTests(unittest.TestCase):
+    def test_each_metric_reports_mean_stderr_and_display(self):
         m = compute_subset_metrics(_trials(), {}, _LABELS)
-        self.assertEqual(m["accuracy_incident"], 50.0)  # (1.0 + 0.5 + 0.0) / 3
-        self.assertEqual(m["accuracy_control"], 100.0)
-        self.assertEqual(m["accuracy_incident_easy"], 100.0)
-        self.assertEqual(m["accuracy_incident_medium"], 50.0)
-        self.assertEqual(m["accuracy_incident_hard"], 0.0)
-        self.assertEqual(m["rca_accuracy_incident"], round(100 / 3, 2))
-        self.assertEqual(m["rca_accuracy_incident_easy"], 100.0)
-        self.assertEqual(m["rca_accuracy_incident_medium"], 0.0)
+        # One incident task per tier, so each RCA metric is a single value.
+        self.assertEqual(m["rca_accuracy_incident_medium"], 100.0)
+        self.assertEqual(m["rca_accuracy_incident_hard"], 0.0)
+        # Hallucination spans all three incident tasks: (0 + 0 + 1) / 3.
+        self.assertEqual(m["hallucinate_any_incident"], 33.33)
+        for key in (
+            "rca_accuracy_incident_medium",
+            "rca_accuracy_incident_hard",
+            "hallucinate_any_incident",
+        ):
+            self.assertIn(key + STDERR_SUFFIX, m)
+            self.assertEqual(
+                m[key + DISPLAY_SUFFIX],
+                f"{m[key]:.2f} ± {m[key + STDERR_SUFFIX]:.2f}",
+            )
+
+    def test_publishes_nothing_else(self):
+        """The board is exactly three metrics; a stray key would be rejected by
+        the hub schema at merge time."""
+        m = compute_subset_metrics(_trials(), {}, _LABELS)
+        expected = {
+            k + suffix
+            for k in (
+                "rca_accuracy_incident_medium",
+                "rca_accuracy_incident_hard",
+                "hallucinate_any_incident",
+            )
+            for suffix in ("", STDERR_SUFFIX, DISPLAY_SUFFIX)
+        }
+        self.assertEqual(set(m), expected)
+
+    def test_control_tasks_never_reach_any_metric(self):
+        """All three metrics are incident-only. The control trial here carries
+        no `hallucinate_any` at all, so a leak would raise rather than skew."""
+        m = compute_subset_metrics(_trials(), {}, _LABELS)
+        self.assertEqual(m["hallucinate_any_incident"], 33.33)  # 3 incident trials, not 4
+
+    def test_control_task_difficulty_does_not_leak_into_a_tier(self):
+        """The control task above is difficulty `hard`; it must not join the
+        hard RCA metric."""
+        m = compute_subset_metrics(_trials(), {}, _LABELS)
         self.assertEqual(m["rca_accuracy_incident_hard"], 0.0)
 
-    def test_rca_accuracy_has_no_control_subset(self):
-        """It is 0 by construction on control tasks, so the column would be a
-        constant; the reward breakdown does have one."""
-        m = compute_subset_metrics(_trials(), {}, _LABELS)
-        self.assertNotIn("rca_accuracy_control", m)
-        self.assertIn("accuracy_control", m)
+    def test_overrides_do_not_touch_published_metrics(self):
+        """The override lists force a trial's *reward*, and no published metric
+        is reward-derived any more."""
+        sub = {"disqualified_trials": [{"trial_id": "t-medium", "reason": "spurious_pass"}]}
+        self.assertEqual(
+            compute_subset_metrics(_trials(), sub, _LABELS),
+            compute_subset_metrics(_trials(), {}, _LABELS),
+        )
 
-    def test_control_tasks_are_excluded_from_difficulty_subsets(self):
-        """The control task above is difficulty `hard`; it must not leak into
-        accuracy_incident_hard."""
-        m = compute_subset_metrics(_trials(), {}, _LABELS)
-        self.assertEqual(m["accuracy_incident_hard"], 0.0)
-
-    def test_overrides_move_reward_subsets_only(self):
-        """A disqualified trial is forced to reward 0, but its rca_accuracy
-        verdict is left alone -- the override says the score was wrong, not
-        that the root cause went unnamed."""
-        sub = {"disqualified_trials": [{"trial_id": "t-easy", "reason": "spurious_pass"}]}
-        m = compute_subset_metrics(_trials(), sub, _LABELS)
-        self.assertEqual(m["accuracy_incident_easy"], 0.0)
-        self.assertEqual(m["rca_accuracy_incident_easy"], 100.0)
-
-    def test_credited_trial_is_forced_to_full_reward(self):
-        sub = {"credited_trials": [{"trial_id": "t-hard", "reason": "spurious_fail"}]}
-        m = compute_subset_metrics(_trials(), sub, _LABELS)
-        self.assertEqual(m["accuracy_incident_hard"], 100.0)
-
-    def test_unscored_trial_is_excluded_from_subsets(self):
-        """Same rule as submission_by_task: no verdict, no contribution. The
-        easy subset must read 100%, not 50%."""
-        trials = _trials() + [
-            {"id": "t-err", "task_name": "org/inc-easy", "reward": None}
-        ]
+    def test_unscored_trial_is_excluded(self):
+        """Same rule as submission_by_task: no verdict, no contribution."""
+        trials = _trials() + [{"id": "t-err", "task_name": "org/inc-medium", "reward": None}]
         m = compute_subset_metrics(trials, {}, _LABELS)
-        self.assertEqual(m["accuracy_incident_easy"], 100.0)
-        self.assertEqual(m["rca_accuracy_incident_easy"], 100.0)
+        self.assertEqual(m["rca_accuracy_incident_medium"], 100.0)
 
     def test_empty_subset_raises_rather_than_reporting_zero(self):
         """Full task coverage is enforced upstream, so an empty subset means
         the labels and the trials disagree."""
-        trials = [t for t in _trials() if t["task_name"] != "org/ctl"]
+        trials = [t for t in _trials() if t["task_name"] != "org/inc-hard"]
         with self.assertRaises(EmptySubsetError):
             compute_subset_metrics(trials, {}, _LABELS)
 
@@ -281,7 +292,6 @@ class ComputeMetricsTests(unittest.TestCase):
             expected_var += p * (1.0 - p) / (k - 1)
         expected_var /= n**2
         self.assertAlmostEqual(se, 100.0 * expected_var**0.5)
-        self.assertEqual(stderr_basis(by_task), "within-task")
 
     def test_graded_rewards_average_rather_than_threshold(self):
         """A partial score must contribute its fraction, not a full success --
@@ -302,7 +312,6 @@ class ComputeMetricsTests(unittest.TestCase):
         sample_var = sum((x - m) ** 2 for x in means) / 3
         self.assertAlmostEqual(se, 100.0 * (sample_var / 4) ** 0.5)
         self.assertGreater(se, 0.0)
-        self.assertEqual(stderr_basis(by_task), "between-task")
 
     def test_none_reward_is_rejected(self):
         """submission_by_task drops unscored trials, so a None reaching

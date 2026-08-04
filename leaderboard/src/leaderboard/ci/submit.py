@@ -26,8 +26,8 @@ from harbor.auth.constants import SUPABASE_URL
 from leaderboard.core.hub import HUB_URL
 from leaderboard.core.metrics import (
     RESOURCE_HEADERS,
+    format_metrics_table,
     format_resource_cells,
-    format_subset_table,
 )
 
 # The leaderboard this repo submits to; the definition lives in SETUP.md.
@@ -131,19 +131,18 @@ def render_comment(row: dict) -> str:
         [
             f"✅ Entry submitted to the [leaderboard]({LEADERBOARD_URL})",
             "",
-            "| Model [org] | Effort | Agent [org] | Accuracy | ± SE | "
-            + " | ".join(RESOURCE_HEADERS)
-            + " | PR |",
-            "|" + " --- |" * (6 + len(RESOURCE_HEADERS)),
-            f"| {md.get('model_display')} [{md.get('model_org')}] | "
-            f"{md.get('reasoning_effort') or '—'} | {md.get('agent_display')} "
-            f"[{md.get('agent_org')}] | {me.get('accuracy')}% | {me.get('accuracy_stderr')}% "
-            f"| {resources} | {md.get('pr') or '—'} |",
+            f"{md.get('model_display')} [{md.get('model_org')}] · "
+            f"{md.get('reasoning_effort') or '—'} · {md.get('agent_display')} "
+            f"[{md.get('agent_org')}] · {md.get('pr') or '—'}",
             "",
-            # The same breakdown the static-analysis comment showed, rendered
-            # from the row the API echoed back -- so what landed is what is
-            # reported. No `n` column here: the row carries metrics, not counts.
-            *format_subset_table(me),
+            # The same table the static-analysis comment showed, rendered from
+            # the row the API echoed back -- so what landed is what is reported.
+            # No `n` column here: the row carries metrics, not counts.
+            *format_metrics_table(me),
+            "",
+            "| " + " | ".join(RESOURCE_HEADERS) + " |",
+            "|" + " --- |" * len(RESOURCE_HEADERS),
+            f"| {resources} |",
             "",
             _footer_ran(),
         ]

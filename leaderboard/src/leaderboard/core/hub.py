@@ -106,6 +106,10 @@ def trial_model(trial: dict) -> str | None:
 # trial, control tasks included.
 REWARD_METRIC = "reward"
 RCA_ACCURACY_METRIC = "rca_accuracy"
+# Emitted on incident trials only -- a control task has no root cause to
+# hallucinate about, so the verifier omits it there (check_prediction
+# .aggregate_judge_response). Only ever read over incident tasks.
+HALLUCINATE_METRIC = "hallucinate_any"
 
 
 class MissingRewardMetricError(ValueError):

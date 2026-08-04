@@ -138,35 +138,43 @@ CI posts a sticky comment on your PR with a pass/fail table:
 These run against the job config **the hub recorded with your uploaded run**,
 not against any file in this repo.
 
-On green it also shows a **Trial Summary** (error breakdown), a
-**Submission Summary** (accuracy ± SE, plus total tokens and cost across
-all trials), and a **Breakdown** of the same trials by task group. On red, fix
-the problem and push an update to the same file — the checks re-run.
+On green it also shows a **Trial Summary** (error breakdown) and a
+**Submission Summary** carrying the three published metrics plus total tokens
+and cost. On red, fix the problem and push an update to the same file — the
+checks re-run.
 
-**How accuracy is computed.** ORCA-bench rewards are graded in `[0, 1]`, not
-pass/fail, so accuracy is the **mean reward** over the **scored** trials — a
-report scoring 0.33 contributes a third of a point, not a full success. `± SE`
-uses the within-task standard error when tasks have multiple trials, and the
-between-task standard error when every task has exactly one; the comment
-footer says which.
+**What the leaderboard publishes.** Three metrics, all over **incident** tasks
+only — the panels of `plot_rca_and_hallucination.py`:
 
-A trial that produced no verdict — the run died before the verifier scored it —
-is dropped rather than counted as `reward 0`, the same rule the analysis
-pipeline uses (`utils.load_trials`, which skips a trial with no
-`reward-details.json`). Averaging in a trial that was never judged would
-understate the result. The Trial Summary still lists every trial and its error,
-and says how many were excluded; a maintainer can override an errored trial via
-`credited_trials` / `disqualified_trials`, which wins over the exclusion.
+| Column | Metric |
+| --- | --- |
+| **RCA Accuracy (Medium)** ↑ | did the report name the root cause, on the broad-feature-area tier |
+| **RCA Accuracy (Hard)** ↑ | the same, on the flag-agnostic tier (no hint which flag failed) |
+| **Hallucination Rate** ↓ | did the report name a root cause that matches none of the plausible ones |
 
-**What the breakdown splits.** Two per-trial metrics — `reward` (the graded
-score) and `rca_accuracy` (did the report name the root cause?) — over five
-groups: **incident** vs **control** tasks, and the three difficulty tiers
-**easy / medium / hard** within the incident tasks. A task is control iff it has
-no incident to find; those tasks still carry a difficulty, so the tier rows
-cover incident tasks only. `rca_accuracy` has no control row — a control task
-has no root cause to name, so the metric is 0 there by construction. All of
-these land on the leaderboard as their own columns alongside `accuracy`, which
-remains the ranking metric.
+Each cell is `mean ± one standard error`, as percentages. The two RCA columns
+are higher-is-better; Hallucination Rate is lower-is-better. Rows are ranked by
+RCA Accuracy (Medium), descending.
+
+Everything is restricted to incident tasks: a control task has no root cause, so
+`rca_accuracy` is 0 there by construction and `hallucinate_any` is not emitted
+at all. Control tasks still carry a difficulty, which is why the tier metrics
+intersect with "not control" rather than partitioning on difficulty alone. The
+easy tier is deliberately not published — it looks deceptively good and pulls
+attention from the realistic setting.
+
+**Unscored trials are excluded.** A trial that produced no verdict — the run
+died before the verifier scored it — is dropped rather than counted as 0, the
+same rule the analysis pipeline uses (`utils.load_trials`, which skips a trial
+with no `reward-details.json`). Averaging in a trial that was never judged would
+understate the result. The Trial Summary lists every trial and its error and
+says how many were excluded, and `n` beside each metric is the trial count that
+metric was actually computed over.
+
+Note the `credited_trials` / `disqualified_trials` overrides force a trial's
+*reward*, which is no longer published — they no longer move any leaderboard
+number. They still affect the coverage check, since an override keeps an
+otherwise-unscored trial in the task count.
 
 ### Promotion (automatic, on green)
 
