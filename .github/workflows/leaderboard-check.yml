@@ -26,15 +26,6 @@ permissions:
 jobs:
   static-analysis:
     runs-on: ubuntu-latest
-    # `actions: write` is what lets this job SAVE the task-package cache; the
-    # workflow-level block omits it, and an explicit block sets every unlisted
-    # scope to none, so without this actions/cache fails its post step with
-    # "cache write denied: token has no writable scopes". This is the only job
-    # that writes the cache -- promote restores it read-only.
-    permissions:
-      actions: write
-      contents: read
-      pull-requests: write
     outputs:
       found: ${{ steps.fetch.outputs.found }}
       path: ${{ steps.fetch.outputs.path }}
@@ -62,8 +53,16 @@ jobs:
       # prefix means an unrelated edit to that file still restores the previous
       # cache -- harbor then re-downloads only the digests that actually moved,
       # rather than all 755 packages.
-      - name: Cache task packages
-        uses: actions/cache@v4
+      #
+      # Restore-only: the cache backend requires `contents: write` to reserve a
+      # key (`actions: write` is not enough -- it was tried, and the post step
+      # still failed with "cache write denied: token has no writable scopes"
+      # while the token showed Actions: write). This job runs on
+      # pull_request_target over contributor-supplied data, so it keeps
+      # `contents: read`; promote, which already holds `contents: write` to push
+      # branches, does the saving.
+      - name: Restore task packages
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/harbor/tasks/packages
           key: harbor-tasks-${{ hashFiles('leaderboard/src/leaderboard/core/hub.py') }}
@@ -229,14 +228,15 @@ jobs:
         if: steps.guard.outputs.fresh == 'true'
         run: uv sync --project leaderboard
 
-      # Restore-only: promote recomputes the metrics so it needs the same task
-      # labels, but static-analysis (which this job `needs`) has already saved
-      # the cache by now. Both jobs writing the same key raced -- one always
-      # lost with "another job may be creating this cache" -- and restoring
-      # read-only also keeps this job's token free of `actions: write`.
-      - name: Restore task packages
+      # This job both restores and SAVES the shared task-package cache: it is
+      # the one that already holds `contents: write`, which the cache backend
+      # requires to reserve a key. It recomputes the metrics anyway, so it needs
+      # the same labels. static-analysis (which runs first, and restores
+      # read-only) therefore gets a warm cache from the *previous* submission
+      # rather than this run -- fine, since the fetch is only worth seconds.
+      - name: Cache task packages
         if: steps.guard.outputs.fresh == 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache@v4
         with:
           path: ~/.cache/harbor/tasks/packages
           key: harbor-tasks-${{ hashFiles('leaderboard/src/leaderboard/core/hub.py') }}
