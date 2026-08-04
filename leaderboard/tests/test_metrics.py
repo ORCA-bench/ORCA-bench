@@ -12,8 +12,25 @@ from leaderboard.core.metrics import (
 )
 
 
-def _trial(tid: str, task: str, reward) -> dict:
-    return {"id": tid, "task_name": task, "reward": reward}
+_UNSET = object()
+
+
+def _trial(tid: str, task: str, reward, *, evals=_UNSET) -> dict:
+    """A bulk hub trial row: the `reward` scalar the Hub derives positionally,
+    plus the `evals` block the metric is actually read from.
+
+    By default the two agree. Pass ``evals=None`` for an errored trial (no
+    evals at all), or an explicit dict to make them disagree -- which is what
+    the Hub really does when a companion metric sorts ahead of `reward`.
+    """
+    if evals is _UNSET:
+        evals = (
+            None if reward is None else {"reward": {"metrics": [{"reward": reward}]}}
+        )
+    row = {"id": tid, "task_name": task, "reward": reward}
+    if evals is not None:
+        row["evals"] = evals
+    return row
 
 
 class SubmissionByTaskTests(unittest.TestCase):
@@ -66,6 +83,52 @@ class SubmissionByTaskTests(unittest.TestCase):
         by_task, n_disq, n_cred = submission_by_task(trials, {})
         self.assertEqual(by_task["org/a"], [0.0])
         self.assertEqual((n_disq, n_cred), (0, 0))
+
+    def test_reward_comes_from_the_named_eval_metric_not_the_row_scalar(self):
+        """Regression guard for the 12.05%-vs-49.43% bug: the Hub derives a
+        row's `reward` scalar from the alphabetically first metric, so
+        `hallucinate_any` was published as the trial's score. The metric must
+        read the eval metric named `reward` instead."""
+        trials = [
+            _trial(
+                "t1",
+                "org/a",
+                0,  # what the Hub derived -- the hallucinate_any flag
+                evals={
+                    "reward": {"metrics": [{"reward": 0.75}]},
+                    "rca_accuracy": {"metrics": [{"rca_accuracy": 1}]},
+                    "hallucinate_any": {"metrics": [{"hallucinate_any": 0}]},
+                },
+            )
+        ]
+        by_task, _, _ = submission_by_task(trials, {})
+        self.assertEqual(by_task["org/a"], [0.75])
+        acc, _ = compute_metrics(by_task)
+        self.assertEqual(acc, 75.0)
+
+    def test_errored_trial_without_evals_still_scores_zero(self):
+        """A trial that produced no evals at all is an errored trial, not a
+        contract violation: it stays None and counts as 0."""
+        trials = [_trial("t-err", "org/a", None, evals=None)]
+        by_task, _, _ = submission_by_task(trials, {})
+        self.assertEqual(by_task["org/a"], [None])
+        acc, _ = compute_metrics(by_task)
+        self.assertEqual(acc, 0.0)
+
+    def test_overrides_ignore_the_eval_metric(self):
+        """The override join short-circuits before the reward is read."""
+        trials = [
+            _trial(
+                "t-fp",
+                "org/a",
+                0,
+                evals={"reward": {"metrics": [{"reward": 1.0}]}},
+            )
+        ]
+        sub = {"disqualified_trials": [{"trial_id": "t-fp", "reason": "spurious_pass"}]}
+        by_task, n_disq, _ = submission_by_task(trials, sub)
+        self.assertEqual(by_task["org/a"], [0])
+        self.assertEqual(n_disq, 1)
 
 
 class ComputeMetricsTests(unittest.TestCase):

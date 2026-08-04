@@ -100,6 +100,79 @@ def trial_model(trial: dict) -> str | None:
     return f"{provider}/{name}"
 
 
+# The eval metric a trial's score is read from. ORCA-bench verifiers publish it
+# alongside companion diagnostics (see check_prediction.build_rewards).
+REWARD_METRIC = "reward"
+
+
+class MissingRewardMetricError(ValueError):
+    """A trial reported eval metrics, but none of them is named `reward`."""
+
+
+def _eval_metric_maps(evals: dict) -> list[dict]:
+    """Every {metric_name: value} map in an `evals` block, in Hub order.
+
+    Tolerates both shapes harbor emits (cf. harbor.hub.models.primary_reward):
+    the nested `{name: {"metrics": [{name: value}]}}` that bulk trial rows
+    carry, and the row-oriented `{"group_by": [...], "rows": [{"metrics": [...]}]}`.
+    Non-dict values (e.g. the `group_by` list) are skipped, not an error.
+    """
+    rows = evals.get("rows")
+    containers = rows if isinstance(rows, list) else evals.values()
+    return [
+        m
+        for c in containers
+        if isinstance(c, dict)
+        for m in (c.get("metrics") or [])
+        if isinstance(m, dict)
+    ]
+
+
+def trial_reward(trial: dict) -> float | None:
+    """The metric NAMED `reward` for a bulk trial row.
+
+    Read by name, never positionally. The Hub derives a row's own `reward`
+    scalar from the *alphabetically first* numeric entry of the verifier's
+    rewards map (harbor.hub.models._first_numeric_reward), so a verifier that
+    publishes several metrics can have a companion metric published as the
+    trial's score. That is not hypothetical: `hallucinate_any` sorts ahead of
+    `reward`, so the hallucination flag became the trial reward and this
+    leaderboard computed 12.05% where the true accuracy was 49.43%.
+
+    Returns None only for a trial that produced no evals at all -- a genuinely
+    errored trial -- which metrics._reward maps to 0.0, as intended. A trial
+    that reported metrics but none named `reward` raises instead of scoring 0:
+    that means the verifier contract changed, which skews the whole submission
+    uniformly, and a silently zeroed metric is the exact failure this function
+    exists to prevent.
+    """
+    evals = trial.get("evals")
+    if not isinstance(evals, dict) or not evals:
+        if trial.get("reward") is not None:
+            raise MissingRewardMetricError(
+                f"trial {trial.get('id')} carries a reward scalar "
+                f"{trial.get('reward')!r} but no `evals` block; the Hub row "
+                "shape changed and reading the reward by name would silently "
+                "score every trial 0. Refusing to compute a zeroed metric."
+            )
+        return None
+    for metrics in _eval_metric_maps(evals):
+        if REWARD_METRIC in metrics:
+            value = metrics[REWARD_METRIC]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise MissingRewardMetricError(
+                    f"trial {trial.get('id')} reports a non-numeric "
+                    f"`{REWARD_METRIC}` metric {value!r}"
+                )
+            return float(value)
+    found = sorted({k for m in _eval_metric_maps(evals) for k in m})
+    raise MissingRewardMetricError(
+        f"trial {trial.get('id')} reports eval metrics {found} but none named "
+        f"`{REWARD_METRIC}`; ORCA-bench verifiers must emit it (see "
+        "check_prediction.build_rewards). Refusing to score the trial 0."
+    )
+
+
 def submission_trials(submission: dict) -> list[dict]:
     """Bulk trial metadata for a submission: every latest-attempt trial of its
     source_jobs on the dataset matching the submission's source_filter (agent,

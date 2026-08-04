@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from leaderboard.core.hub import submission_trials
+from leaderboard.core.hub import submission_trials, trial_reward
 
 
 class RewardRangeError(ValueError):
@@ -113,6 +113,10 @@ def submission_by_task(
     hand on the bot PR when a trial is found to be scored wrongly. The metric
     never mutates the hub -- those lists are the record. If a trial appears in
     both, disqualification wins. Returns (by_task, n_disqualified, n_credited).
+
+    Un-overridden rewards come from the eval metric *named* `reward` (via
+    core.hub.trial_reward), never the row's derived `reward` scalar -- the Hub
+    derives that positionally and can publish a companion metric in its place.
     """
     disq = {d["trial_id"] for d in (submission.get("disqualified_trials") or [])}
     credited = {d["trial_id"] for d in (submission.get("credited_trials") or [])}
@@ -128,7 +132,7 @@ def submission_by_task(
             by_task[t.get("task_name")].append(1)
             n_credited += 1
         else:
-            by_task[t.get("task_name")].append(t.get("reward"))
+            by_task[t.get("task_name")].append(trial_reward(t))
     return by_task, n_disq, n_credited
 
 
