@@ -14,7 +14,8 @@
     "model_display": "Claude Sonnet 4.6",
     "model_org": "Anthropic",
     "date": "2026-05-05",
-    "reasoning_effort": "medium"
+    "reasoning_effort": "medium",
+    "pr": "[#19](https://github.com/ORCA-bench/ORCA-bench/pull/19)"
   },
   "metrics": {
     "rca_accuracy_incident_medium": 26.61,
