@@ -52,6 +52,16 @@ def get_base_parser() -> ArgumentParser:
         help="Path to telemetry data",
     )
     parser.add_argument(
+        "--jobs-dir",
+        "-jd",
+        type=Path,
+        default=Path("jobs"),
+        help=(
+            "Path to the Harbor jobs directory, or a tree of them (default: jobs). "
+            "Analysis scripts read each trial's verifier/reward-details.json from here."
+        ),
+    )
+    parser.add_argument(
         "--schedule",
         "-s",
         type=Path,
@@ -102,7 +112,7 @@ def parse_snapshot_time(name: str) -> datetime:
 # check_prediction.aggregate_judge_response() and materialized on the
 # DataFrame at load time by load_data.
 Q_COLS: dict[str, str] = {
-    "RCA Accuracy": "feature_flag_all_match",
+    "RCA Accuracy": "rca_accuracy",
     "% Complete Hallucination": "hallucinate_any",
     "Mechanism": "mechanism_match",
     "Inc. Time": "incident_time_within_10min",
@@ -117,7 +127,7 @@ Q_COLS: dict[str, str] = {
 ROLLUP_KEYS: list[str] = [
     "incident_time_within_10min",
     "hallucinate_any",
-    "feature_flag_all_match",
+    "rca_accuracy",
     "mechanism_match",
     "metrics_all_match",
     "metrics_any_match",
@@ -125,8 +135,7 @@ ROLLUP_KEYS: list[str] = [
     "logs_any_match",
     "traces_all_match",
     "traces_any_match",
-    "score",
-    "best_score",
+    "rca_depth",
 ]
 
 
@@ -192,24 +201,53 @@ GRANULARITY_ALIASES: dict[str, str] = {
 }
 
 
-def load_trials(scores_dir: Path, reasoning_effort: str | None) -> list[dict]:
-    """Load all trial entries from ``judge-*.json`` files.
+def find_trial_dirs(root: Path) -> list[Path]:
+    """Trial directories under ``root``.
 
-    Each returned dict has ``_display_model``, ``_trial_id``, and
-    ``_score_path`` (absolute path to the ``judge-*.json`` source file)
-    injected. Aggregated rollups from ``aggregate_judge_response`` (including
-    ``score``, ``best_score``, and every key in :data:`ROLLUP_KEYS`) are also
-    spread onto each trial dict so non-DataFrame callers can read them
-    directly without going through ``load_data``.
+    Accepts either a single job directory (whose children are trial dirs) or a
+    tree of job directories (grandchildren are trial dirs). A trial dir is
+    identified by having a ``verifier/`` subdirectory.
+    """
+    direct = [p for p in root.iterdir() if p.is_dir() and (p / "verifier").is_dir()]
+    if direct:
+        return sorted(direct)
+    return sorted(
+        trial
+        for job in root.iterdir()
+        if job.is_dir()
+        for trial in job.iterdir()
+        if trial.is_dir() and (trial / "verifier").is_dir()
+    )
+
+
+def load_trials(jobs_dir: Path, reasoning_effort: str | None) -> list[dict]:
+    """Load all trial entries from ``<trial>/verifier/reward-details.json``.
+
+    ``jobs_dir`` is either a single Harbor job directory or a tree of them (see
+    :func:`find_trial_dirs`). Trials with no ``reward-details.json`` (never
+    scored) are skipped.
+
+    Each returned dict has ``_display_model``, ``_trial_id``, ``task_name``,
+    ``_score_path`` and ``_report_path`` injected. Aggregated rollups from
+    ``aggregate_judge_response`` (including ``rca_depth`` and every key in
+    :data:`ROLLUP_KEYS`) are also spread onto each trial dict so non-DataFrame
+    callers can read them directly without going through ``load_data``.
+
+    The trial directory name doubles as ``_trial_id`` and ``task_name``: the
+    readable task id is not recoverable from a trial dir (``result.json``
+    carries only the hashed package name).
     """
     from check_prediction import aggregate_judge_response
 
     trials: list[dict] = []
-    for path in sorted(scores_dir.glob("judge-*.json")):
+    for trial_dir in find_trial_dirs(jobs_dir):
+        details_path = trial_dir / "verifier" / "reward-details.json"
+        if not details_path.is_file():
+            continue
         try:
-            trial = json.loads(path.read_text())
+            trial = json.loads(details_path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(f"Skipping {path.name}: {exc}")
+            logger.warning(f"Skipping {trial_dir.name}: {exc}")
             continue
         re_val = trial.get("reasoning_effort")
         if reasoning_effort is not None and re_val != reasoning_effort:
@@ -219,10 +257,83 @@ def load_trials(scores_dir: Path, reasoning_effort: str | None) -> list[dict]:
             continue
         trial.update(aggregate_judge_response(nested, mode=trial.get("mode")))
         trial["_display_model"] = model_display(trial.get("model", ""))
-        trial["_trial_id"] = trial["trial_id"]
-        trial["_score_path"] = str(path.resolve())
+        trial["_trial_id"] = trial_dir.name
+        trial["task_name"] = trial_dir.name
+        trial["_trial_dir"] = str(trial_dir.resolve())
+        trial["_score_path"] = str(details_path.resolve())
+        trial["_report_path"] = str((trial_dir / "verifier" / "report.md").resolve())
         trials.append(trial)
     return trials
+
+
+def load_agent_config(trial_dir: Path) -> dict:
+    """Return the ``agent`` block from a trial's ``config.json`` (``{}`` if absent)."""
+    config_path = Path(trial_dir) / "config.json"
+    if not config_path.is_file():
+        return {}
+    try:
+        return json.loads(config_path.read_text()).get("agent", {}) or {}
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"Could not read {config_path}: {exc}")
+        return {}
+
+
+def load_task_metadata(trial_dirs: list[Path]) -> dict[str, dict]:
+    """Fetch ``task.toml`` ``[metadata]`` from the registry for each trial.
+
+    Reads ``config.json``'s ``task.name`` / ``task.ref`` per trial, downloads
+    the deduplicated set in one batch, and returns ``{trial_dir_name: metadata}``.
+
+    Harbor caches downloads under ``TASK_CACHE_DIR`` keyed by digest
+    (``<cache>/<org>/<name>/<digest>/``), so repeat runs hit no network. The
+    dataset is private, so this needs an authenticated harbor session
+    (``harbor auth login``) or ``HARBOR_API_KEY``.
+    """
+    import asyncio
+
+    from harbor.models.task.id import PackageTaskId
+    from harbor.tasks.client import TaskClient
+    from harbor_utils.export_predictions import _parse_task_metadata
+
+    # trial name -> (org/name, ref); dedupe the task ids we actually fetch.
+    per_trial: dict[str, tuple[str, str]] = {}
+    for trial_dir in trial_dirs:
+        config_path = Path(trial_dir) / "config.json"
+        if not config_path.is_file():
+            continue
+        task = json.loads(config_path.read_text()).get("task") or {}
+        name, ref = task.get("name"), task.get("ref")
+        if name and ref:
+            per_trial[Path(trial_dir).name] = (name, ref)
+
+    unique = sorted(set(per_trial.values()))
+    if not unique:
+        return {}
+    logger.info(f"Fetching task.toml metadata for {len(unique)} task(s)...")
+
+    task_ids = {
+        (name, ref): PackageTaskId(
+            org=name.split("/")[0], name=name.split("/")[1], ref=ref
+        )
+        for name, ref in unique
+    }
+    asyncio.run(TaskClient().download_tasks(list(task_ids.values()), export=False))
+
+    # ``export=False`` caches at PACKAGE_CACHE_DIR/<org>/<name>/<digest>/, which
+    # get_local_path() computes directly — no need to rely on result ordering.
+    meta_by_task: dict[tuple[str, str], dict] = {}
+    for key, task_id in task_ids.items():
+        toml_path = task_id.get_local_path() / "task.toml"
+        if not toml_path.is_file():
+            logger.warning(f"No task.toml at {toml_path}")
+            continue
+        meta_by_task[key] = _parse_task_metadata(toml_path.read_text())
+
+    return {
+        trial: meta_by_task[key]
+        for trial, key in per_trial.items()
+        if key in meta_by_task
+    }
 
 
 def fmt_acc(values: list[bool | None]) -> str:
@@ -268,71 +379,50 @@ def load_invalid_trial_ids(xlsx_path: Path) -> set[str]:
 
 
 def load_data(
-    output_dir: Path,
+    jobs_dir: Path,
     reasoning_effort: str | None = None,
     filter_xlsx: Path | None = None,
 ) -> pd.DataFrame:
-    """Load judge trials joined with ``all-predictions.json`` metadata.
+    """Load judge trials from a Harbor jobs directory.
+
+    ``jobs_dir`` holds one subdirectory per trial. Scores come from each
+    trial's ``verifier/reward-details.json``, the agent identity from its
+    ``config.json``, and the task dimensions from the published task's
+    ``task.toml`` ``[metadata]`` fetched from the registry.
 
     Returns a DataFrame with one row per scored trial. Each row carries the
-    raw fields from ``judge-*.json`` plus the following derived columns:
+    raw fields from ``reward-details.json`` plus the following derived columns:
 
-    - ``_trial_id``, ``_display_model``, ``_score_path`` (from :func:`load_trials`)
+    - ``_trial_id``, ``task_name``, ``_display_model``, ``_score_path``,
+      ``_report_path`` (from :func:`load_trials`)
     - ``_agent``, ``_agent_model`` (display name), ``_effort``
-    - ``_section``, ``_ttd_minutes``, ``_phrasing``
-    - ``_granularity``
-    - ``_detected`` (100 if ``predictions`` non-empty else 0)
-    - ``_is_control`` (True iff ``expected.events`` is empty — no-incident task)
-    - ``_n_events`` (length of ``expected.events`` — number of plausible incidents)
-
-    Performs a left join on ``all-predictions.json``: scored trials absent
-    from predictions are silently dropped (e.g. medium-granularity trials
-    filtered out by ``harbor-export``). Exits with a clear error message if
-    ``all-predictions.json`` is missing.
+    - ``_section``, ``_ttd_minutes``, ``_phrasing``, ``_granularity``, ``flag``
+    - ``_detected`` (100 iff the agent wrote a report exactly when the task had
+      an incident)
+    - ``_is_control`` (True iff the task's ``events`` is empty — no-incident task)
+    - ``_n_events`` (number of plausible incidents)
     """
-    scores_dir = output_dir / "scores"
-    if not scores_dir.is_dir():
-        logger.error(f"Scores directory not found: {scores_dir}")
+    if not jobs_dir.is_dir():
+        logger.error(f"Jobs directory not found: {jobs_dir}")
         sys.exit(1)
 
-    trials = load_trials(scores_dir, reasoning_effort)
+    trials = load_trials(jobs_dir, reasoning_effort)
     if filter_xlsx is not None:
         invalid_ids = load_invalid_trial_ids(filter_xlsx)
         trials = [t for t in trials if t["_trial_id"] not in invalid_ids]
     if not trials:
-        logger.error("No matching score entries found.")
-        sys.exit(1)
-
-    predictions_path = output_dir / "all-predictions.json"
-    if not predictions_path.is_file():
-        logger.error(f"Could not find {predictions_path}")
-        sys.exit(1)
-    with predictions_path.open() as f:
-        predictions: dict[str, dict] = json.load(f)
-
-    # Left join on all-predictions.json: drop any scored trials whose id is
-    # not in predictions (harbor-export may have filtered them out, e.g.
-    # medium-granularity trials).
-    before = len(trials)
-    trials = [t for t in trials if t["_trial_id"] in predictions]
-    dropped = before - len(trials)
-    if dropped:
-        logger.info(
-            f"Dropped {dropped} scored trial(s) absent from all-predictions.json"
-        )
-    if not trials:
-        logger.error("No scored trials remain after joining with predictions.")
+        logger.error(f"No scored trials found under {jobs_dir}.")
         sys.exit(1)
 
     df = pd.DataFrame(trials)
-    df["_pred"] = df["_trial_id"].map(predictions)
 
-    def _agent_cfg(p: dict) -> dict:
-        return p.get("result", {}).get("config", {}).get("agent", {})
-
-    df["_agent"] = df["_pred"].apply(lambda p: _agent_cfg(p).get("name", "unknown"))
-    df["_agent_model"] = df["_pred"].apply(
-        lambda p: model_display(_agent_cfg(p).get("model_name", "unknown"))
+    # -- Agent identity from each trial's config.json --
+    agent_cfgs = {t["_trial_id"]: load_agent_config(t["_trial_dir"]) for t in trials}
+    df["_agent"] = df["_trial_id"].map(
+        lambda t: agent_cfgs[t].get("name", "unknown") or "unknown"
+    )
+    df["_agent_model"] = df["_trial_id"].map(
+        lambda t: model_display(agent_cfgs[t].get("model_name", "unknown"))
     )
     # Make ``_agent_model`` an ordered Categorical so that downstream
     # ``sort_values`` and ``groupby`` consistently follow MODEL_ORDER without
@@ -341,38 +431,41 @@ def load_data(
     df["_agent_model"] = pd.Categorical(
         df["_agent_model"], categories=ordered_models, ordered=True
     )
-    df["_effort"] = df["_pred"].apply(
-        lambda p: (_agent_cfg(p).get("kwargs") or {}).get("reasoning_effort") or ""
+    df["_effort"] = df["_trial_id"].map(
+        lambda t: (agent_cfgs[t].get("kwargs") or {}).get("reasoning_effort") or ""
     )
-    df["_section"] = df["_pred"].apply(lambda p: p.get("task_meta", {}).get("section"))
-    df["_ttd_minutes"] = df["_pred"].apply(
-        lambda p: p.get("task_meta", {}).get("ttd_minutes")
-    )
-    df["_phrasing"] = df["_pred"].apply(
-        lambda p: p.get("task_meta", {}).get("phrasing")
-    )
-    df["_granularity"] = df["_pred"].apply(
-        lambda p: GRANULARITY_ALIASES.get(
-            p.get("task_meta", {}).get("granularity"),
-            p.get("task_meta", {}).get("granularity"),
+
+    # -- Task dimensions from the registry's task.toml [metadata] --
+    meta = load_task_metadata([t["_trial_dir"] for t in trials])
+    missing = [t for t in df["_trial_id"] if t not in meta]
+    if missing:
+        logger.warning(
+            f"No task metadata for {len(missing)} trial(s), e.g. {missing[:3]}"
+        )
+
+    def _meta(trial_id: str) -> dict:
+        return meta.get(trial_id, {})
+
+    df["_section"] = df["_trial_id"].map(lambda t: _meta(t).get("section"))
+    df["_ttd_minutes"] = df["_trial_id"].map(lambda t: _meta(t).get("ttd_minutes"))
+    df["_phrasing"] = df["_trial_id"].map(lambda t: _meta(t).get("phrasing"))
+    df["_granularity"] = df["_trial_id"].map(
+        lambda t: GRANULARITY_ALIASES.get(
+            _meta(t).get("granularity"), _meta(t).get("granularity")
         )
     )
+    df["flag"] = df["_trial_id"].map(lambda t: _meta(t).get("flag"))
+    df["_is_control"] = df["_trial_id"].map(lambda t: not bool(_meta(t).get("events")))
+    df["_n_events"] = df["_trial_id"].map(lambda t: len(_meta(t).get("events") or []))
 
     # Detection accuracy: agent wrote a report iff the task had an incident.
-    # An empty ``expected.events`` list marks a no-incident control task.
-    def _detected(p: dict) -> int:
-        has_incident = bool((p.get("expected") or {}).get("events"))
-        wrote_report = bool(p.get("predictions"))
-        return 100 * int(wrote_report == has_incident)
+    def _wrote_report(path: str) -> bool:
+        report = Path(path)
+        return report.is_file() and bool(report.read_text().strip())
 
-    df["_detected"] = df["_pred"].apply(_detected)
-    df["_is_control"] = df["_pred"].apply(
-        lambda p: not bool((p.get("expected") or {}).get("events"))
-    )
-    df["_n_events"] = df["_pred"].apply(
-        lambda p: len((p.get("expected") or {}).get("events") or [])
-    )
-    df = df.drop(columns=["_pred"])
+    df["_detected"] = 100 * (
+        df["_report_path"].map(_wrote_report) == ~df["_is_control"]
+    ).astype(int)
 
     # Derive per-section rollups from the stored nested judge output. Local
     # import to avoid a circular dep at module load (check_prediction doesn't

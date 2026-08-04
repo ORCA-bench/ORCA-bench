@@ -27,10 +27,19 @@ feature flag. ``tasks.csv`` maps the real ``task_id`` to its hashed
       "events": [
         {"root_cause": "<flag>", "event_time": "<ISO 8601>"},
         ...
-      ]
+      ],
+      "current": "<ISO 8601>",
+      "quiet_window_start": "<ISO 8601>",   # optional
+      "quiet_window_end": "<ISO 8601>"      # optional
     }
 
-A control task: ``{"events": []}``.
+``current`` (the queried time) is always written. The quiet-window bounds are
+written only for control tasks that have them; an omitted bound means the
+window is open-ended on that side. The verifier's control judge
+(``check_prediction._judge_control``) requires ``current`` and treats a missing
+bound as -inf / +inf.
+
+A control task: ``{"events": [], "current": ..., "quiet_window_end": ...}``.
 
 Examples::
 
@@ -287,7 +296,18 @@ def build_task(
     )
 
     # -- Add solution --
-    expected: dict[str, Any] = {"events": events}
+    # ``current`` is required by the verifier's control-task judge
+    # (check_prediction._judge_control); the quiet-window bounds are written
+    # only when defined — an omitted bound means the window is open-ended on
+    # that side, which the judge prompt renders as "null" (-inf / +inf).
+    expected: dict[str, Any] = {
+        "events": events,
+        "current": spec.current_dt.isoformat(),
+    }
+    if spec.quiet_window_start is not None:
+        expected["quiet_window_start"] = spec.quiet_window_start.isoformat()
+    if spec.quiet_window_end is not None:
+        expected["quiet_window_end"] = spec.quiet_window_end.isoformat()
     wait_block = """\
 # ── Wait for the entrypoint to finish setting up the environment ──
 echo "[solve] Waiting for environment to be ready..."

@@ -238,7 +238,7 @@ def aggregate_telemetry_classifications(
 
     Reads ``{trial_id}/*.json`` records emitted by ``classify_telemetry_calls.py``
     and joins them against ``trial_to_group``. Returns the full set of
-    aggregates so callers (this script's ``main`` and ``plot_efficiency.py``)
+    aggregates so callers (this script's ``main`` and ``plot_retrieval.py``)
     can render whichever views they need without reopening the JSONs.
     """
     agg = TelemetryAggregation()
@@ -319,13 +319,6 @@ def main() -> None:
     parser = get_base_parser()
     parser.description = (
         "Per-agent breakdown of telemetry-call success/empty/error labels."
-    )
-    parser.add_argument(
-        "--jobs-dir",
-        "-jd",
-        type=Path,
-        default=Path("jobs"),
-        help="Path to the Harbor jobs directory (default: jobs)",
     )
     args = parser.parse_args()
     setup_logging(args.log_level)

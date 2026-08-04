@@ -17,19 +17,19 @@
 # %%
 r"""Compute average accuracy across Score and Q1-Q6 columns per model.
 
-Reads score JSON files from ``<output_dir>/scores/`` and prints a markdown
-table with one row per judge model showing mean Score and Q1-Q6 accuracy.
+Reads each trial's ``verifier/reward-details.json`` under ``--jobs-dir`` and
+prints a markdown table with one row per judge model showing mean Score and
+Q1-Q6 accuracy. ``--output-dir`` is where the CSVs are written.
 
 Examples::
 
     cd examples/otel-demo
-    uv run python format_acc.py -od out-0318
-    uv run python format_acc.py -od out-0318 --effort high
+    uv run python format_acc.py -jd jobs/2026-05-05__04-10-26 -od out-0318
+    uv run python format_acc.py -jd jobs/2026-05-05__04-10-26 -od out-0318 --effort high
 
 """
 
 # %%
-import json
 import logging
 from pathlib import Path
 
@@ -67,27 +67,23 @@ if True:
     args = parser.parse_args()
     setup_logging(args.log_level)
     output_dir = args.output_dir
+    jobs_dir = args.jobs_dir
     effort = args.effort
     filter_xlsx = args.filter_xlsx
 else:
     output_dir = Path("out-0423-2")
+    jobs_dir = Path("jobs")
     effort = "high"
     filter_xlsx = None
 
 # %%
-df = load_data(output_dir, effort, filter_xlsx)
+# Scores come from each trial's verifier/reward-details.json; output_dir is
+# only the write location for the CSVs below. ``_report_path`` is set by
+# load_trials, so no all-predictions.json join is needed.
+df = load_data(jobs_dir, effort, filter_xlsx)
 
 # %%
 df.columns
-
-# %%
-with (output_dir / "all-predictions.json").open() as f:
-    preds = json.load(f)
-trial_df = pd.DataFrame([p["result"] for p in preds.values()])[
-    ["trial_name", "trial_uri"]
-]
-df = df.merge(trial_df, left_on="trial_id", right_on="trial_name", how="left")
-df["_report_path"] = df["trial_uri"].str.removeprefix("file://") + "/verifier/report.md"
 
 # %%
 df["_agent_model"].unique()
@@ -106,7 +102,10 @@ sonnet_df[
         | sonnet_df["traces_any_match"]
     )
     & (sonnet_df["flag"] == "recommendationCacheFailure")
-][["task_name", "flag", "score", "_report_path", "_score_path"] + list(Q_COLS.values())]
+][
+    ["task_name", "flag", "rca_depth", "_report_path", "_score_path"]
+    + list(Q_COLS.values())
+]
 
 
 # %%
@@ -119,7 +118,7 @@ def agg_group(g: pd.DataFrame, task_type: str) -> dict:
         "Judge Model": g["_display_model"].iloc[0],
         "Task Type": task_type,
         "N": len(g),
-        "RCA Depth % (out of 3)": fmt_mean_score_pct(g["score"].tolist()),
+        "RCA Depth % (out of 3)": fmt_mean_score_pct(g["rca_depth"].tolist()),
     }
     for label, qfield in Q_COLS.items():
         vals = g[qfield].where(g[qfield].notna(), None).tolist()
@@ -141,54 +140,7 @@ print(tabulate(table_data, headers="keys", tablefmt="github"))
 print()
 
 # %%
-csv_path = args.output_dir / "accuracy.csv"
+csv_path = output_dir / "accuracy.csv"
+output_dir.mkdir(parents=True, exist_ok=True)
 pd.DataFrame(table_data).to_csv(csv_path, index=False)
 logger.info(f"Saved CSV to {csv_path}")
-
-
-# %%
-def dist_group(g: pd.DataFrame, task_type: str) -> dict:
-    """Tally score distribution (0–3) for one group.
-
-    Buckets by ``best_score`` (max across rubrics) because the per-trial
-    ``score`` is a float mean and would silently miss integer buckets on
-    multi-rubric tasks. ``best_score`` mirrors the historical pre-per-rubric
-    "overall score" semantic.
-    """
-    counts = g["best_score"].value_counts()
-    n = len(g)
-    row = {
-        "Agent": g["_agent"].iloc[0],
-        "Agent Model": g["_agent_model"].iloc[0],
-        "Effort": g["_effort"].iloc[0] or "-",
-        "Judge Model": g["_display_model"].iloc[0],
-        "Task Type": task_type,
-        "N": n,
-    }
-    for s in (0, 1, 2, 3):
-        c = int(counts.get(s, 0))
-        row[f"Score {s}"] = f"{c} ({c / n * 100:.1f}%)"
-    return row
-
-
-# %%
-dist_data: list[dict] = []
-for _, g in df.sort_values(GROUP_COLS).groupby(GROUP_COLS, observed=True):
-    incident_g = g[~g[TASK_TYPE_COL]]
-    control_g = g[g[TASK_TYPE_COL]]
-    if len(incident_g):
-        dist_data.append(dist_group(incident_g, "incident"))
-    if len(control_g):
-        dist_data.append(dist_group(control_g, "control"))
-print("## Score Distribution\n")
-print(
-    "> Buckets are sourced from `best_score` (max across rubrics) so multi-rubric "
-    "trials with fractional `score` means don't silently miss integer buckets.\n"
-)
-print(tabulate(dist_data, headers="keys", tablefmt="github"))
-print()
-
-# %%
-dist_csv_path = args.output_dir / "score_distribution.csv"
-pd.DataFrame(dist_data).to_csv(dist_csv_path, index=False)
-logger.info(f"Saved CSV to {dist_csv_path}")
