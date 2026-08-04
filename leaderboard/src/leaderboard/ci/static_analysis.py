@@ -41,10 +41,14 @@ from leaderboard.core.metrics import (
     compute_metrics,
     compute_resource_metrics,
     compute_submission_metrics,
+    compute_subset_metrics,
     format_resource_cells,
+    format_subset_table,
     stderr_basis,
     submission_by_task,
+    subset_counts,
 )
+from leaderboard.core.task_groups import task_labels
 
 # In-flight cap for the in-process per-trial detail fetches (network-bound RPCs).
 TRIAL_CONCURRENCY = 24
@@ -89,6 +93,8 @@ class Result:
     stderr: float = 0.0
     stderr_basis: str = ""
     resources: dict = field(default_factory=dict)
+    subsets: dict = field(default_factory=dict)
+    subset_counts: dict = field(default_factory=dict)
     n_trials: int = 0
     n_disqualified: int = 0
     n_credited: int = 0
@@ -311,6 +317,11 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     res.accuracy, res.stderr = compute_metrics(by_task)
     res.stderr_basis = stderr_basis(by_task)
     res.resources = compute_resource_metrics(trials)
+    # The same breakdown compute_submission_metrics publishes, so the PR comment
+    # and the stored row can't disagree.
+    labels = task_labels()
+    res.subsets = compute_subset_metrics(trials, submission, labels)
+    res.subset_counts = subset_counts(trials, labels)
 
     if per_trial:
         # Fetch each trial's own config + task digest in-process -- the
@@ -380,10 +391,18 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
             f"{md.get('date')} | {result.accuracy:.2f}% | {result.stderr:.2f}% "
             f"| {resources} |\n"
         )
+        if result.subsets:
+            out.append("**Breakdown**")
+            out.append(
+                "\n".join(format_subset_table(result.subsets, result.subset_counts))
+                + "\n"
+            )
         out.append(
             f"<sub>{ran} Accuracy is the mean graded reward over all trials; "
             f"errored trials count `reward 0`. ± SE uses the "
-            f"{result.stderr_basis} estimator.</sub>"
+            f"{result.stderr_basis} estimator. The breakdown groups tasks by "
+            f"`difficulty` and by whether they have an incident; RCA accuracy "
+            f"is undefined on control tasks.</sub>"
         )
     else:
         workflow = (

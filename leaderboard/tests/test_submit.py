@@ -7,8 +7,8 @@ import unittest
 import re
 
 from leaderboard.ci.submit import (
+    LEADERBOARD_NAME,
     LEADERBOARD_PACKAGE,
-    LEADERBOARD_PACKAGE_ID,
     hub_metadata,
     row_create_payload,
 )
@@ -77,8 +77,9 @@ class HubMetadataTests(unittest.TestCase):
 
 
 class RowCreatePayloadTests(unittest.TestCase):
-    """The row-create API selects the package by id, not by slug -- see #3,
-    where a `package` slug produced HTTP 400 after the PR had already merged."""
+    """The row-create API selects the package by its slug. The slug must stay
+    lowercase to be accepted -- see #3, where the old uppercase `ORCA-bench`
+    slug produced HTTP 400 after the PR had already merged."""
 
     # The pattern the hub enforces on a `package` selector.
     HUB_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_.-]*$")
@@ -96,15 +97,16 @@ class RowCreatePayloadTests(unittest.TestCase):
             "trials": ["trial-a", "trial-b"],
         }
 
-    def test_display_slug_would_be_rejected_by_the_hub(self):
-        """Guards the reason for the id indirection: if the package is ever
-        renamed to lowercase this fails, signalling the workaround can go."""
-        self.assertIsNone(self.HUB_SLUG_RE.match(LEADERBOARD_PACKAGE))
+    def test_display_slug_is_accepted_by_the_hub(self):
+        """The slug is the API selector, so renaming the package to anything
+        the hub's lowercase-only pattern rejects breaks every submission."""
+        self.assertIsNotNone(self.HUB_SLUG_RE.match(LEADERBOARD_PACKAGE))
 
-    def test_payload_selects_by_package_id_not_slug(self):
+    def test_payload_selects_by_package_slug(self):
         payload = row_create_payload(self._submission())
-        self.assertEqual(payload["package_id"], LEADERBOARD_PACKAGE_ID)
-        self.assertNotIn("package", payload)
+        self.assertEqual(payload["package"], LEADERBOARD_PACKAGE)
+        self.assertEqual(payload["name"], LEADERBOARD_NAME)
+        self.assertNotIn("package_id", payload)
 
     def test_payload_carries_row_metrics_and_trials(self):
         payload = row_create_payload(self._submission())

@@ -24,19 +24,18 @@ from pathlib import Path
 from harbor.auth.constants import SUPABASE_URL
 
 from leaderboard.core.hub import HUB_URL
-from leaderboard.core.metrics import RESOURCE_HEADERS, format_resource_cells
+from leaderboard.core.metrics import (
+    RESOURCE_HEADERS,
+    format_resource_cells,
+    format_subset_table,
+)
 
 # The leaderboard this repo submits to; the definition lives in SETUP.md.
-LEADERBOARD_PACKAGE = "orca-bench/ORCA-bench"
+# The slug is lowercase, so it satisfies the hub's `package` pattern
+# (/^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_.-]*$/) and doubles as the API
+# selector -- no `package_id` indirection needed.
+LEADERBOARD_PACKAGE = "orca-bench/orca-bench"
 LEADERBOARD_NAME = "orca-bench"
-
-# The hub APIs validate a `package` slug against a lowercase-only pattern
-# (/^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_.-]*$/), which the uppercase in
-# "ORCA-bench" fails -- so the slug above can be used for display but never as
-# an API selector. Select the package by id instead; the API accepts
-# `package_id` (or `leaderboard_id`) in its place. Same workaround as
-# `harbor hub leaderboard create`, see SETUP.md.
-LEADERBOARD_PACKAGE_ID = "6d2769e3-f6e9-4496-9830-ea8997cb9e6d"
 
 LEADERBOARD_URL = (
     f"{HUB_URL}/datasets/{LEADERBOARD_PACKAGE}/latest"
@@ -84,7 +83,7 @@ def row_create_payload(submission: dict) -> dict:
         "trial_ids": submission["trials"],
     }
     return {
-        "package_id": LEADERBOARD_PACKAGE_ID,
+        "package": LEADERBOARD_PACKAGE,
         "name": LEADERBOARD_NAME,
         "rows": [row],
     }
@@ -140,6 +139,11 @@ def render_comment(row: dict) -> str:
             f"{md.get('reasoning_effort') or '—'} | {md.get('agent_display')} "
             f"[{md.get('agent_org')}] | {me.get('accuracy')}% | {me.get('accuracy_stderr')}% "
             f"| {resources} | {md.get('pr') or '—'} |",
+            "",
+            # The same breakdown the static-analysis comment showed, rendered
+            # from the row the API echoed back -- so what landed is what is
+            # reported. No `n` column here: the row carries metrics, not counts.
+            *format_subset_table(me),
             "",
             _footer_ran(),
         ]

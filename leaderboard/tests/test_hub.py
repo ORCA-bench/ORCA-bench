@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import unittest
 
-from leaderboard.core.hub import MissingRewardMetricError, trial_reward
+from leaderboard.core.hub import (
+    MissingRewardMetricError,
+    trial_metric,
+    trial_reward,
+)
 
 
 def _row(evals, reward=None) -> dict:
@@ -100,6 +104,41 @@ class TrialRewardTests(unittest.TestCase):
         """A bool is an int in Python; it is not a graded reward."""
         with self.assertRaises(MissingRewardMetricError):
             trial_reward(_row({"reward": {"metrics": [{"reward": True}]}}))
+
+
+class TrialMetricTests(unittest.TestCase):
+    """`trial_metric` is `trial_reward` with the metric name parameterized; the
+    subset metrics use it to read `rca_accuracy` the same way."""
+
+    def _row_with_both(self, reward, rca) -> dict:
+        return _row(
+            {
+                "reward": {"metrics": [{"reward": reward}]},
+                "rca_accuracy": {"metrics": [{"rca_accuracy": rca}]},
+                "hallucinate_any": {"metrics": [{"hallucinate_any": 0}]},
+            },
+            reward=0,
+        )
+
+    def test_reads_the_named_companion_metric(self):
+        row = self._row_with_both(0.75, 1)
+        self.assertEqual(trial_metric(row, "rca_accuracy"), 1.0)
+        self.assertEqual(trial_metric(row, "reward"), 0.75)
+
+    def test_defaults_to_reward(self):
+        self.assertEqual(trial_metric(self._row_with_both(0.75, 1)), 0.75)
+        self.assertEqual(trial_reward(self._row_with_both(0.75, 1)), 0.75)
+
+    def test_missing_companion_metric_raises(self):
+        """The verifier emits rca_accuracy on every trial, control tasks
+        included, so its absence means the contract broke."""
+        row = _row({"reward": {"metrics": [{"reward": 1.0}]}}, reward=1.0)
+        with self.assertRaises(MissingRewardMetricError) as ctx:
+            trial_metric(row, "rca_accuracy")
+        self.assertIn("rca_accuracy", str(ctx.exception))
+
+    def test_errored_trial_is_none_for_any_metric(self):
+        self.assertIsNone(trial_metric(_row(None), "rca_accuracy"))
 
 
 if __name__ == "__main__":

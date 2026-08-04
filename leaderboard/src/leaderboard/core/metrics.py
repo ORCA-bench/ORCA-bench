@@ -14,8 +14,16 @@ ORCA-bench rewards are graded in [0, 1], not pass/fail -- see compute_metrics.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 
-from leaderboard.core.hub import submission_trials, trial_reward
+from leaderboard.core.hub import (
+    RCA_ACCURACY_METRIC,
+    REWARD_METRIC,
+    submission_trials,
+    trial_metric,
+    trial_reward,
+)
+from leaderboard.core.task_groups import TaskLabel, label_for, task_labels
 
 
 class RewardRangeError(ValueError):
@@ -136,6 +144,30 @@ def submission_by_task(
     return by_task, n_disq, n_credited
 
 
+# The subset breakdown: (metrics-key suffix, display label, predicate over a
+# TaskLabel). Shared by the computation and by every renderer so the published
+# keys, the PR comment and the merge comment cannot drift apart. `accuracy`
+# (reward over all tasks) is computed separately -- it is the ranking metric and
+# predates the breakdown.
+SUBSETS: tuple[tuple[str, str, Callable[[TaskLabel], bool]], ...] = (
+    ("incident", "Incident", lambda t: not t.is_control),
+    ("control", "Control", lambda t: t.is_control),
+    ("incident_easy", "Incident · easy", lambda t: not t.is_control and t.difficulty == "easy"),
+    ("incident_medium", "Incident · medium", lambda t: not t.is_control and t.difficulty == "medium"),
+    ("incident_hard", "Incident · hard", lambda t: not t.is_control and t.difficulty == "hard"),
+)
+
+# Which per-trial eval metric each column of the breakdown aggregates, and the
+# metrics-key prefix it is published under. `rca_accuracy` is defined only over
+# incident tasks: control tasks have no root cause to name, so the verifier
+# scores it 0 there by construction and a control column would be a constant.
+SUBSET_METRICS: tuple[tuple[str, str, str, bool], ...] = (
+    # (key prefix, eval metric name, display header, incident-only)
+    ("accuracy", REWARD_METRIC, "Reward", False),
+    ("rca_accuracy", RCA_ACCURACY_METRIC, "RCA accuracy", True),
+)
+
+
 # Comment-table headers for the resource totals, shared by every renderer
 # (static analysis, merge submit) so the tables can't drift apart.
 RESOURCE_HEADERS = ("Tokens", "Cost")
@@ -153,6 +185,98 @@ def format_resource_cells(metrics: dict) -> tuple[str, str]:
         fmt("total_tokens", "{:,}"),
         fmt("total_cost_usd", "${:,.2f}"),
     )
+
+
+class EmptySubsetError(ValueError):
+    """A breakdown subset has no trials, so its metric would read 0.00%."""
+
+
+def compute_subset_metrics(
+    trials: list[dict], submission: dict, labels: dict[str, TaskLabel] | None = None
+) -> dict[str, float]:
+    """The per-subset breakdown: reward and rca_accuracy by task group.
+
+    Returns `{"<prefix>_<subset>": percentage}` for every (metric, subset) pair
+    in SUBSET_METRICS x SUBSETS, e.g. `accuracy_incident_easy`. Values are means
+    over the subset's trials, computed by `compute_metrics` so they inherit its
+    contract (a missing value counts as 0, and a value outside [0, 1] is
+    rejected rather than silently skewing the result).
+
+    The disqualified / credited overrides apply to the **reward** subsets only,
+    matching `accuracy`. Those lists record that a trial's *score* was wrong;
+    they say nothing about whether the agent named the root cause, so rewriting
+    `rca_accuracy` from them would invent a verdict no judge produced.
+
+    Every subset is populated by construction -- a submission must cover all of
+    the dataset's tasks, which span both kinds and all three difficulties -- so
+    an empty one means the labels and the trials disagree. That raises rather
+    than publishing a plausible-looking 0.00%.
+    """
+    labels = task_labels() if labels is None else labels
+    disq = {d["trial_id"] for d in (submission.get("disqualified_trials") or [])}
+    credited = {d["trial_id"] for d in (submission.get("credited_trials") or [])}
+
+    out: dict[str, float] = {}
+    for prefix, metric, _header, incident_only in SUBSET_METRICS:
+        overridable = metric == REWARD_METRIC
+        for suffix, _label, predicate in SUBSETS:
+            if incident_only and suffix == "control":
+                continue
+            by_task: dict[str, list] = defaultdict(list)
+            for t in trials:
+                if not predicate(label_for(labels, t.get("task_name"))):
+                    continue
+                tid = t.get("id")
+                if overridable and tid in disq:
+                    value = 0
+                elif overridable and tid in credited:
+                    value = 1
+                else:
+                    value = trial_metric(t, metric)
+                by_task[t.get("task_name")].append(value)
+            if not by_task:
+                raise EmptySubsetError(
+                    f"no trials for subset {suffix!r}; the submission's tasks "
+                    "and the pinned dataset's labels disagree, so "
+                    f"{prefix}_{suffix} would be published as 0.00%."
+                )
+            mean, _ = compute_metrics(by_task)
+            out[f"{prefix}_{suffix}"] = round(mean, 2)
+    return out
+
+
+def format_subset_table(metrics: dict, counts: dict[str, int] | None = None) -> list[str]:
+    """The breakdown as markdown rows: one line per subset, one column per
+    metric. Shared by the static-analysis comment and the merge comment so the
+    two cannot drift; `counts` adds an `n` column when the caller has it.
+    """
+    headers = [h for _p, _m, h, _i in SUBSET_METRICS]
+    head = "| Subset | " + " | ".join(headers) + (" | n |" if counts else " |")
+    rule = "|" + " --- |" * (1 + len(headers) + (1 if counts else 0))
+    rows = [head, rule]
+    for suffix, label, _predicate in SUBSETS:
+        cells = []
+        for prefix, _metric, _header, incident_only in SUBSET_METRICS:
+            value = metrics.get(f"{prefix}_{suffix}")
+            cells.append("—" if value is None else f"{value:.2f}%")
+            del incident_only  # control cells are simply absent -> em-dash
+        line = f"| {label} | " + " | ".join(cells)
+        if counts:
+            line += f" | {counts.get(suffix, 0)} |"
+        else:
+            line += " |"
+        rows.append(line)
+    return rows
+
+
+def subset_counts(trials: list[dict], labels: dict[str, TaskLabel]) -> dict[str, int]:
+    """Trial count per subset, for the `n` column of the breakdown table."""
+    counts: dict[str, int] = {}
+    for suffix, _label, predicate in SUBSETS:
+        counts[suffix] = sum(
+            1 for t in trials if predicate(label_for(labels, t.get("task_name")))
+        )
+    return counts
 
 
 def compute_resource_metrics(trials: list[dict]) -> dict:
@@ -182,14 +306,16 @@ def compute_submission_metrics(submission: dict) -> dict:
     """The metrics record written into the submission JSON at promote.
     Honors disqualified_trials (reward 0) and credited_trials (reward 1) via
     the join. Fields match the leaderboard metrics_schema: accuracy +
-    accuracy_stderr, plus the whole-submission resource totals (tokens / cost),
-    which count every trial that ran -- overrides change a trial's reward, not
-    its resource usage."""
+    accuracy_stderr, the per-subset breakdown (reward and rca_accuracy by task
+    group, see compute_subset_metrics), plus the whole-submission resource
+    totals (tokens / cost), which count every trial that ran -- overrides change
+    a trial's reward, not its resource usage."""
     trials = submission_trials(submission)
     by_task, _, _ = submission_by_task(trials, submission)
     accuracy, stderr = compute_metrics(by_task)
     return {
         "accuracy": round(accuracy, 2),
         "accuracy_stderr": round(stderr, 2),
+        **compute_subset_metrics(trials, submission),
         **compute_resource_metrics(trials),
     }

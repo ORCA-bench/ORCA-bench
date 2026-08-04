@@ -136,10 +136,10 @@ CI posts a sticky comment on your PR with a pass/fail table:
 These run against the job config **the hub recorded with your uploaded run**,
 not against any file in this repo.
 
-On green it also shows a **Trial Summary** (error breakdown) and a
+On green it also shows a **Trial Summary** (error breakdown), a
 **Submission Summary** (accuracy ± SE, plus total tokens and cost across
-all trials). On red, fix the problem and push an update to the same file —
-the checks re-run.
+all trials), and a **Breakdown** of the same trials by task group. On red, fix
+the problem and push an update to the same file — the checks re-run.
 
 **How accuracy is computed.** ORCA-bench rewards are graded in `[0, 1]`, not
 pass/fail, so accuracy is the **mean reward** over all trials — a report
@@ -147,6 +147,16 @@ scoring 0.33 contributes a third of a point, not a full success. `± SE` uses
 the within-task standard error when tasks have multiple trials, and the
 between-task standard error when every task has exactly one; the comment
 footer says which.
+
+**What the breakdown splits.** Two per-trial metrics — `reward` (the graded
+score) and `rca_accuracy` (did the report name the root cause?) — over five
+groups: **incident** vs **control** tasks, and the three difficulty tiers
+**easy / medium / hard** within the incident tasks. A task is control iff it has
+no incident to find; those tasks still carry a difficulty, so the tier rows
+cover incident tasks only. `rca_accuracy` has no control row — a control task
+has no root cause to name, so the metric is 0 there by construction. All of
+these land on the leaderboard as their own columns alongside `accuracy`, which
+remains the ranking metric.
 
 ### Promotion (automatic, on green)
 

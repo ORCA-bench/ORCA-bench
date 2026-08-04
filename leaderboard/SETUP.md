@@ -46,7 +46,7 @@ takes precedence when set — that's how CI supplies it.
 
 ## The dataset
 
-Published as `orca-bench/ORCA-bench` (755 tasks), pinned in
+Published as `orca-bench/orca-bench` (755 tasks), pinned in
 [`core/hub.py`](src/leaderboard/core/hub.py) as
 `sha256:39149656128e6279e88d3b123374b6e9222bb71a98b55213ac6355a6f156a67a`.
 
@@ -54,7 +54,7 @@ Published as `orca-bench/ORCA-bench` (755 tasks), pinned in
 knowing before you debug anything: an *unauthenticated* caller gets
 
 ```
-ValueError: Tag 'latest' not found for dataset 'orca-bench/ORCA-bench'
+ValueError: Tag 'latest' not found for dataset 'orca-bench/orca-bench'
 ```
 
 which reads like the dataset doesn't exist. It does — you are just not logged
@@ -69,72 +69,81 @@ before opening submissions up.
 
 ## The leaderboard on the hub
 
-**Created** — `orca-bench/ORCA-bench` → leaderboard `orca-bench`, title
+**Created** — `orca-bench/orca-bench` → leaderboard `orca-bench`, title
 "ORCA-bench", **visibility `private`** (matching the dataset), id
-`1b72818f-bd2e-4051-a3d1-634fe44808d7`. This matches `LEADERBOARD_PACKAGE` /
+`dcb96003-d991-4f98-97b6-3813c35daa81`. This matches `LEADERBOARD_PACKAGE` /
 `LEADERBOARD_NAME` in [`ci/submit.py`](src/leaderboard/ci/submit.py).
+
+The board on the retired uppercase package (`orca-bench/ORCA-bench`, id
+`1b72818f-bd2e-4051-a3d1-634fe44808d7`) is superseded and should be deleted; it
+holds no rows.
 
 Make it public in the same change that makes the dataset public — a public
 leaderboard over a private dataset shows scores nobody can reproduce.
 
-### Gotcha: `package` vs `package_id`
+### The package slug must stay lowercase
 
-**The hub never accepts `orca-bench/ORCA-bench` as an API selector.** Every
-endpoint validates a `package` slug against a lowercase-only pattern —
+Every endpoint validates a `package` selector against a lowercase-only pattern —
 
 ```
 /^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_.-]*$/
 ```
 
-— which the uppercase in `ORCA-bench` fails. The slug is fine for display and
-for hub URLs, but anything that talks to the API must select the package by id
-(`package_id`, or `leaderboard_id` where supported). This bit twice: once on
-`leaderboard create`, and again on `leaderboard-row-create` in `ci/submit.py`,
-which is why `LEADERBOARD_PACKAGE_ID` exists alongside `LEADERBOARD_PACKAGE`.
+The dataset used to be published as `orca-bench/ORCA-bench`, whose uppercase
+fails that pattern, so nothing that talked to the API could select it by slug.
+That forced a `package_id` UUID indirection in two places — `harbor hub
+leaderboard create` and `leaderboard-row-create` in `ci/submit.py`. Both are
+gone now that the package is `orca-bench/orca-bench`: `ci/submit.py` sends
+`package` + `name` directly, and `tests/test_submit.py` guards the slug against
+regressing to something the hub would reject.
 
-Renaming the dataset package to lowercase would remove the need for the
-indirection entirely; `tests/test_submit.py` asserts the slug is *not* hub-valid,
-so that test fails the day it is renamed, flagging the workaround as removable.
-
-The definition is checked in as [`leaderboard.json`](leaderboard.json), but it
-**cannot be passed to `create` as-is** — the CLI reports:
-
-```
-Error: invalid leaderboard.json:
-  package: String should match pattern '^*/*$'
-```
-
-Swap `package` for the dataset's `package_id` UUID
-(`6d2769e3-f6e9-4496-9830-ea8997cb9e6d`) — supply one or the other, never both:
+The definition is checked in as [`leaderboard.json`](leaderboard.json) and can
+be passed to `create` / `update` as-is:
 
 ```bash
-uv run python -c "import json; d=json.load(open('leaderboard.json')); \
-  d.pop('package'); d['package_id']='6d2769e3-f6e9-4496-9830-ea8997cb9e6d'; \
-  json.dump(d, open('/tmp/lb.json','w'), indent=2)"
-uv run harbor hub leaderboard create --config /tmp/lb.json --json
+uv run harbor hub leaderboard create --config leaderboard.json --json
 ```
 
-`leaderboard.json` keeps the human-readable `package` slug because that is what
-`ci/submit.py` and the hub URL use; only the `create`/`update` CLI needs the
-UUID substitution.
-
 The `metadata_schema` / `metrics_schema` are the contract merged submissions
-must satisfy. `metrics` = `accuracy` + `accuracy_stderr` (required) plus the
-whole-submission resource totals (`total_tokens` = input + output,
-`total_cost_usd` — optional, omitted when the trials don't report the underlying
-telemetry). `metadata` = the display fields, plus the `pr` markdown link cell
-(`[#N](…)` → the promoted bot PR) that CI stamps in at promotion.
+must satisfy. `metrics` = `accuracy` + `accuracy_stderr` (required), the
+per-subset breakdown, and the whole-submission resource totals (`total_tokens`
+= input + output, `total_cost_usd` — optional, omitted when the trials don't
+report the underlying telemetry). `metadata` = the display fields, plus the `pr`
+markdown link cell (`[#N](…)` → the promoted bot PR) that CI stamps in at
+promotion.
 
 Note `accuracy` is the **mean graded reward** as a percentage, not a pass rate —
 ORCA-bench verifiers emit a normalized reward in `[0, 1]`.
 
-Verify it, or export the live definition if you need to amend it (`update`
-takes the same `package_id` substitution as `create`):
+The breakdown splits two per-trial eval metrics — `reward` and `rca_accuracy` —
+across task groups, labelled from each task's `task.toml` `[metadata]` at the
+pinned refs (see `core/task_groups.py`):
+
+| | incident | control | easy | medium | hard |
+| --- | --- | --- | --- | --- | --- |
+| reward | `accuracy_incident` | `accuracy_control` | `accuracy_incident_easy` | `accuracy_incident_medium` | `accuracy_incident_hard` |
+| rca_accuracy | `rca_accuracy_incident` | — | `rca_accuracy_incident_easy` | `rca_accuracy_incident_medium` | `rca_accuracy_incident_hard` |
+
+A task is **control** iff its `events` list is empty, and the difficulty tiers
+come from the `difficulty` field — *not* `granularity`, which holds a second
+ladder (`easy`/`hard`/`universal`) for the same tiers. Control tasks carry a
+difficulty too, so the tier subsets are incident-only. `rca_accuracy` has no
+control column: control tasks have no root cause to name, so the verifier scores
+it 0 there by construction.
+
+> **Push schema changes to the live hub *before* a row that uses them merges.**
+> `metrics_schema` sets `additionalProperties: false`, so `leaderboard-row-create`
+> rejects a row carrying an unknown key — and that happens at merge time, after
+> the PR is already merged. `tests/test_metrics_schema.py` keeps the checked-in
+> schema and the computed metrics in step, but it cannot see the live hub:
+> run `harbor hub leaderboard update --config leaderboard.json` first.
+
+Verify it, or export the live definition if you need to amend it:
 
 ```bash
 uv run harbor hub leaderboard list
-uv run harbor hub leaderboard export orca-bench/ORCA-bench/orca-bench
-uv run harbor hub leaderboard update --config /tmp/lb.json
+uv run harbor hub leaderboard export orca-bench/orca-bench/orca-bench
+uv run harbor hub leaderboard update --config leaderboard.json
 ```
 
 The account you are logged in as must be allowed to manage the `orca-bench`
@@ -154,7 +163,7 @@ lockstep with every republish:
 ```bash
 uv run python -c "import asyncio; \
   from harbor.registry.client.package import PackageDatasetClient; \
-  print(asyncio.run(PackageDatasetClient().get_dataset_metadata('orca-bench/ORCA-bench@latest')).version)"
+  print(asyncio.run(PackageDatasetClient().get_dataset_metadata('orca-bench/orca-bench@latest')).version)"
 ```
 
 (The field is `.version`, not `.ref` — it holds the `sha256:` digest. There is

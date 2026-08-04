@@ -5,11 +5,14 @@ from __future__ import annotations
 import unittest
 
 from leaderboard.core.metrics import (
+    EmptySubsetError,
     RewardRangeError,
     compute_metrics,
+    compute_subset_metrics,
     stderr_basis,
     submission_by_task,
 )
+from leaderboard.core.task_groups import TaskLabel
 
 
 _UNSET = object()
@@ -129,6 +132,85 @@ class SubmissionByTaskTests(unittest.TestCase):
         by_task, n_disq, _ = submission_by_task(trials, sub)
         self.assertEqual(by_task["org/a"], [0])
         self.assertEqual(n_disq, 1)
+
+
+def _scored(tid: str, task: str, reward, rca) -> dict:
+    """A trial row carrying both eval metrics, as the verifier publishes them."""
+    return {
+        "id": tid,
+        "task_name": task,
+        "reward": reward,
+        "evals": {
+            "reward": {"metrics": [{"reward": reward}]},
+            "rca_accuracy": {"metrics": [{"rca_accuracy": rca}]},
+        },
+    }
+
+
+# One task per (kind, difficulty) cell, so every subset is populated.
+_LABELS = {
+    "org/inc-easy": TaskLabel("easy", False),
+    "org/inc-medium": TaskLabel("medium", False),
+    "org/inc-hard": TaskLabel("hard", False),
+    "org/ctl": TaskLabel("hard", True),
+}
+
+
+def _trials() -> list[dict]:
+    return [
+        _scored("t-easy", "org/inc-easy", 1.0, 1),
+        _scored("t-medium", "org/inc-medium", 0.5, 0),
+        _scored("t-hard", "org/inc-hard", 0.0, 0),
+        _scored("t-ctl", "org/ctl", 1.0, 0),
+    ]
+
+
+class SubsetMetricsTests(unittest.TestCase):
+    def test_every_subset_is_reported(self):
+        m = compute_subset_metrics(_trials(), {}, _LABELS)
+        self.assertEqual(m["accuracy_incident"], 50.0)  # (1.0 + 0.5 + 0.0) / 3
+        self.assertEqual(m["accuracy_control"], 100.0)
+        self.assertEqual(m["accuracy_incident_easy"], 100.0)
+        self.assertEqual(m["accuracy_incident_medium"], 50.0)
+        self.assertEqual(m["accuracy_incident_hard"], 0.0)
+        self.assertEqual(m["rca_accuracy_incident"], round(100 / 3, 2))
+        self.assertEqual(m["rca_accuracy_incident_easy"], 100.0)
+        self.assertEqual(m["rca_accuracy_incident_medium"], 0.0)
+        self.assertEqual(m["rca_accuracy_incident_hard"], 0.0)
+
+    def test_rca_accuracy_has_no_control_subset(self):
+        """It is 0 by construction on control tasks, so the column would be a
+        constant; the reward breakdown does have one."""
+        m = compute_subset_metrics(_trials(), {}, _LABELS)
+        self.assertNotIn("rca_accuracy_control", m)
+        self.assertIn("accuracy_control", m)
+
+    def test_control_tasks_are_excluded_from_difficulty_subsets(self):
+        """The control task above is difficulty `hard`; it must not leak into
+        accuracy_incident_hard."""
+        m = compute_subset_metrics(_trials(), {}, _LABELS)
+        self.assertEqual(m["accuracy_incident_hard"], 0.0)
+
+    def test_overrides_move_reward_subsets_only(self):
+        """A disqualified trial is forced to reward 0, but its rca_accuracy
+        verdict is left alone -- the override says the score was wrong, not
+        that the root cause went unnamed."""
+        sub = {"disqualified_trials": [{"trial_id": "t-easy", "reason": "spurious_pass"}]}
+        m = compute_subset_metrics(_trials(), sub, _LABELS)
+        self.assertEqual(m["accuracy_incident_easy"], 0.0)
+        self.assertEqual(m["rca_accuracy_incident_easy"], 100.0)
+
+    def test_credited_trial_is_forced_to_full_reward(self):
+        sub = {"credited_trials": [{"trial_id": "t-hard", "reason": "spurious_fail"}]}
+        m = compute_subset_metrics(_trials(), sub, _LABELS)
+        self.assertEqual(m["accuracy_incident_hard"], 100.0)
+
+    def test_empty_subset_raises_rather_than_reporting_zero(self):
+        """Full task coverage is enforced upstream, so an empty subset means
+        the labels and the trials disagree."""
+        trials = [t for t in _trials() if t["task_name"] != "org/ctl"]
+        with self.assertRaises(EmptySubsetError):
+            compute_subset_metrics(trials, {}, _LABELS)
 
 
 class ComputeMetricsTests(unittest.TestCase):

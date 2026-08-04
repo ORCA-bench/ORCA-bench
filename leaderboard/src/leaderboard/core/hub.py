@@ -34,13 +34,13 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 #     uv run python -c "import asyncio; \
 #       from harbor.registry.client.package import PackageDatasetClient; \
 #       print(asyncio.run(PackageDatasetClient().get_dataset_metadata( \
-#         'orca-bench/ORCA-bench@latest')).version)"
+#         'orca-bench/orca-bench@latest')).version)"
 #
 # The dataset is currently private, so this needs an authenticated harbor
 # session (`harbor auth login`) or HARBOR_API_KEY -- an anonymous caller sees
 # "Tag 'latest' not found", which reads as "no such dataset" but is not.
-DATASET = "orca-bench/ORCA-bench"
-DATASET_REF = "sha256:39149656128e6279e88d3b123374b6e9222bb71a98b55213ac6355a6f156a67a"
+DATASET = "orca-bench/orca-bench"
+DATASET_REF = "sha256:2add497ac2f93468dba1b83977c295a784c89031754e6a35520195345ad62ada"
 
 # Sentinel guarding an unpinned checkout; DATASET_REF above is a real ref, so
 # this only fires if someone blanks it out.
@@ -101,12 +101,15 @@ def trial_model(trial: dict) -> str | None:
 
 
 # The eval metric a trial's score is read from. ORCA-bench verifiers publish it
-# alongside companion diagnostics (see check_prediction.build_rewards).
+# alongside companion diagnostics (see check_prediction.build_rewards); the
+# subset metrics also read `rca_accuracy`, which the verifier emits on every
+# trial, control tasks included.
 REWARD_METRIC = "reward"
+RCA_ACCURACY_METRIC = "rca_accuracy"
 
 
 class MissingRewardMetricError(ValueError):
-    """A trial reported eval metrics, but none of them is named `reward`."""
+    """A trial reported eval metrics, but none of them has the wanted name."""
 
 
 def _eval_metric_maps(evals: dict) -> list[dict]:
@@ -128,8 +131,8 @@ def _eval_metric_maps(evals: dict) -> list[dict]:
     ]
 
 
-def trial_reward(trial: dict) -> float | None:
-    """The metric NAMED `reward` for a bulk trial row.
+def trial_metric(trial: dict, metric: str = REWARD_METRIC) -> float | None:
+    """The eval metric NAMED `metric` for a bulk trial row.
 
     Read by name, never positionally. The Hub derives a row's own `reward`
     scalar from the *alphabetically first* numeric entry of the verifier's
@@ -141,10 +144,11 @@ def trial_reward(trial: dict) -> float | None:
 
     Returns None only for a trial that produced no evals at all -- a genuinely
     errored trial -- which metrics._reward maps to 0.0, as intended. A trial
-    that reported metrics but none named `reward` raises instead of scoring 0:
-    that means the verifier contract changed, which skews the whole submission
+    that reported metrics but not this one raises instead of scoring 0: that
+    means the verifier contract changed, which skews the whole submission
     uniformly, and a silently zeroed metric is the exact failure this function
-    exists to prevent.
+    exists to prevent. The ORCA-bench verifier emits both `reward` and
+    `rca_accuracy` on every trial, so neither is ever legitimately absent.
     """
     evals = trial.get("evals")
     if not isinstance(evals, dict) or not evals:
@@ -152,25 +156,30 @@ def trial_reward(trial: dict) -> float | None:
             raise MissingRewardMetricError(
                 f"trial {trial.get('id')} carries a reward scalar "
                 f"{trial.get('reward')!r} but no `evals` block; the Hub row "
-                "shape changed and reading the reward by name would silently "
+                "shape changed and reading a metric by name would silently "
                 "score every trial 0. Refusing to compute a zeroed metric."
             )
         return None
     for metrics in _eval_metric_maps(evals):
-        if REWARD_METRIC in metrics:
-            value = metrics[REWARD_METRIC]
+        if metric in metrics:
+            value = metrics[metric]
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise MissingRewardMetricError(
                     f"trial {trial.get('id')} reports a non-numeric "
-                    f"`{REWARD_METRIC}` metric {value!r}"
+                    f"`{metric}` metric {value!r}"
                 )
             return float(value)
     found = sorted({k for m in _eval_metric_maps(evals) for k in m})
     raise MissingRewardMetricError(
         f"trial {trial.get('id')} reports eval metrics {found} but none named "
-        f"`{REWARD_METRIC}`; ORCA-bench verifiers must emit it (see "
+        f"`{metric}`; ORCA-bench verifiers must emit it (see "
         "check_prediction.build_rewards). Refusing to score the trial 0."
     )
+
+
+def trial_reward(trial: dict) -> float | None:
+    """The metric named `reward` -- the trial's graded score."""
+    return trial_metric(trial, REWARD_METRIC)
 
 
 def submission_trials(submission: dict) -> list[dict]:

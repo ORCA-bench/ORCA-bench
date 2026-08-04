@@ -1,5 +1,5 @@
 {
-  "package": "orca-bench/ORCA-bench",
+  "package": "orca-bench/orca-bench",
   "name": "orca-bench",
   "title": "ORCA-bench",
   "description": "Leaderboard for ORCA-bench: root cause analysis for oncall agents",
@@ -23,6 +23,15 @@
     "properties": {
       "accuracy": { "type": "number", "minimum": 0, "maximum": 100 },
       "accuracy_stderr": { "type": "number", "minimum": 0, "maximum": 100 },
+      "accuracy_incident": { "type": "number", "minimum": 0, "maximum": 100 },
+      "accuracy_control": { "type": "number", "minimum": 0, "maximum": 100 },
+      "accuracy_incident_easy": { "type": "number", "minimum": 0, "maximum": 100 },
+      "accuracy_incident_medium": { "type": "number", "minimum": 0, "maximum": 100 },
+      "accuracy_incident_hard": { "type": "number", "minimum": 0, "maximum": 100 },
+      "rca_accuracy_incident": { "type": "number", "minimum": 0, "maximum": 100 },
+      "rca_accuracy_incident_easy": { "type": "number", "minimum": 0, "maximum": 100 },
+      "rca_accuracy_incident_medium": { "type": "number", "minimum": 0, "maximum": 100 },
+      "rca_accuracy_incident_hard": { "type": "number", "minimum": 0, "maximum": 100 },
       "total_tokens": { "type": "number", "minimum": 0 },
       "total_cost_usd": { "type": "number", "minimum": 0 }
     },
@@ -38,6 +47,18 @@
     { "id": "model_org",         "header": "Model Org",        "accessor": "metadata.model_org",         "type": "text" },
     { "id": "accuracy",          "header": "Accuracy (%)",     "accessor": "metrics.accuracy",           "type": "number", "align": "right" },
     { "id": "accuracy_stderr",   "header": "± SE",             "accessor": "metrics.accuracy_stderr",    "type": "number", "align": "right" },
+
+    { "id": "accuracy_incident",            "header": "Reward: Incident",        "accessor": "metrics.accuracy_incident",            "type": "number", "align": "right" },
+    { "id": "accuracy_control",             "header": "Reward: Control",         "accessor": "metrics.accuracy_control",             "type": "number", "align": "right" },
+    { "id": "accuracy_incident_easy",       "header": "Reward: Easy",            "accessor": "metrics.accuracy_incident_easy",       "type": "number", "align": "right" },
+    { "id": "accuracy_incident_medium",     "header": "Reward: Medium",          "accessor": "metrics.accuracy_incident_medium",     "type": "number", "align": "right" },
+    { "id": "accuracy_incident_hard",       "header": "Reward: Hard",            "accessor": "metrics.accuracy_incident_hard",       "type": "number", "align": "right" },
+
+    { "id": "rca_accuracy_incident",        "header": "RCA: Incident",           "accessor": "metrics.rca_accuracy_incident",        "type": "number", "align": "right" },
+    { "id": "rca_accuracy_incident_easy",   "header": "RCA: Easy",               "accessor": "metrics.rca_accuracy_incident_easy",   "type": "number", "align": "right" },
+    { "id": "rca_accuracy_incident_medium", "header": "RCA: Medium",             "accessor": "metrics.rca_accuracy_incident_medium", "type": "number", "align": "right" },
+    { "id": "rca_accuracy_incident_hard",   "header": "RCA: Hard",               "accessor": "metrics.rca_accuracy_incident_hard",   "type": "number", "align": "right" },
+
     { "id": "total_tokens",      "header": "Tokens",           "accessor": "metrics.total_tokens",       "type": "number", "align": "right" },
     { "id": "total_cost_usd",    "header": "Cost",             "accessor": "metrics.total_cost_usd",     "type": "number", "align": "right" },
     { "id": "pr",                "header": "PR",               "accessor": "metadata.pr",                "type": "markdown" }
