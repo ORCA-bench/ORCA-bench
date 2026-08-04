@@ -4,7 +4,7 @@
 [![Website](https://img.shields.io/badge/Website-orca--bench.github.io-1c7ed6?style=flat-square&logo=githubpages&logoColor=white)](https://orca-bench.github.io)
 [![arXiv](https://img.shields.io/badge/arXiv-2607.28545-b31b1b?style=flat-square&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2607.28545)
 
-This repo contains the instructions to reproduce the dataset construction and evaluation in our paper [ORCA-bench: How Ready Are Language Model Agents for Oncall?](https://arxiv.org/abs/2607.28545).
+This repo contains the instructions to submit to our [leaderboard](https://hub.harborframework.com/datasets/orca-bench/orca-bench/latest?tab=leaderboard&leaderboard=orca-bench) and reproduce the dataset construction and evaluation in our paper [ORCA-bench: How Ready Are Language Model Agents for Oncall?](https://arxiv.org/abs/2607.28545).
 
 ```bibtex
 @article{gong2026orca,
