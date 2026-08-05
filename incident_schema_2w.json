@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "incident_schema_2w.json",
+  "title": "Incident Record (share-2w)",
+  "description": "Documents an incident injected via a feature flag, including its mechanism and observable symptoms across metrics, logs, traces, and frontend behavior. Applies to the share-2w dataset.",
+  "$comment": "Serialize conforming files with ensure_ascii=False (raw UTF-8) so non-ASCII characters such as → and — are written directly rather than as \\uXXXX escapes. Keeps the human-readable form in the file and makes diffs legible.",
+  "type": "object",
+  "required": ["incident_time", "feature_flag", "mechanism", "symptoms"],
+  "additionalProperties": false,
+  "properties": {
+    "incident_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp (with timezone) when the feature flag was toggled on."
+    },
+    "feature_flag": {
+      "type": "string",
+      "description": "Name of the flagd feature flag that was enabled."
+    },
+    "description": {
+      "type": "string",
+      "description": "Markdown-formatted summary of what the flag does and its user-facing effects."
+    },
+    "mechanism": {
+      "type": "string",
+      "description": "Markdown-formatted explanation of the code path from flag check to user-visible failure, with source file references as markdown links relative to the directory containing rendered markdown (share-2w/solutions/), e.g. [\\`main.go#L485\\`](../../opentelemetry-demo/src/product-catalog/main.go#L485)."
+    },
+    "symptoms": {
+      "type": "object",
+      "description": "Observable symptoms grouped by signal type.",
+      "required": ["metrics", "logs", "frontend", "traces"],
+      "additionalProperties": false,
+      "properties": {
+        "metrics": {
+          "type": "array",
+          "description": "Prometheus metrics that changed (spiked, dropped, flatlined) during the incident.",
+          "items": { "$ref": "#/$defs/metric" }
+        },
+        "logs": {
+          "type": "array",
+          "description": "Log patterns observed in OpenSearch during the incident.",
+          "items": { "$ref": "#/$defs/log" }
+        },
+        "frontend": {
+          "type": "array",
+          "description": "User-perceived symptoms in the frontend — HTTP errors, timeouts, degraded performance, missing/stale content, or visual regressions.",
+          "items": { "$ref": "#/$defs/frontend" }
+        },
+        "traces": {
+          "type": "array",
+          "description": "Distributed trace patterns observed in Jaeger during the incident.",
+          "items": { "$ref": "#/$defs/trace" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "description": "A metric family grouped by base name and exact label set, annotated with a signal layer and one or more variants.",
+      "required": ["metric_family"],
+      "additionalProperties": false,
+      "properties": {
+        "metric_family": {
+          "type": "string",
+          "description": "Base Prometheus metric name with histogram/summary suffixes stripped."
+        },
+        "signal_layer": {
+          "type": "string",
+          "enum": ["root_cause", "propagation", "symptom", "meta", "unknown"],
+          "description": "Causal position of this family in the incident chain."
+        },
+        "defining_labels": {
+          "type": "object",
+          "description": "Label key/value pairs shared by all variants in this family.",
+          "additionalProperties": { "type": "string" }
+        },
+        "variants": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Individual metric variants (e.g. _count, _sum) belonging to this family.",
+          "items": { "$ref": "#/$defs/metricVariant" }
+        }
+      }
+    },
+    "metricVariant": {
+      "type": "object",
+      "required": ["type", "query", "onset_utc"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "How the variant changed during the incident (e.g. created, collapsed, spiked, inconclusive). May include a '(fixed after human verification)' suffix."
+        },
+        "query": {
+          "type": "string",
+          "description": "PromQL query that surfaces this variant."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the variant behavior."
+        },
+        "onset_utc": {
+          "type": ["string", "null"],
+          "description": "UTC timestamp when the variant first deviated from baseline, or null if inconclusive."
+        },
+        "onset_offset_seconds": {
+          "type": ["integer", "null"],
+          "description": "Seconds between the incident time and the onset, or null if inconclusive."
+        },
+        "onset_reasoning": {
+          "type": ["string", "null"],
+          "description": "Explanation of how the onset was determined, or null if inconclusive."
+        }
+      }
+    },
+    "log": {
+      "type": "object",
+      "required": ["representative_attributes"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Short label for the log pattern. For HTTP access logs (e.g. Envoy, which have empty severity), use 'METHOD /path → status_code' (example: 'GET /api/products/OLJCESPC7Z → 500') — no severity suffix. For application logs that carry a non-empty severity, use '{service}: {summary} ({SEVERITY})' where SEVERITY is normalized to the canonical OTel uppercase level (INFO, WARN, ERROR, DEBUG, TRACE, FATAL) regardless of how the SDK serializes severity.text (.NET 'Information' → INFO, 'Warning' → WARN, 'Error' → ERROR; Python 'WARNING' → WARN; Go 'info' → INFO). Examples: 'ad: Feature Flag adManualGc enabled (WARN)', 'Recommendation: Cache Miss (INFO)', 'cart: Wasn''t able to connect to redis (ERROR)'. Omit the ({SEVERITY}) suffix if the log has no meaningful severity."
+        },
+        "description": {
+          "type": "string",
+          "description": "Time range and summary of the log pattern."
+        },
+        "cause": {
+          "type": "string",
+          "description": "Why this log pattern appeared — direct effect or cascading failure."
+        },
+        "source": {
+          "type": "string",
+          "description": "Originating service or log source (e.g. 'frontend-proxy Envoy access logs')."
+        },
+        "representative_attributes": {
+          "type": "object",
+          "description": "Key attributes from a representative log entry. Keys are OpenTelemetry log attribute names.",
+          "required": ["body", "resource.service.name"],
+          "properties": {
+            "body": {
+              "type": "string",
+              "description": "The log record body — the main message text of the log entry."
+            },
+            "resource.service.name": {
+              "type": "string",
+              "description": "OTel resource attribute `service.name` identifying the service that emitted the log."
+            }
+          },
+          "additionalProperties": { "type": "string" }
+        },
+        "log_documents": {
+          "type": "array",
+          "description": "References to specific OpenSearch log documents.",
+          "items": { "$ref": "#/$defs/logDocument" }
+        }
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "required": ["description", "deterministic", "symptom_type"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "What the user sees — the symptom and the affected page / product / flow."
+        },
+        "route": {
+          "type": "string",
+          "description": "The HTTP route, UI page, or user flow affected (e.g. 'GET /api/products/[productId]', 'GET /', 'Cart page')."
+        },
+        "deterministic": {
+          "type": "boolean",
+          "description": "True if the failure always occurs given the trigger condition; false if it depends on a random or conditional factor."
+        },
+        "trigger_condition": {
+          "type": "string",
+          "description": "The user action or system state that causes this failure."
+        },
+        "symptom_type": {
+          "type": "string",
+          "enum": [
+            "http_5xx",
+            "http_4xx",
+            "http_timeout",
+            "slow_response",
+            "visual_degradation",
+            "partial_content",
+            "stale_content"
+          ],
+          "description": "Category of user-perceived symptom. http_5xx = server error response; http_4xx = client error; http_timeout = request hangs past deadline; slow_response = completes but with elevated latency; visual_degradation = page loads but a UI element is missing/broken; partial_content = page loads with some elements failed; stale_content = page loads with outdated/cached data."
+        },
+        "source_file": {
+          "type": "string",
+          "description": "Path (relative to opentelemetry-demo/) to the most relevant source file for this symptom. Optional when the symptom has no single call site."
+        },
+        "source_line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Line number in source_file for the most relevant call site. Optional when the symptom has no single call site."
+        },
+        "calling_service": {
+          "type": "string",
+          "description": "The service whose behavior most directly produces the symptom."
+        },
+        "call_pattern": {
+          "type": "string",
+          "description": "How the affected call or operation is invoked — single call, parallel loop, deep-nested dependency, background retry, etc."
+        },
+        "cause": {
+          "type": "string",
+          "description": "Explanation of how the flag propagates to the user-visible symptom."
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "required": ["call_chain", "smoking_gun"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Short label for the trace pattern (e.g. 'Product Page Cascade')."
+        },
+        "description": {
+          "type": "string",
+          "description": "Time range and summary of the trace pattern."
+        },
+        "cause": {
+          "type": "string",
+          "description": "Why this trace pattern appeared — direct effect or cascading failure."
+        },
+        "call_chain": {
+          "type": "string",
+          "description": "Service-level call chain from root cause to entry point, formatted as 'service:operation → service:operation → ...'."
+        },
+        "smoking_gun": {
+          "type": "array",
+          "description": "Span attributes, events, or logs that definitively tie this trace to the feature flag.",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "trace_documents": {
+          "type": "array",
+          "description": "References to specific Jaeger traces.",
+          "items": { "$ref": "#/$defs/traceDocument" }
+        }
+      }
+    },
+    "logDocument": {
+      "type": "object",
+      "required": ["_id"],
+      "additionalProperties": false,
+      "properties": {
+        "_index": {
+          "type": "string",
+          "description": "OpenSearch index name."
+        },
+        "_id": {
+          "type": "string",
+          "description": "OpenSearch document ID."
+        },
+        "@timestamp": {
+          "type": "string",
+          "description": "Timestamp of the log entry (HH:mm:ss.SSS format)."
+        }
+      }
+    },
+    "traceDocument": {
+      "type": "object",
+      "required": ["traceID"],
+      "additionalProperties": true,
+      "properties": {
+        "traceID": {
+          "type": "string",
+          "description": "Jaeger trace ID (32-character hex string)."
+        },
+        "@timestamp": {
+          "type": "string",
+          "description": "Timestamp of the trace (HH:mm:ss format)."
+        },
+        "user_action": {
+          "type": "string",
+          "description": "Load generator action that initiated this trace (e.g. 'user_browse_product')."
+        }
+      }
+    }
+  }
+}

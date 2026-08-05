@@ -1,0 +1,166 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orca_bench"
+description = ""
+version = "0.0.0"
+requires-python = ">=3.13"
+authors = [
+]
+
+
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "grafana_client",
+    "pandas",
+    "numpy",
+    "plotly",
+    "nbformat",
+    "tenacity",
+    "joblib",
+    "tabulate",
+    "kaleido",
+    "openai",
+    "python-dotenv",
+    "huggingface-hub",
+    "python-slugify",
+    "harbor>=0.20.0",
+    "gradient>=3.10.1",
+    "matplotlib>=3.10.8",
+    "openpyxl>=3.1.5",
+    "scipy>=1.17.1",
+    "natsort>=8.4.0",
+    "pymupdf>=1.27.2.2",
+    "scikit-learn",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit",
+    "black",
+]
+tests = [
+    "pytest",
+    "pytest-cov",
+    "rootutils",
+]
+docs = [
+    "mkdocs==1.6.0",
+    "mkdocs-material==9.5.31",
+    "mkdocstrings[python,shell]==0.25.2",
+    "mkdocs-gen-files==0.5.0",
+    "mkdocs-literate-nav==0.6.1",
+    "mkdocs-section-index==0.3.9",
+    "mkdocs-git-authors-plugin==0.9.0",
+    "mkdocs-git-revision-date-localized-plugin==1.2.6",
+]
+
+# [project.urls] redacted for double-blind review.
+
+[project.scripts]
+harbor-export = "harbor_utils.export_predictions:cli_main"
+
+[tool.ruff]
+
+exclude = [
+    ".git",
+    "__pycache__",
+    "opentelemetry-demo",
+    "opentelemetry.io",
+    "harbor-template",
+    "harbor-template-telemetry-only",
+]
+
+lint.ignore = [
+    "ANN101",
+    "ANN401",
+    "N801",
+    "E203",
+    "E266",
+    "E501",
+    "E741",
+    "N803",
+    "N802",
+    "N806",
+    "D400",
+    "D401",
+    "D104", #temporary
+    "D105",
+    "D415",
+    "D402",
+    "D205",
+    "D100",
+    "D101",
+    "D107",
+    "D203",
+    "D213",
+    "ANN204",
+    "ANN102",
+]
+lint.select = ["D", "E", "F", "N", "ANN"]
+lint.fixable = [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "I",
+    "N",
+    "Q",
+    "S",
+    "T",
+    "W",
+    "ANN",
+    "ARG",
+    "BLE",
+    "COM",
+    "DJ",
+    "DTZ",
+    "EM",
+    "ERA",
+    "EXE",
+    "FBT",
+    "ICN",
+    "INP",
+    "ISC",
+    "NPY",
+    "PD",
+    "PGH",
+    "PIE",
+    "PL",
+    "PT",
+    "PTH",
+    "PYI",
+    "RET",
+    "RSE",
+    "RUF",
+    "SIM",
+    "SLF",
+    "TCH",
+    "TID",
+    "TRY",
+    "UP",
+    "YTT",
+]
+lint.unfixable = []
+
+[tool.pyright]
+venv = ".venv"
+venvPath = "."
+include = ["."]
+exclude = ["opentelemetry-demo", "opentelemetry.io", ".venv"]
+pythonVersion = "3.10.4"
+
+# Source packages live under src/ (currently harbor_utils). The flat collection
+# of scripts at the repo root import these as installed modules.
+[tool.setuptools.packages.find]
+where = ["src"]

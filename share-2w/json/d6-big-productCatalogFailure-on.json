@@ -1,0 +1,488 @@
+{
+  "incident_time": "2026-04-24T17:04:56.642846+00:00",
+  "feature_flag": "productCatalogFailure",
+  "description": "A feature flag made the product-catalog `GetProduct` RPC return gRPC `Internal` whenever the requested SKU was `OLJCESPC7Z`; the frontend (product page, cart enrichment, recommendation enrichment) and the checkout service all call `GetProduct` unguarded, so the single-SKU failure cascaded into HTTP 500s on `/api/products/OLJCESPC7Z`, `/api/cart`, `/api/recommendations`, and `/api/checkout`.",
+  "mechanism": "The feature flag is checked in [`main.go#L485-L495`](../../opentelemetry-demo/src/product-catalog/main.go#L485-L495): `checkProductFailure` queries the OpenFeature/flagd provider for the `productCatalogFailure` flag, but only when the requested product ID is `OLJCESPC7Z`. For any other product ID, the function returns `false` immediately.\n\nWhen the flag is enabled and the product matches ([`main.go#L439-L444`](../../opentelemetry-demo/src/product-catalog/main.go#L439-L444)):\n\n1. The OpenTelemetry span is marked as an error with `span.SetStatus(otelcodes.Error, msg)` — this propagates to the tracing backend (Jaeger)\n2. A span event is added for additional trace detail via `span.AddEvent(msg)`\n3. A gRPC error with `codes.Internal` is returned via `status.Errorf`\n\nThe gRPC framework sends the `Internal` status back to the caller. Upstream services that call `GetProduct` for this product ID receive the error:\n\n- **Frontend** — calls `GetProduct` via [`ProductCatalog.gateway.ts#L17-L19`](../../opentelemetry-demo/src/frontend/gateways/rpc/ProductCatalog.gateway.ts#L17-L19) for product detail pages, cart operations, checkout, and recommendation enrichment. Since the frontend is instrumented with `otelgrpc`, the gRPC error appears in client-side spans.\n- **Checkout service** — calls `GetProduct` per cart item in [`main.go#L519`](../../opentelemetry-demo/src/checkout/main.go#L519). If product `OLJCESPC7Z` is in the cart, checkout fails with `\"failed to get product\"`.\n\nThe recommendation service is **not** directly affected — it calls `ListProducts` ([`recommendation_server.py#L95`](../../opentelemetry-demo/src/recommendation/recommendation_server.py#L95)), not `GetProduct`, so the per-product failure does not trigger. However, the `app_recommendations_counter` metric may still flatline because the frontend enriches recommendation IDs by calling `GetProduct` for each one ([`recommendations.ts#L21`](../../opentelemetry-demo/src/frontend/pages/api/recommendations.ts#L21)), and if `OLJCESPC7Z` is among the recommended products, the frontend request fails.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "rpc_server_duration_milliseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "rpc_grpc_status_code": "13",
+          "rpc_method": "GetProduct",
+          "service_name": "product-catalog"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(rpc_server_duration_milliseconds_count{rpc_method=\"GetProduct\",rpc_grpc_status_code=\"13\",service_name=\"product-catalog\"}[5m])",
+            "description": "gRPC server-side GetProduct calls returning INTERNAL error on product-catalog service, directly caused by the productCatalogFailure feature flag rejecting requests for product OLJCESPC7Z",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "The baseline is consistently 0 from 16:44 through 17:05. The first non-zero value appears at 17:06 (0.00833333), which is the first timestamp after the incident where the metric clearly begins to spike above the zero baseline."
+          },
+          {
+            "type": "spiked",
+            "query": "rate(rpc_server_duration_milliseconds_sum{rpc_method=\"GetProduct\",rpc_grpc_status_code=\"13\",service_name=\"product-catalog\"}[5m])",
+            "description": "Cumulative server-side duration of failed GetProduct INTERNAL calls on product-catalog",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "The metric is flat at 0 for the entire pre-incident period through 17:05. At 17:06 it jumps to 0.00583, the first non-zero value, clearly marking the onset of the spike following the incident at 17:04:56."
+          }
+        ]
+      },
+      {
+        "metric_family": "rpc_server_requests_per_rpc",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "rpc_grpc_status_code": "13",
+          "rpc_method": "GetProduct",
+          "service_name": "product-catalog"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(rpc_server_requests_per_rpc_count{rpc_method=\"GetProduct\",rpc_grpc_status_code=\"13\",service_name=\"product-catalog\"}[5m])",
+            "description": "Server-side requests-per-RPC count for GetProduct INTERNAL errors on product-catalog",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "The baseline is consistently 0 from 16:44 through 17:05. The first non-zero value appears at 17:06 (0.00833333), immediately after the incident time, marking the clear onset of the spike."
+          },
+          {
+            "type": "spiked",
+            "query": "rate(rpc_server_requests_per_rpc_sum{rpc_method=\"GetProduct\",rpc_grpc_status_code=\"13\",service_name=\"product-catalog\"}[5m])",
+            "description": "Server-side requests-per-RPC sum for GetProduct INTERNAL errors on product-catalog",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "The metric is flat at 0 throughout the pre-incident period. The first non-zero value appears at 17:06:00 UTC (0.00833333), which is the first clear rise above the baseline of 0, occurring ~1 minute after the incident injection at 17:04:56 UTC."
+          }
+        ]
+      },
+      {
+        "metric_family": "rpc_client_duration_milliseconds",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "rpc_grpc_status_code": "13",
+          "rpc_method": "GetProduct",
+          "service_name": "checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(rpc_client_duration_milliseconds_count{rpc_method=\"GetProduct\",rpc_grpc_status_code=\"13\",service_name=\"checkout\"}[5m])",
+            "description": "gRPC client-side GetProduct calls returning INTERNAL error as seen by checkout service calling product-catalog",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "The metric is flat at 0 for the entire pre-incident period. The first non-zero value appears at 17:06:00 UTC (~0.00417), approximately 1 minute after the incident time, representing the clear onset of the spike."
+          },
+          {
+            "type": "spiked",
+            "query": "rate(rpc_client_duration_milliseconds_sum{rpc_method=\"GetProduct\",rpc_grpc_status_code=\"13\",service_name=\"checkout\"}[5m])",
+            "description": "Cumulative client-side duration of failed GetProduct INTERNAL calls from checkout to product-catalog",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "Pre-incident baseline is consistently 0. The first non-zero value after the incident time (17:04:56) appears at 17:06:00 with 0.00399278, marking the clear onset of the spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "app_frontend_requests",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "method": "GET",
+          "status": "500",
+          "target": "/api/products/OLJCESPC7Z"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(app_frontend_requests_total{status=\"500\",target=\"/api/products/OLJCESPC7Z\",method=\"GET\"}[5m])",
+            "description": "Frontend app-level counter for GET /api/products/OLJCESPC7Z returning HTTP 500, caused by GetProduct failure for the flagged product",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "The metric is flat at 0 from 16:44 through 17:05 (incident marker). At 17:06 it jumps to ~0.00417, the first non-zero value, clearly marking the start of the spike above the zero baseline."
+          }
+        ]
+      },
+      {
+        "metric_family": "feature_flag_flagd_impression",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "feature_flag_key": "productCatalogFailure",
+          "feature_flag_result_variant": "on"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(feature_flag_flagd_impression_total{feature_flag_key=\"productCatalogFailure\",feature_flag_result_variant=\"on\"}[5m])",
+            "description": "flagd impression counter for productCatalogFailure flag with variant=on incremented at 17:06 UTC, confirming the flag was evaluated as enabled",
+            "onset_utc": "2026-04-24 17:06:00 UTC",
+            "onset_offset_seconds": 63,
+            "onset_reasoning": "The metric is flat at 0 throughout the pre-incident period. The first non-zero value appears at 17:06:00 UTC (0.00416667), which is 1 minute after the incident marker. This is the clear onset of the spike."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "GET /api/products/OLJCESPC7Z → 500",
+        "description": "Between 17:05:06 and 17:14:50 UTC, GET /api/products/OLJCESPC7Z was returning 500 errors.",
+        "cause": "Direct effect of productCatalogFailure flag — only product OLJCESPC7Z fails.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "\"GET /api/products/OLJCESPC7Z HTTP/1.1\" 500 - via_upstream - \"-\" 0 21 7 7 ...",
+          "severity": "",
+          "event.name": "proxy.access",
+          "url.path": "/api/products/OLJCESPC7Z",
+          "upstream.cluster": "frontend",
+          "upstream.host": "172.18.0.27:8080",
+          "user_agent.original": "python-requests/2.32.5",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "KOdzwJ0Br_RFnSwRx4qV",
+            "@timestamp": "17:05:06.131"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "I-d2wJ0Br_RFnSwRb5TG",
+            "@timestamp": "17:08:00.043"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "n-d3wJ0Br_RFnSwRDpZ1",
+            "@timestamp": "17:08:40.620"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "6ed3wJ0Br_RFnSwRvphO",
+            "@timestamp": "17:09:25.711"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "cud4wJ0Br_RFnSwRuJtq",
+            "@timestamp": "17:10:29.363"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "Oed4wJ0Br_RFnSwR85wJ",
+            "@timestamp": "17:10:44.616"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "IOd5wJ0Br_RFnSwRTp2D",
+            "@timestamp": "17:11:08.428"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "xed8wJ0Br_RFnSwRsabY",
+            "@timestamp": "17:14:50.652"
+          }
+        ]
+      },
+      {
+        "name": "GET /api/recommendations → 500",
+        "description": "Between 17:06:25 and 17:13:48 UTC, GET /api/recommendations was returning 500 errors.",
+        "cause": "Cascading failure — the frontend enriches recommendation IDs by calling GetProduct for each one; when OLJCESPC7Z is among the randomly sampled IDs, the Promise.all rejects and the entire recommendations response fails. Various product IDs appear in the URL because the frontend fetches recommendations on different product pages.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "\"GET /api/recommendations?productIds={product_id} HTTP/1.1\" 500 - via_upstream - \"-\" 0 21 ...",
+          "severity": "",
+          "event.name": "proxy.access",
+          "url.path": "/api/recommendations?productIds={product_id}",
+          "upstream.cluster": "frontend",
+          "upstream.host": "172.18.0.27:8080",
+          "user_agent.original": "python-requests/2.32.5",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "oOd1wJ0Br_RFnSwRAI5Z",
+            "@timestamp": "17:06:25.668"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "bOd2wJ0Br_RFnSwRM5Oh",
+            "@timestamp": "17:07:45.085"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "0ud2wJ0Br_RFnSwRUpPj",
+            "@timestamp": "17:07:53.138"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "s-d2wJ0Br_RFnSwRpJT4",
+            "@timestamp": "17:08:13.569"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "MOd2wJ0Br_RFnSwRyJUY",
+            "@timestamp": "17:08:22.286"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "7ed5wJ0Br_RFnSwRZJ1d",
+            "@timestamp": "17:11:14.185"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "ROd6wJ0Br_RFnSwRP6Ac",
+            "@timestamp": "17:12:09.535"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "Q-d7wJ0Br_RFnSwRBKIW",
+            "@timestamp": "17:13:00.530"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "Ved7wJ0Br_RFnSwRbaOW",
+            "@timestamp": "17:13:27.203"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "Xed7wJ0Br_RFnSwRrqRn",
+            "@timestamp": "17:13:43.318"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "jud7wJ0Br_RFnSwRvqQK",
+            "@timestamp": "17:13:48.062"
+          }
+        ]
+      },
+      {
+        "name": "POST /api/checkout → 500",
+        "description": "Between 17:05:06 and 17:10:29 UTC, POST /api/checkout was returning 500 errors.",
+        "cause": "Cascading failure — the checkout service calls GetProduct for each cart item in prepOrderItems (checkout/main.go:519). When OLJCESPC7Z is in the cart, that call returns codes.Internal, causing PlaceOrder to fail with 'failed to get product #OLJCESPC7Z', which propagates back to the frontend as a 500.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "\"POST /api/checkout HTTP/1.1\" 500 - via_upstream - \"-\" 395 21 28 27 ...",
+          "severity": "",
+          "event.name": "proxy.access",
+          "url.path": "/api/checkout",
+          "upstream.cluster": "frontend",
+          "upstream.host": "172.18.0.27:8080",
+          "user_agent.original": "python-requests/2.32.5",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "LOdzwJ0Br_RFnSwRx4qV",
+            "@timestamp": "17:05:06.186"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "eOd4wJ0Br_RFnSwRuJtq",
+            "@timestamp": "17:10:29.468"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "Product page for National Park Foundation Explorascope (OLJCESPC7Z) returns 500 and does not show product information.",
+        "route": "GET /api/products/[productId]",
+        "deterministic": true,
+        "trigger_condition": "User browses product OLJCESPC7Z.",
+        "source_file": "src/frontend/pages/api/products/[productId]/index.ts",
+        "source_line": 15,
+        "calling_service": "frontend",
+        "call_pattern": "Single direct call: ProductCatalogService.getProduct(productId) → ProductCatalogGateway.getProduct(id) → gRPC GetProduct.",
+        "cause": "The frontend API route calls GetProduct for the requested product ID. When the flag is on and the ID is OLJCESPC7Z, the product-catalog service returns codes.Internal, and the unhandled gRPC error propagates as a 500.",
+        "symptom_type": "http_5xx"
+      },
+      {
+        "description": "Cart page returns 500 and shows an empty or broken shopping cart once OLJCESPC7Z has been added. Because POST /api/cart (add-to-cart) succeeds without calling GetProduct, the item enters the cart silently; all subsequent cart views and checkouts then fail until the cart is cleared, even for other products.",
+        "route": "GET /api/cart",
+        "deterministic": true,
+        "trigger_condition": "User views cart while product OLJCESPC7Z is in it.",
+        "source_file": "src/frontend/pages/api/cart.ts",
+        "source_line": 21,
+        "calling_service": "frontend",
+        "call_pattern": "Promise.all loop over cart items: items.map(({ productId }) => ProductCatalogService.getProduct(productId)). One rejection (OLJCESPC7Z) fails the entire Promise.all.",
+        "cause": "The GET /api/cart handler enriches each cart item by calling GetProduct. If OLJCESPC7Z is in the cart, that call returns codes.Internal, the Promise.all rejects, and the entire cart response is a 500. Note: POST /api/cart (add-to-cart) does NOT call GetProduct — it only calls CartGateway.addItem — so the item is successfully added but the subsequent cart page render fails.",
+        "symptom_type": "http_5xx"
+      },
+      {
+        "description": "Checkout returns 500 with 'failed to get product OLJCESPC7Z' whenever OLJCESPC7Z is in the cart — not just when checking out the Explorascope itself.",
+        "route": "POST /api/checkout",
+        "deterministic": true,
+        "trigger_condition": "User checks out with product OLJCESPC7Z in cart.",
+        "source_file": "src/checkout/main.go",
+        "source_line": 519,
+        "calling_service": "checkout",
+        "call_pattern": "Sequential loop in prepOrderItems: for each cart item, calls cs.productCatalogSvcClient.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId()}). Fails on OLJCESPC7Z and returns early.",
+        "cause": "The checkout service iterates cart items to look up prices. GetProduct for OLJCESPC7Z returns codes.Internal, causing prepOrderItems to return 'failed to get product #OLJCESPC7Z', which propagates through PlaceOrder back to the frontend as a 500.",
+        "symptom_type": "http_5xx"
+      },
+      {
+        "description": "Recommendations section on product pages occasionally returns 500 instead of showing related products when OLJCESPC7Z is in the recommended set.",
+        "route": "GET /api/recommendations",
+        "deterministic": false,
+        "trigger_condition": "OLJCESPC7Z is randomly selected by the recommendation service (random.sample in recommendation_server.py:107) as one of the recommended products.",
+        "source_file": "src/frontend/pages/api/recommendations.ts",
+        "source_line": 21,
+        "calling_service": "frontend",
+        "call_pattern": "Promise.all over recommended IDs: productList.slice(0, 4).map(id => ProductCatalogService.getProduct(id)). If OLJCESPC7Z is among the up-to-4 IDs, the Promise.all rejects.",
+        "cause": "The recommendation service itself calls ListProducts (recommendation_server.py:95), not GetProduct, so it is unaffected by the flag. But the frontend enriches the returned IDs by calling GetProduct for each one. When OLJCESPC7Z is in the random sample, the enrichment fails and the entire recommendations response is a 500.",
+        "symptom_type": "http_5xx"
+      }
+    ],
+    "traces": [
+      {
+        "name": "Product Page Cascade",
+        "description": "Between 17:05:06 and 17:14:50 UTC, 8 traces show GetProduct failing for OLJCESPC7Z and cascading through the product page path.",
+        "cause": "Direct effect of productCatalogFailure flag — GetProduct for OLJCESPC7Z returns codes.Internal. User actions: user_add_to_cart (4), user_browse_product (4). The add-to-cart flow fetches the product page first, so the cascade is identical.",
+        "call_chain": "product-catalog:GetProduct → frontend:GetProduct → frontend:executing api route /api/products/[productId]/index → frontend:GET /api/products/[productId]/index → frontend:GET /api/products/{productId} → frontend-proxy:router frontend egress → frontend-proxy:GET → load-generator:GET",
+        "smoking_gun": [
+          "product-catalog:GetProduct span log: feature_flag.key=productCatalogFailure, feature_flag.result.variant=on",
+          "product-catalog:GetProduct span event: \"Error: Product Catalog Fail Feature Flag Enabled\"",
+          "frontend:executing api route exception: \"13 INTERNAL: Error: Product Catalog Fail Feature Flag Enabled\""
+        ],
+        "trace_documents": [
+          {
+            "traceID": "6ce51041034225150eddbb7e8526adbf",
+            "@timestamp": "17:14:50",
+            "user_action": "user_add_to_cart"
+          },
+          {
+            "traceID": "0b56f1396e72f434f763b3d589f31295",
+            "@timestamp": "17:11:08",
+            "user_action": "user_browse_product"
+          },
+          {
+            "traceID": "7191fbb09e8dfc32f243f4e459755fdc",
+            "@timestamp": "17:10:44",
+            "user_action": "user_browse_product"
+          },
+          {
+            "traceID": "16098330003b5f0e2ca629015f461f07",
+            "@timestamp": "17:10:29",
+            "user_action": "user_add_to_cart"
+          },
+          {
+            "traceID": "7a3ff09919c0465a7f3f83ef6bca7032",
+            "@timestamp": "17:09:25",
+            "user_action": "user_browse_product"
+          },
+          {
+            "traceID": "e86718e291760196a671b79833935e49",
+            "@timestamp": "17:08:40",
+            "user_action": "user_add_to_cart"
+          },
+          {
+            "traceID": "b46a5fc8ca103a6f0ce8ff4209f8b35a",
+            "@timestamp": "17:08:00",
+            "user_action": "user_browse_product"
+          },
+          {
+            "traceID": "779d73e385039bb85fe3c03964f63d95",
+            "@timestamp": "17:05:06",
+            "user_action": "user_add_to_cart"
+          }
+        ]
+      },
+      {
+        "name": "Recommendations Cascade",
+        "description": "Between 17:06:25 and 17:13:48 UTC, 11 traces show GetProduct failing for OLJCESPC7Z and cascading through the recommendations path.",
+        "cause": "The frontend enriches recommendation IDs by calling GetProduct for each one; when OLJCESPC7Z is among the randomly sampled IDs, the Promise.all rejects and the entire recommendations response fails.",
+        "call_chain": "product-catalog:GetProduct → frontend:GetProduct → frontend:executing api route /api/recommendations → frontend:GET /api/recommendations → frontend:GET /api/recommendations → frontend-proxy:router frontend egress → frontend-proxy:GET → load-generator:GET",
+        "smoking_gun": [
+          "product-catalog:GetProduct span log: feature_flag.key=productCatalogFailure, feature_flag.result.variant=on",
+          "product-catalog:GetProduct span event: \"Error: Product Catalog Fail Feature Flag Enabled\"",
+          "frontend:executing api route exception: \"13 INTERNAL: Error: Product Catalog Fail Feature Flag Enabled\""
+        ],
+        "trace_documents": [
+          {
+            "traceID": "d2a389794f76ff29dd893a88985c5555",
+            "@timestamp": "17:13:48",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "f4e1d6fb65d0c84b8975199f9669ada2",
+            "@timestamp": "17:13:43",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "6f9a6db62f00608e2266606039d84593",
+            "@timestamp": "17:13:27",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "5c3dcb6c1ff4363f1adeb1ea397f300a",
+            "@timestamp": "17:13:00",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "84a54753926052bdf1cedbe0caf0f912",
+            "@timestamp": "17:12:09",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "2784d242bee982579a04c52bee198064",
+            "@timestamp": "17:11:14",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "e69365872fa033f047b81f7177941658",
+            "@timestamp": "17:08:22",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "d989833385f30abc7b79aef1cad45baf",
+            "@timestamp": "17:08:13",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "ce313982297cb067dd303d5d96be1666",
+            "@timestamp": "17:07:53",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "02d50c18685a5ae18266cce739e28cf4",
+            "@timestamp": "17:07:45",
+            "user_action": "user_get_recommendations"
+          },
+          {
+            "traceID": "889b09ba30950beed616b7debb860db7",
+            "@timestamp": "17:06:25",
+            "user_action": "user_get_recommendations"
+          }
+        ]
+      },
+      {
+        "name": "Checkout Cascade",
+        "description": "Between 17:05:06 and 17:10:29 UTC, 2 traces show GetProduct failing for OLJCESPC7Z and cascading through the checkout path.",
+        "cause": "The checkout service calls GetProduct during prepareOrderItemsAndShippingQuoteFromCart. The extra hop through checkout:GetProduct → checkout:PlaceOrder distinguishes this from the other clusters.",
+        "call_chain": "product-catalog:GetProduct → checkout:GetProduct → checkout:PlaceOrder → frontend:PlaceOrder → frontend:executing api route /api/checkout → frontend:POST /api/checkout → frontend:POST /api/checkout → frontend-proxy:router frontend egress → frontend-proxy:POST → load-generator:POST",
+        "smoking_gun": [
+          "product-catalog:GetProduct span log: feature_flag.key=productCatalogFailure, feature_flag.result.variant=on",
+          "product-catalog:GetProduct span event: \"Error: Product Catalog Fail Feature Flag Enabled\"",
+          "frontend:executing api route exception: \"13 INTERNAL: failed to prepare order: failed to get product #\\\"OLJCESPC7Z\\\"\""
+        ],
+        "trace_documents": [
+          {
+            "traceID": "5b6f061d4a0ad7c85f49468a620c12cc",
+            "@timestamp": "17:10:29",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "2f944b962e04693dfead03e96eb54973",
+            "@timestamp": "17:05:06",
+            "user_action": "user_checkout_multi"
+          }
+        ]
+      }
+    ]
+  }
+}

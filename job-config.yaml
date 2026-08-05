@@ -1,0 +1,92 @@
+# Harbor job config for ORCA-bench leaderboard runs.
+#
+# This is the config a leaderboard submission should be produced with. It runs
+# the ORCA-bench dataset as published on the Harbor Hub — the version CI pins
+# and validates against. (configs/harbor_job_orca_bench.yaml is the local-dev
+# equivalent, sourcing tasks from the HuggingFace registry instead; trials from
+# it carry a different source and are filtered out of submissions.)
+#
+# Full harbor-template environment (telemetry + code). Run with:
+#
+#   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
+#       ./run_harbor_cached.sh -c job-config.yaml \
+#         --ve OPENAI_API_KEY="$OPENAI_API_KEY" \
+#         --upload --public
+#
+# REQUIRED for a submission:
+#   --upload --public   the leaderboard reads trials from the hub, and CI needs
+#                       them publicly readable.
+#   --ve OPENAI_API_KEY the verifier (check_prediction.py) is an LLM judge and
+#                       crashes without it. Add --ve OPENAI_BASE_URL=... if your
+#                       provider needs a custom endpoint. Never put keys in this
+#                       file. Unlike some benchmarks the judge model and effort
+#                       are baked into the task content, so there is nothing to
+#                       configure and nothing that can drift between runs.
+#
+# SNAPSHOT_CACHE_HOST_DIR is exported by run_harbor_cached.sh after staging
+# the snapshot image to a host-side cache. It propagates to the agent
+# container via the harbor process env -> docker-compose subprocess env ->
+# the task's docker-compose.yaml `${SNAPSHOT_CACHE_HOST_DIR:-}` passthrough
+# (no JobConfig.environment.env entry needed; that would inject a literal
+# `${...}` template since job-level env doesn't pass through resolve_env_vars).
+# The harbor-template entrypoint requires this var to be set; running plain
+# `harbor run` (without the wrapper) will fail fast with a clear error.
+
+# job_name: orca-bench
+jobs_dir: jobs
+
+# REQUIRED for a leaderboard submission: a timeout multiplier of exactly 1.0.
+# CI also rejects any agent/verifier timeout override or resource override —
+# those are what would make a score incomparable.
+timeout_multiplier: 1.0
+
+# Trials per task. MIN_TRIALS_PER_TASK in leaderboard/ci/static_analysis.py is
+# the floor CI enforces; raising this tightens the error bars (and switches the
+# ± SE column from the between-task to the within-task estimator).
+n_attempts: 1
+
+# OPTIONAL: concurrency. Each trial runs a privileged docker-in-docker
+# otel-demo stack, so this is bounded by host resources, not model rate limits.
+n_concurrent_trials: 30
+
+# The reference agents. Override on the CLI with -a/-m to submit your own.
+agents:
+  - name: terminus-2
+    model_name: gradient_ai/anthropic-claude-4.6-sonnet
+    kwargs:
+      temperature: 1
+      reasoning_effort: "medium"
+      llm_kwargs:
+        max_tokens: 16384
+  - name: terminus-2
+    model_name: gradient_ai/anthropic-claude-opus-4.7
+    kwargs:
+      temperature: 1
+      reasoning_effort: "medium"
+      llm_kwargs:
+        max_tokens: 16384
+  - name: terminus-2
+    model_name: gradient_ai/openai-gpt-5.5
+    kwargs:
+      temperature: 1
+      reasoning_effort: "medium"
+      llm_kwargs:
+        max_tokens: 16384
+  - name: terminus-2
+    model_name: gradient_ai/glm-5
+    kwargs:
+      temperature: 1
+      llm_kwargs:
+        max_tokens: 16384
+  - name: terminus-2
+    model_name: gradient_ai/deepseek-v4-pro
+    kwargs:
+      temperature: 1
+      llm_kwargs:
+        max_tokens: 16384
+
+# REQUIRED: the dataset this leaderboard tracks, as published on the Harbor
+# Hub. Keep in lockstep with DATASET in leaderboard/src/leaderboard/core/hub.py.
+datasets:
+  - name: orca-bench/orca-bench
+    version: latest

@@ -1,0 +1,7 @@
+[submodule "opentelemetry-demo"]
+	path = opentelemetry-demo
+	url = https://github.com/open-telemetry/opentelemetry-demo.git
+	branch = main
+[submodule "opentelemetry.io"]
+	path = opentelemetry.io
+	url = https://github.com/open-telemetry/opentelemetry.io.git

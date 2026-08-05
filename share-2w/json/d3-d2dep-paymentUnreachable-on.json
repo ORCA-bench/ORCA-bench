@@ -1,0 +1,250 @@
+{
+  "incident_time": "2026-04-21T21:16:26.836862+00:00",
+  "feature_flag": "paymentUnreachable",
+  "description": "A feature flag read in the checkout service's `chargeCard` rebuilt the payment gRPC client against the unresolvable host `badAddress:50051`; the subsequent `paymentService.Charge()` failed DNS lookup and returned gRPC `Unavailable`, `PlaceOrder` returned `codes.Internal`, and the frontend surfaced HTTP 500s on `POST /api/checkout`.",
+  "mechanism": "The flag is read in the checkout service's `chargeCard` function at [`main.go#L546`](../../opentelemetry-demo/src/checkout/main.go#L546). When enabled, it replaces the payment service client with one pointing to `badAddress:50051`, causing a DNS lookup failure. The checkout service creates a new gRPC client to this bad address at [`main.go#L547-549`](../../opentelemetry-demo/src/checkout/main.go#L547-L549), so the subsequent `paymentService.Charge()` call at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552) fails with a gRPC `Unavailable` status.\n\nThe call chain is:\n\n1. **[`main.go#L546`](../../opentelemetry-demo/src/checkout/main.go#L546)** — `chargeCard` checks the `paymentUnreachable` feature flag.\n2. **[`main.go#L547-549`](../../opentelemetry-demo/src/checkout/main.go#L547-L549)** — If enabled, creates a new gRPC client pointing to `badAddress:50051`.\n3. **[`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552)** — `paymentService.Charge()` fails because DNS cannot resolve `badAddress`.\n4. **[`main.go#L333-335`](../../opentelemetry-demo/src/checkout/main.go#L333-L335)** — `PlaceOrder` calls `cs.chargeCard()` and returns `codes.Internal` on failure.\n5. **Frontend** — Surfaces the error as an HTTP 500 when the user clicks \"Place Order\".",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "container_cpu_usage_nanoseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_cpu_usage_nanoseconds_total{container_name=\"checkout\"}[5m])",
+            "description": "Checkout container total CPU usage rate spiked from ~2.3M to ~7.9M nanoseconds/sec (~245% increase) due to repeated gRPC dial attempts and DNS lookups to the unreachable badAddress:50051",
+            "onset_utc": "2026-04-21 21:19:00 UTC",
+            "onset_offset_seconds": 153,
+            "onset_reasoning": "Pre-incident baseline fluctuates roughly between 2.0e6 and 2.7e6. After the incident at 21:16, the first two minutes (21:17–21:18) remain within that normal range (~2.28e6, ~2.32e6). At 21:19 the value jumps to 2.80e6, clearly breaking above the prior ceiling, and continues climbing steadily to ~5.86e6 by 21:36. This marks the clear onset of the sustained spike."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_cpu_usage_usermode_nanoseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(container_cpu_usage_usermode_nanoseconds_total{container_name=\"checkout\"}[5m])",
+            "description": "Checkout container usermode CPU usage rate spiked from ~1.9M to ~6.8M nanoseconds/sec (~262% increase), reflecting the application-level gRPC client retry logic consuming CPU as it repeatedly tries to reach the bogus payment address",
+            "onset_utc": "2026-04-21 21:19:00 UTC",
+            "onset_offset_seconds": 153,
+            "onset_reasoning": "Pre-incident baseline fluctuates roughly between 1.55e6 and 2.05e6. After the incident at 21:16, the value at 21:19 (2.30e6) is the first point that decisively breaks above the prior baseline ceiling and the series continues climbing from there without returning."
+          }
+        ]
+      },
+      {
+        "metric_family": "dotnet_exceptions",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "error_type": "ArgumentOutOfRangeException",
+          "job": "opentelemetry-demo/accounting"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(dotnet_exceptions_total{job=\"opentelemetry-demo/accounting\", error_type=\"ArgumentOutOfRangeException\"}[5m])",
+            "description": "Accounting service ArgumentOutOfRangeException rate collapsed from ~0.049/s to 0. These exceptions were thrown during order-message processing; with no new orders arriving via Kafka, the code path that triggers them is no longer exercised.",
+            "onset_utc": "2026-04-21 21:19:00 UTC",
+            "onset_offset_seconds": 153,
+            "onset_reasoning": "The pre-incident pattern shows low-level oscillating exception activity (values typically 0.0125–0.0625). After the incident at 21:16, the signal continues briefly at ~0.0125 through 21:19. At 21:20 the value drops to 0 and remains flat at 0 for the rest of the series, never recovering. The last non-trivial value is at 21:19, marking the onset of collapse."
+          }
+        ]
+      },
+      {
+        "metric_family": "app_frontend_requests",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "status": "500",
+          "target": "/api/checkout"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(app_frontend_requests_total{target=\"/api/checkout\",status=\"500\"}[5m])",
+            "description": "Frontend /api/checkout requests returning HTTP 500 increased because all checkout attempts now fail. Previously only a fraction failed (from paymentFailure flag); now 100% fail due to paymentUnreachable.",
+            "onset_utc": "2026-04-21 21:19:00 UTC",
+            "onset_offset_seconds": 153,
+            "onset_reasoning": "Pre-incident baseline fluctuates roughly between 0.004-0.021. After the incident at 21:16, the value at 21:19 (0.025) is the first timestamp that clearly rises above the prior baseline range and stays elevated (0.025-0.037) for the remainder of the series."
+          }
+        ]
+      },
+      {
+        "metric_family": "otlp_exporter_exported",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "service_name": "fraud-detection",
+          "success": "true",
+          "type": "span"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(otlp_exporter_exported_total{service_name=\"fraud-detection\",type=\"span\",success=\"true\"}[5m])",
+            "description": "Fraud-detection OTLP exporter exported span count collapsed ~82%. With near-zero spans being processed, the OTLP exporter has almost nothing to export.",
+            "onset_utc": "2026-04-21 21:15:00 UTC",
+            "onset_offset_seconds": -86,
+            "onset_reasoning": "Pre-incident the metric oscillates with values typically between 0.008-0.042. At 21:15 the value is 0.0125, then at 21:16 (incident time) it drops to 0. After that the signal is nearly dead — brief tiny blips of 0.00417 but predominantly zero. The last timestamp showing the pre-incident active pattern is 21:15, after which the signal collapses."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "POST /api/checkout → 500",
+        "description": "Between 21:17:14 and 21:25:35 UTC, 10 POST /api/checkout requests returned HTTP 500 with a 21-byte error response body. The DNS lookup for badAddress fails on the checkout service, so the payment service is never contacted.",
+        "cause": "Direct effect of paymentUnreachable flag — checkout service's chargeCard redirects payment gRPC calls to badAddress:50051 instead of the real payment service (src/checkout/main.go:546-549), causing a DNS lookup failure. The checkout service wraps this as \"could not charge the card\" (main.go:555-556) and returns gRPC Internal (main.go:334-335), which the frontend proxies as HTTP 500.",
+        "source": "frontend-proxy Envoy access logs",
+        "representative_attributes": {
+          "body": "[2026-04-21T21:17:14.661Z] \"POST /api/checkout HTTP/1.1\" 500 - via_upstream - \"-\" 386 21 27 26 \"-\" \"python-requests/2.32.5\" \"e88fdae8-787a-918f-8a1c-4a8969f54782\" \"frontend-proxy:8080\" \"172.18.0.27:8080\" frontend 172.18.0.29:50998 172.18.0.29:8080 172.18.0.28:42912 - -",
+          "severity": "",
+          "event.name": "proxy.access",
+          "url.path": "/api/checkout",
+          "url.full": "http://frontend-proxy:8080/api/checkout",
+          "upstream.cluster": "frontend",
+          "upstream.host": "172.18.0.27:8080",
+          "user_agent.original": "python-requests/2.32.5",
+          "resource.service.name": "frontend-proxy",
+          "resource.log_name": "otel_envoy_access_log"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "1LTnsZ0Br_RFnSwRjicg",
+            "@timestamp": "21:17:14.661"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "tbTqsZ0Br_RFnSwRSjD6",
+            "@timestamp": "21:20:14.561"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "3LTssZ0Br_RFnSwRCjW4",
+            "@timestamp": "21:22:08.876"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "dbTssZ0Br_RFnSwRHzba",
+            "@timestamp": "21:22:14.240"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "0rTssZ0Br_RFnSwROzYu",
+            "@timestamp": "21:22:21.393"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "tLTtsZ0Br_RFnSwRVDl7",
+            "@timestamp": "21:23:33.539"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "jLTusZ0Br_RFnSwROTxp",
+            "@timestamp": "21:24:32.477"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "KbTusZ0Br_RFnSwRST0M",
+            "@timestamp": "21:24:36.481"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "ALTusZ0Br_RFnSwRxz-k",
+            "@timestamp": "21:25:09.078"
+          },
+          {
+            "_index": "otel-logs-2026-04-21",
+            "_id": "g7TvsZ0Br_RFnSwRMUAg",
+            "@timestamp": "21:25:35.407"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "Clicking \"Place Order\" on the cart page returns an error — the user remains on the cart page and never reaches the order confirmation. Unlike cartFailure (which hangs for ~15 seconds), the failure is fast (~50 ms) because the DNS lookup for badAddress fails immediately. No payment is charged, no items are shipped, and the cart is not emptied.",
+        "route": "POST /api/checkout",
+        "deterministic": true,
+        "trigger_condition": "User clicks \"Place Order\" on the cart page while paymentUnreachable is enabled.",
+        "source_file": "src/checkout/main.go",
+        "source_line": 333,
+        "calling_service": "checkout",
+        "call_pattern": "Sequential call within PlaceOrder: [`main.go#L333`](../../opentelemetry-demo/src/checkout/main.go#L333) calls `cs.chargeCard(ctx, total, req.CreditCard)`, which internally creates a gRPC client to `badAddress:50051` at [`main.go#L547-549`](../../opentelemetry-demo/src/checkout/main.go#L547-L549) and calls `paymentService.Charge()` at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552). The charge fails before shipping or cart cleanup.",
+        "cause": "The frontend API route [`checkout.ts#L18`](../../opentelemetry-demo/src/frontend/pages/api/checkout.ts#L18) calls `CheckoutGateway.placeOrder`, which invokes the checkout service's `PlaceOrder` gRPC. `PlaceOrder` calls `cs.chargeCard` at [`main.go#L333`](../../opentelemetry-demo/src/checkout/main.go#L333). With paymentUnreachable enabled, `chargeCard` ([`main.go#L546`](../../opentelemetry-demo/src/checkout/main.go#L546)) creates a new gRPC client pointing to `badAddress:50051` and calls `paymentService.Charge()` at [`main.go#L552`](../../opentelemetry-demo/src/checkout/main.go#L552). DNS cannot resolve `badAddress`, returning gRPC `Unavailable`. `chargeCard` wraps this as `\"could not charge the card\"` ([`main.go#L556`](../../opentelemetry-demo/src/checkout/main.go#L556)), and `PlaceOrder` returns `codes.Internal` (`\"failed to charge card\"`) at [`main.go#L335`](../../opentelemetry-demo/src/checkout/main.go#L335). The frontend surfaces the gRPC error as HTTP 500. In `CartDetail.tsx`, the `await placeOrder(...)` at [`CartDetail.tsx#L38`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L38) rejects, so `push` to the confirmation page at [`CartDetail.tsx#L57`](../../opentelemetry-demo/src/frontend/components/Cart/CartDetail.tsx#L57) never executes.",
+        "symptom_type": "http_5xx"
+      }
+    ],
+    "traces": [
+      {
+        "name": "Checkout Payment Unreachable Cascade",
+        "description": "Between 21:17:14 and 21:25:35 UTC, 10 traces show checkout failing to reach the payment service due to DNS resolution failure at badAddress:50051, cascading through the checkout path as HTTP 500.",
+        "cause": "Direct effect of paymentUnreachable flag — checkout service's chargeCard creates a gRPC client pointing at badAddress:50051 instead of the real payment service (src/checkout/main.go:546-549). DNS lookup fails with 'server misbehaving', returning gRPC Unavailable. The payment service never receives the request.",
+        "call_chain": "checkout:oteldemo.PaymentService/Charge → checkout:oteldemo.CheckoutService/PlaceOrder → frontend:oteldemo.CheckoutService/PlaceOrder → frontend:executing api route (pages) /api/checkout → frontend:POST /api/checkout → frontend:POST /api/checkout → frontend-proxy:router frontend egress → frontend-proxy:POST → load-generator:POST",
+        "smoking_gun": [
+          "checkout:PlaceOrder span log: feature_flag.key=paymentUnreachable, feature_flag.result.variant=on",
+          "checkout:PaymentService/Charge span: otel.status_code=ERROR, otel.status_description=\"dns: A record lookup error: lookup badAddress on 127.0.0.11:53: server misbehaving\", rpc.grpc.status_code=Unavailable",
+          "payment service absent from trace processes — request never reaches the payment service"
+        ],
+        "trace_documents": [
+          {
+            "traceID": "f9aa06a16e48e546476c4b8bdea1bcef",
+            "@timestamp": "21:17:14",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "0014246b6f2375b939d58268e602716a",
+            "@timestamp": "21:20:14",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "cb3f8b2e70f2f44328339dd4584bb0a4",
+            "@timestamp": "21:22:08",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "e9f1860b4d10ef0cf1e195f4a833f507",
+            "@timestamp": "21:22:14",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "a4673653b956af68b29c2a8e9346a4cf",
+            "@timestamp": "21:22:21",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "57dab6aa93b250fe545258e0208e72c0",
+            "@timestamp": "21:23:33",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "21385404497a1f1ced3058d99135cd04",
+            "@timestamp": "21:24:32",
+            "user_action": "user_checkout_multi"
+          },
+          {
+            "traceID": "1ca1246629c500c8ac50c87122774392",
+            "@timestamp": "21:24:36",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "832e60599ed2c49718c1e250a78ad744",
+            "@timestamp": "21:25:09",
+            "user_action": "user_checkout_single"
+          },
+          {
+            "traceID": "e0234e130343ef5567ea626f40330e97",
+            "@timestamp": "21:25:35",
+            "user_action": "user_checkout_multi"
+          }
+        ]
+      }
+    ]
+  }
+}

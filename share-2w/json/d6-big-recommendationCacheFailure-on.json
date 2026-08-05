@@ -1,0 +1,304 @@
+{
+  "incident_time": "2026-04-24T17:20:00.552300+00:00",
+  "feature_flag": "recommendationCacheFailure",
+  "description": "A feature flag in the recommendation service rerouted its cache-miss path to call product-catalog `GetProduct` with an empty request proto (no product ID) instead of `ListProducts`; the catalog returned gRPC `NOT_FOUND`, which was not caught in `get_product_list`, so `ListRecommendations` failed with gRPC `UNKNOWN` and the frontend surfaced HTTP 500s on `/api/recommendations`, while the catalog-hit branch returned an empty list (because `cached_ids` was never populated) which the frontend rendered as `partial_content`.",
+  "mechanism": "The flag is read in at [`recommendation_server.py#L78`](../../opentelemetry-demo/src/recommendation/recommendation_server.py#L78). When the flag is enabled, on every call the code branches into the cache-failure path: with probability 0.5 (and always on the first call, since `first_run=True`), it logs `get_product_list: cache miss` and then calls `GetProduct` with `demo_pb2.Empty()` (no product ID) at [`recommendation_server.py#L84`](../../opentelemetry-demo/src/recommendation/recommendation_server.py#L84). The product-catalog server fails to look up an empty ID at [`main.go#L448`](../../opentelemetry-demo/src/product-catalog/main.go#L448) and returns `StatusCode.NOT_FOUND` with message `Product Not Found: `. The exception propagates out of `get_product_list` (lines 85-87 never execute), through `ListRecommendations` at [`recommendation_server.py#L44`](../../opentelemetry-demo/src/recommendation/recommendation_server.py#L44), and the frontend's gRPC client receives `StatusCode.UNKNOWN`, which the `/api/recommendations` route converts to HTTP 500. On the cache-hit branch (probability 0.5, never on the first call), the code returns the global `cached_ids` at [`recommendation_server.py#L92`](../../opentelemetry-demo/src/recommendation/recommendation_server.py#L92), but `cached_ids` is permanently `[]` because every preceding cache-miss attempt fails on line 84 before reaching the assignment on line 86. `ListRecommendations` therefore returns zero product IDs and the frontend renders an empty recommendations section.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "rpc_server_duration_milliseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "rpc_grpc_status_code": "0",
+          "rpc_method": "ListProducts",
+          "service_name": "product-catalog"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(rpc_server_duration_milliseconds_count{service_name=\"product-catalog\", rpc_method=\"ListProducts\", rpc_grpc_status_code=\"0\"}[5m])",
+            "description": "Product-catalog ListProducts successful call rate dropped from ~0.025-0.04/s to zero after 17:25 UTC. Normally the recommendation service calls ListProducts to fetch the product catalog, but with recommendationCacheFailure enabled, the code branches into the cache-failure path which calls GetProduct(Empty()) instead, so ListProducts is no longer invoked by the recommendation service.",
+            "onset_utc": "2026-04-24 17:20:00 UTC",
+            "onset_offset_seconds": 0,
+            "onset_reasoning": "The pre-incident baseline oscillates between ~0.02-0.04. At 17:20 (the incident time), the value drops to 0.0167 and then progressively declines to zero by 17:25, never recovering. The gradual decline from 17:20-17:25 is an artifact of the 5m rate window emptying out. The last timestamp with genuine pre-incident activity is effectively 17:19 (0.025), and the collapse begins at 17:20 when successful ListProducts RPCs cease."
+          }
+        ]
+      },
+      {
+        "metric_family": "traces_span_metrics_duration_milliseconds",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "service_name": "recommendation",
+          "span_name": "oteldemo.ProductCatalogService/ListProducts",
+          "status_code": "STATUS_CODE_UNSET"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(traces_span_metrics_duration_milliseconds_count{service_name=\"recommendation\",span_name=\"oteldemo.ProductCatalogService/ListProducts\",status_code=\"STATUS_CODE_UNSET\"}[5m])",
+            "description": "Span-derived duration sample count for recommendation service's ListProducts calls. Collapsed from ~0.03/s to zero alongside the calls_total, confirming the normal ListProducts RPC path is completely abandoned.",
+            "onset_utc": "2026-04-24 17:20:00 UTC",
+            "onset_offset_seconds": 0,
+            "onset_reasoning": "Pre-incident values oscillate between ~0.02-0.04. At 17:20 the value drops to 0.0167, below the pre-incident minimum (~0.0208), and continues declining to zero by 17:25. This aligns exactly with the incident time. The 5m rate window smoothing causes the gradual decline rather than an instant drop."
+          },
+          {
+            "type": "collapsed",
+            "query": "rate(traces_span_metrics_duration_milliseconds_sum{service_name=\"recommendation\",span_name=\"oteldemo.ProductCatalogService/ListProducts\",status_code=\"STATUS_CODE_UNSET\"}[5m])",
+            "description": "Span-derived cumulative duration of recommendation service's ListProducts calls. Collapsed from ~0.1-0.2 ms/s to zero because no ListProducts spans are produced after the flag diverts to GetProduct(Empty()).",
+            "onset_utc": "2026-04-24 17:22:00 UTC",
+            "onset_offset_seconds": 119,
+            "onset_reasoning": "Pre-incident pattern oscillates between ~0.07-0.27. After the incident at 17:20, the signal declines steadily toward zero. 17:22 (0.054) is the last timestamp with a non-trivial value before the signal drops to ~0.032 and then zero by 17:25. The collapse clearly aligns with the incident timing."
+          }
+        ]
+      },
+      {
+        "metric_family": "traces_span_metrics_duration_milliseconds",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "service_name": "frontend",
+          "span_name": "oteldemo.RecommendationService/ListRecommendations",
+          "status_code": "STATUS_CODE_ERROR"
+        },
+        "variants": [
+          {
+            "type": "created (fixed after human verification)",
+            "query": "rate(traces_span_metrics_duration_milliseconds_sum{service_name=\"frontend\",span_name=\"oteldemo.RecommendationService/ListRecommendations\",status_code=\"STATUS_CODE_ERROR\"}[5m])",
+            "description": "Span-derived cumulative duration of frontend ListRecommendations error spans. Went from zero to ~0.1-0.6 ms/s as the gRPC UNKNOWN errors propagate from recommendation to frontend on each failed recommendation request.",
+            "onset_utc": "2026-04-24 17:31:00 UTC",
+            "onset_offset_seconds": 659,
+            "onset_reasoning": "The metric is a 'created' type, so we look for a significant rise after the incident time (17:20). The pre-incident baseline from 17:22-17:30 hovers around 0.05-0.12. At 17:31, the value jumps to 0.166, then sharply increases to 0.266 at 17:32 and continues climbing. 17:31 is the first timestamp showing a clear departure from the baseline level."
+          },
+          {
+            "type": "created (fixed after human verification)",
+            "query": "rate(traces_span_metrics_duration_milliseconds_count{service_name=\"frontend\",span_name=\"oteldemo.RecommendationService/ListRecommendations\",status_code=\"STATUS_CODE_ERROR\"}[5m])",
+            "description": "Span-derived duration sample count for frontend ListRecommendations error spans. Went from zero to ~0.01-0.03/s, tracking the same error propagation from recommendation service to frontend.",
+            "onset_utc": "2026-04-24 17:22:00 UTC",
+            "onset_offset_seconds": 119,
+            "onset_reasoning": "This is a 'created' metric, meaning the series didn't exist before the incident. The first data point appears at 17:22:00 UTC, just 2 minutes after the incident time of 17:20:00. The initial values (~0.005-0.008) represent the series coming into existence, then ramping up to ~0.02-0.03 by 17:35-17:37. Since the metric type is 'created', the onset is the first timestamp where the series appears."
+          }
+        ]
+      },
+      {
+        "metric_family": "db_sql_connection_closed_max_idle",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "service_name": "product-catalog"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(db_sql_connection_closed_max_idle_total{service_name=\"product-catalog\"}[5m])",
+            "description": "Rate of product-catalog DB connections closed due to max idle time. Drops ~89% because fewer DB queries means connections stay idle without cycling through the pool.",
+            "onset_utc": "2026-04-24 17:19:00 UTC",
+            "onset_offset_seconds": -60,
+            "onset_reasoning": "Pre-incident values oscillate between ~0.04-0.09. At 17:19 (0.054) the signal is still within normal oscillation range. Starting at 17:20 (0.0375), values drop below the pre-incident floor and continue declining to near-zero, never recovering. 17:19 is the last timestamp with clearly active pre-incident behavior."
+          }
+        ]
+      },
+      {
+        "metric_family": "app_recommendations_counter",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "recommendation_type": "catalog"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "rate(app_recommendations_counter_total{recommendation_type=\"catalog\"}[5m])",
+            "description": "Recommendation service product-list counter flatlined to zero. With recommendationCacheFailure enabled, get_product_list either fails (cache-miss: GetProduct(Empty()) returns NOT_FOUND) or returns empty cached_ids (cache-hit: cached_ids is permanently [] because line 86 never executes), so ListRecommendations returns zero products and the counter stops incrementing.",
+            "onset_utc": "2026-04-24 17:21:00 UTC",
+            "onset_offset_seconds": 59,
+            "onset_reasoning": "Pre-incident pattern oscillates between ~0.10-0.21. At 17:21 the value is 0.1039, still within the normal low end. At 17:22 it drops to 0.0416, well below any pre-incident value, and continues falling to zero by 17:25. So 17:21 is the last timestamp where the pre-incident pattern is still active before the collapse."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "Recommendation: Cache Miss (INFO)",
+        "description": "At 13:20:02 ET (17:20:02 UTC), ~2.4 seconds after the incident time, the recommendation service logged its first cache miss; 7 cache-miss entries were emitted between 17:20:02 and 17:29:59 UTC, confirming the recommendationCacheFailure flag is active.",
+        "cause": "Emitted at recommendation_server.py:83 inside the `if check_feature_flag(\"recommendationCacheFailure\")` branch when `first_run=True` or `random.random() < 0.5`. The log is only reachable when the flag is on, so its presence is direct evidence of the flag being enabled. On this path the code then calls `product_catalog_stub.GetProduct(demo_pb2.Empty())` at line 84, which fails with NOT_FOUND because no product ID is provided, leaving `cached_ids` permanently empty.",
+        "source": "recommendation service",
+        "representative_attributes": {
+          "body": "get_product_list: cache miss",
+          "severity": "INFO",
+          "resource.service.name": "recommendation"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "7ueBwJ0Br_RFnSwRhrdJ",
+            "@timestamp": "17:20:02.999"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "9-eBwJ0Br_RFnSwR57j3",
+            "@timestamp": "17:20:28.863"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "YueFwJ0Br_RFnSwRQ8O3",
+            "@timestamp": "17:24:09.342"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "aeeFwJ0Br_RFnSwRkcTj",
+            "@timestamp": "17:24:28.348"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "3eeIwJ0Br_RFnSwR2c_T",
+            "@timestamp": "17:28:03.094"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "O-eJwJ0Br_RFnSwRO9GB",
+            "@timestamp": "17:28:29.371"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "HeeKwJ0Br_RFnSwRm9UZ",
+            "@timestamp": "17:29:59.343"
+          }
+        ]
+      },
+      {
+        "name": "Recommendation: Cache Hit (INFO)",
+        "description": "At 13:21:17 ET (17:21:17 UTC), ~76 seconds after the incident time and ~74 seconds after the first cache miss, the recommendation service logged its first cache hit; 8 cache-hit entries were emitted between 17:21:17 and 17:26:40 UTC, confirming the recommendationCacheFailure flag is still active.",
+        "cause": "Emitted at recommendation_server.py:91 inside the `if check_feature_flag(\"recommendationCacheFailure\")` branch when `first_run=False` and `random.random() >= 0.5`. This branch returns the global `cached_ids` without fetching from the catalog, but because every preceding cache-miss attempt fails on line 84 before reaching the assignment on line 86, `cached_ids` is always `[]`. ListRecommendations therefore returns zero product IDs on this path.",
+        "source": "recommendation service",
+        "representative_attributes": {
+          "body": "get_product_list: cache hit",
+          "severity": "INFO",
+          "resource.service.name": "recommendation"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "QueCwJ0Br_RFnSwRl7vJ",
+            "@timestamp": "17:21:17.248"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "QOeDwJ0Br_RFnSwRqb5M",
+            "@timestamp": "17:22:25.443"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "beeDwJ0Br_RFnSwRvL7d",
+            "@timestamp": "17:22:31.001"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "UueEwJ0Br_RFnSwRHr-k",
+            "@timestamp": "17:22:55.588"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "zueEwJ0Br_RFnSwRusDs",
+            "@timestamp": "17:23:34.848"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "CeeEwJ0Br_RFnSwR9cKK",
+            "@timestamp": "17:23:52.115"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "3-eHwJ0Br_RFnSwRU8on",
+            "@timestamp": "17:26:23.020"
+          },
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "UOeHwJ0Br_RFnSwRjcvD",
+            "@timestamp": "17:26:40.515"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "Recommendations section fails to load (~50% of requests, 100% on first call) because the recommendation service's cache-miss path calls GetProduct(Empty()) which returns NOT_FOUND.",
+        "route": "GET /api/recommendations",
+        "deterministic": false,
+        "trigger_condition": "recommendationCacheFailure flag is on and random.random() < 0.5 (or first_run=True on the first call).",
+        "source_file": "src/recommendation/recommendation_server.py",
+        "source_line": 84,
+        "calling_service": "recommendation",
+        "call_pattern": "Single call: product_catalog_stub.GetProduct(demo_pb2.Empty()) — calls GetProduct with an Empty proto (no product ID) instead of ListProducts. The gRPC NOT_FOUND error propagates unhandled through get_product_list → ListRecommendations → frontend.",
+        "cause": "On cache miss, the code calls GetProduct with an empty proto. The product-catalog service receives an empty ID, fails the DB lookup (getProductFromDB at main.go:320), and returns codes.NotFound with 'Product Not Found: '. The exception propagates out of get_product_list (lines 85-87 never execute), through ListRecommendations, and the frontend receives a gRPC UNKNOWN error which becomes a 500 on GET /api/recommendations.",
+        "symptom_type": "http_5xx"
+      },
+      {
+        "description": "Recommendations section shows no products (~50% of requests, never on first call) because cached_ids is permanently empty.",
+        "route": "GET /api/recommendations",
+        "deterministic": false,
+        "trigger_condition": "recommendationCacheFailure flag is on, first_run=False, and random.random() >= 0.5.",
+        "source_file": "src/recommendation/recommendation_server.py",
+        "source_line": 92,
+        "calling_service": "recommendation",
+        "call_pattern": "Returns global cached_ids (line 92) which is always [] because GetProduct(Empty()) on the cache-miss path always throws before reaching the assignment on line 86. ListRecommendations returns an empty productIds list.",
+        "cause": "On cache hit, the code returns cached_ids. But cached_ids is never populated — every cache-miss attempt fails on line 84 before reaching lines 86-87. So ListRecommendations returns zero product IDs, the frontend's Promise.all at recommendations.ts:20-21 resolves to an empty array, and the response is 200 with no recommendations. The user sees an empty recommendations section rather than an error.",
+        "symptom_type": "partial_content"
+      }
+    ],
+    "traces": [
+      {
+        "name": "Recommendations NOT_FOUND Cascade",
+        "description": "Between 17:20:28 and 17:29:59 UTC, 6 traces show GetProduct(Empty()) returning gRPC NOT_FOUND, cascading through the recommendations path as HTTP 500s. Flag evaluation reason is 'cached' on every trace.",
+        "cause": "recommendationCacheFailure is enabled, causing get_product_list at recommendation_server.py:84 to call GetProduct(demo_pb2.Empty()) instead of ListProducts. The product-catalog service fails to look up an empty ID at main.go:448 and returns gRPC NOT_FOUND with message 'Product Not Found: '. The exception propagates through get_product_list -> ListRecommendations -> frontend as a gRPC UNKNOWN, which the frontend converts to HTTP 500 on GET /api/recommendations.",
+        "call_chain": "product-catalog:GetProduct -> recommendation:get_product_list -> recommendation:ListRecommendations -> frontend:ListRecommendations -> frontend:executing api route /api/recommendations -> frontend:GET /api/recommendations -> frontend-proxy:router frontend egress -> frontend-proxy:GET -> load-generator:GET",
+        "smoking_gun": [
+          "product-catalog:GetProduct span: app.product.id='' (empty string) and span event 'Product Not Found: ' -- proves GetProduct was called with no product ID (Empty() proto, recommendation_server.py:84)",
+          "recommendation:get_product_list span attributes: app.recommendation.cache_enabled=True, app.cache_hit=False",
+          "recommendation:get_product_list feature_flag.evaluation event: feature_flag.key=recommendationCacheFailure, feature_flag.result.variant=on, feature_flag.result.reason=cached",
+          "recommendation:oteldemo.ProductCatalogService/GetProduct client span: rpc.grpc.status_code=5 (NOT_FOUND)",
+          "frontend:oteldemo.RecommendationService/ListRecommendations client span: rpc.grpc.status_code=2 (UNKNOWN)"
+        ],
+        "trace_documents": [
+          {
+            "traceID": "d7d3c57eacba8cab649d1a46dc829e9b",
+            "@timestamp": "17:20:28"
+          },
+          {
+            "traceID": "fe1a0075a66e985923a72c6b2495d359",
+            "@timestamp": "17:24:09"
+          },
+          {
+            "traceID": "3364f571e1ced72634b2d69171c51861",
+            "@timestamp": "17:24:28"
+          },
+          {
+            "traceID": "9df15744bdce2a351682805cfaa32c42",
+            "@timestamp": "17:28:03"
+          },
+          {
+            "traceID": "1a6b1faf27fac81d055fc424681ae6bb",
+            "@timestamp": "17:28:29"
+          },
+          {
+            "traceID": "6b78faedae6e21781f64e57cde8cdbeb",
+            "@timestamp": "17:29:59"
+          }
+        ]
+      },
+      {
+        "name": "Recommendations NOT_FOUND Cascade (flagd resolve)",
+        "description": "At 17:20:02 UTC, 2 seconds after the incident time, 1 trace shows the same cascade as Cluster A but includes an initial flagd ResolveBoolean call with reason=static. This is the first flag evaluation in the recommendation service after the toggle, before the OpenFeature SDK cached the result.",
+        "cause": "Same root cause as Cluster A, but this trace captures the live flag resolution: the recommendation service calls flagd.evaluation.v1.Service/ResolveBoolean to resolve recommendationCacheFailure, receives variant=on with reason=static, then proceeds with the buggy GetProduct(Empty()) code path at recommendation_server.py:84.",
+        "call_chain": "flagd:resolveBoolean -> flagd:ResolveBoolean -> recommendation:ResolveBoolean -> product-catalog:GetProduct -> recommendation:get_product_list -> recommendation:ListRecommendations -> frontend:ListRecommendations -> frontend:executing api route /api/recommendations -> frontend:GET /api/recommendations -> frontend-proxy:router frontend egress -> frontend-proxy:GET -> load-generator:GET",
+        "smoking_gun": [
+          "product-catalog:GetProduct span: app.product.id='' (empty string) and span event 'Product Not Found: ' -- same empty-ID proof as Cluster A",
+          "recommendation:get_product_list feature_flag.evaluation event: feature_flag.key=recommendationCacheFailure, feature_flag.result.variant=on, feature_flag.result.reason=static (live resolution from flagd)",
+          "flagd:flagd.evaluation.v1.Service/ResolveBoolean server span present, confirming the flag was actively resolved from flagd rather than served from the OpenFeature SDK cache"
+        ],
+        "trace_documents": [
+          {
+            "traceID": "5c8d76868da91344b6e14c2c3ef83ee4",
+            "@timestamp": "17:20:02"
+          }
+        ]
+      }
+    ]
+  }
+}

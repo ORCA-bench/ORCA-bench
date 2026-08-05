@@ -1,0 +1,173 @@
+{
+  "incident_time": "2026-04-24T16:49:52.405143+00:00",
+  "feature_flag": "adManualGc",
+  "description": "A feature flag read on every `GetAds` RPC instantiated a `GarbageCollectionTrigger` that forced a full (major) GC on a recurring 10-second schedule; the resulting stop-the-world pauses elevated `jvm_gc_duration_seconds` and shifted memory usage on the `ad` service container.",
+  "mechanism": "The flag is read in [`AdService.java#L209`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L209): on every `getAds` gRPC call, the service evaluates the `adManualGc` flag. When `true`, it logs a WARN (\"Feature Flag adManualGc enabled, performing a manual gc now\") at line 210, then creates a new `GarbageCollectionTrigger` and calls `doExecute()` at [`AdService.java#L211-L212`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L211).\n\nIn [`GarbageCollectionTrigger.java#L43-L61`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/GarbageCollectionTrigger.java#L43), `doExecute()` is rate-limited to once every 10 seconds (line 44). When it fires, it first calls `System.gc()` to clear old objects, then enters a loop of 10 iterations (line 50): each iteration allocates `Entry` objects until heap usage exceeds 90% or pending finalizations exceed 500,000 (line 51-53), then forces another `System.gc()` and measures the pause time. Each `Entry` object overrides `finalize()` with a 500 ms sleep ([`GarbageCollectionTrigger.java#L75-L77`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/GarbageCollectionTrigger.java#L75)), making finalization extremely expensive and creating sustained GC pressure that stalls the JVM.",
+  "symptoms": {
+    "metrics": [
+      {
+        "metric_family": "container_memory_percent_ratio",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "ad"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "container_memory_percent_ratio{container_name=\"ad\"}",
+            "description": "Ad container memory utilization percentage dropped from ~90% to ~79-81% of its limit, reflecting the same forced garbage collection reclaiming heap memory.",
+            "onset_utc": "2026-04-24 16:50:00 UTC",
+            "onset_offset_seconds": 7,
+            "onset_reasoning": "Pre-incident the metric holds steady around 90.3. At 16:51 it drops sharply from ~90.3 to ~77.8, so 16:50 is the last timestamp still showing the pre-incident baseline before the collapse."
+          }
+        ]
+      },
+      {
+        "metric_family": "container_memory_usage_total_bytes",
+        "signal_layer": "root_cause",
+        "defining_labels": {
+          "container_name": "ad"
+        },
+        "variants": [
+          {
+            "type": "collapsed",
+            "query": "container_memory_usage_total_bytes{container_name=\"ad\"}",
+            "description": "Ad container total memory usage dropped from ~270 MB to ~236-243 MB because the repeated System.gc() calls forced by the adManualGc flag aggressively reclaim heap objects, reducing the JVM's resident memory footprint.",
+            "onset_utc": "2026-04-24 16:50:00 UTC",
+            "onset_offset_seconds": 7,
+            "onset_reasoning": "Pre-incident, memory usage is stable around ~284M bytes. At 16:51 it drops sharply to ~245M (~39M drop) and settles at a new lower baseline around ~248M, then ~253M. The last timestamp at the pre-incident level is 16:50 (284M), making it the onset — the last point before the collapse."
+          }
+        ]
+      },
+      {
+        "metric_family": "traces_span_metrics_duration_milliseconds",
+        "signal_layer": "propagation",
+        "defining_labels": {
+          "service_name": "frontend",
+          "span_name": "oteldemo.AdService/GetAds"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "sum(rate(traces_span_metrics_duration_milliseconds_sum{service_name=\"frontend\",span_name=\"oteldemo.AdService/GetAds\"}[5m]))",
+            "description": "Rate of total span duration for the frontend's client-side gRPC call to AdService/GetAds spiked ~450x. This is the downstream effect of the ad service's GC-induced latency as seen from the frontend caller.",
+            "onset_utc": "2026-04-24 16:51:00 UTC",
+            "onset_offset_seconds": 67,
+            "onset_reasoning": "Pre-incident baseline ranges ~0.05-0.21. At 16:51 the value jumps to 4.92, roughly 35x the baseline, marking the clear onset of the spike. The prior point at 16:50 (0.143) is still within normal range."
+          }
+        ]
+      },
+      {
+        "metric_family": "traces_span_metrics_duration_milliseconds",
+        "signal_layer": "symptom",
+        "defining_labels": {
+          "service_name": "load-generator",
+          "span_name": "user_get_ads"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "sum(rate(traces_span_metrics_duration_milliseconds_sum{service_name=\"load-generator\",span_name=\"user_get_ads\"}[5m]))",
+            "description": "Rate of total span duration for the load-generator's user_get_ads scenario spiked ~100x. The load generator's end-to-end ad-fetching flow reflects the ad service's GC-induced slowdown.",
+            "onset_utc": "2026-04-24 16:51:00 UTC",
+            "onset_offset_seconds": 67,
+            "onset_reasoning": "Pre-incident baseline is approximately 0.3-0.6. At 16:51, the value jumps to 5.25, roughly 10x the baseline, marking the clear start of the spike. The previous timestamp (16:50) is still at baseline level (0.40)."
+          }
+        ]
+      },
+      {
+        "metric_family": "feature_flag_flagd_impression",
+        "signal_layer": "meta",
+        "defining_labels": {
+          "feature_flag_key": "adManualGc",
+          "feature_flag_result_variant": "on"
+        },
+        "variants": [
+          {
+            "type": "spiked",
+            "query": "rate(feature_flag_flagd_impression_total{feature_flag_key=\"adManualGc\",feature_flag_result_variant=\"on\"}[2m])",
+            "description": "The flagd impression counter for the adManualGc flag's 'on' variant jumped from 5 to 7 at ~16:51 UTC, confirming the flag was toggled on and evaluated as true by the ad service.",
+            "onset_utc": "2026-04-24 16:51:00 UTC",
+            "onset_offset_seconds": 67,
+            "onset_reasoning": "The metric is flat at 0 for the entire pre-incident period. At 16:51 UTC (one minute after the incident time), it spikes to 0.0333333, which is the only non-zero value in the series and represents the feature flag being toggled on. This single-sample spike is consistent with a one-time flag evaluation immediately after the incident was injected."
+          }
+        ]
+      }
+    ],
+    "logs": [
+      {
+        "name": "ad: Feature Flag adManualGc enabled (WARN)",
+        "description": "At 16:50:01.997 UTC the ad service emitted a WARN announcing that the adManualGc feature flag was turned on and that it was about to perform a manual GC. This is the first of 14 emissions of this body in the capture window (16:39:52–16:59:52 UTC) and marks the activation time of the incident.",
+        "cause": "Direct effect of the adManualGc feature flag being turned on. On every GetAds RPC, AdService.java:209 reads the flag; when true, line 210 logs this WARN and line 211-212 delegates to GarbageCollectionTrigger.doExecute().",
+        "source": "ad service (Java), instrumentation scope oteldemo.AdService",
+        "representative_attributes": {
+          "body": "Feature Flag adManualGc enabled, performing a manual gc now",
+          "severity.text": "WARN",
+          "severity.number": "13",
+          "instrumentationScope.name": "oteldemo.AdService",
+          "resource.service.name": "ad",
+          "resource.service.namespace": "opentelemetry-demo",
+          "resource.service.version": "2.2.0",
+          "resource.process.runtime.name": "OpenJDK Runtime Environment",
+          "resource.process.runtime.version": "21.0.9+10-LTS",
+          "resource.telemetry.sdk.language": "java",
+          "resource.telemetry.distro.name": "opentelemetry-java-instrumentation",
+          "resource.telemetry.distro.version": "2.23.0",
+          "traceId": "2e0ad997f1a5891d661d3a73b0996bc9",
+          "spanId": "8f5babb55db4180b"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "XedlwJ0Br_RFnSwR_Vyt",
+            "@timestamp": "16:50:01.997"
+          }
+        ]
+      },
+      {
+        "name": "ad: Triggering a manual garbage collection (INFO)",
+        "description": "At 16:50:01.998 UTC (sub-millisecond after the adManualGc WARN, in the same GetAds span) the ad service's GarbageCollectionTrigger logged that it was starting a manual GC cycle, with the next one scheduled in 10 seconds. This is the first of 14 emissions of this body in the capture window (16:39:52–16:59:52 UTC).",
+        "cause": "Direct consequence of the adManualGc flag: AdService.java:211-212 instantiates GarbageCollectionTrigger and invokes doExecute(), which logs this INFO at GarbageCollectionTrigger.java:45 before allocating Entry objects and calling System.gc() in a loop. Its presence in the capture confirms the flag was still on at snapshot time.",
+        "source": "ad service (Java), instrumentation scope oteldemo.problempattern.GarbageCollectionTrigger",
+        "representative_attributes": {
+          "body": "Triggering a manual garbage collection, next one in 10 seconds.",
+          "severity.text": "INFO",
+          "severity.number": "9",
+          "instrumentationScope.name": "oteldemo.problempattern.GarbageCollectionTrigger",
+          "resource.service.name": "ad",
+          "resource.service.namespace": "opentelemetry-demo",
+          "resource.service.version": "2.2.0",
+          "resource.process.runtime.name": "OpenJDK Runtime Environment",
+          "resource.process.runtime.version": "21.0.9+10-LTS",
+          "resource.telemetry.sdk.language": "java",
+          "resource.telemetry.distro.name": "opentelemetry-java-instrumentation",
+          "resource.telemetry.distro.version": "2.23.0",
+          "traceId": "2e0ad997f1a5891d661d3a73b0996bc9",
+          "spanId": "8f5babb55db4180b"
+        },
+        "log_documents": [
+          {
+            "_index": "otel-logs-2026-04-24",
+            "_id": "XudlwJ0Br_RFnSwR_Vyt",
+            "@timestamp": "16:50:01.998"
+          }
+        ]
+      }
+    ],
+    "frontend": [
+      {
+        "description": "The yellow ad banner (white text on a yellow background) at the bottom of product detail and checkout pages, which previously rendered almost instantly, now takes well over a second to populate. The banner area appears empty/blank for a noticeable beat before the ad text and link finally appear; on the first load after the flag flips it can feel broken. The rest of the page text and layout render normally — only the ad content is delayed.",
+        "route": "GET /api/data",
+        "deterministic": true,
+        "trigger_condition": "User loads any page that renders the Ad component (product detail and checkout pages), triggering an ad fetch via AdProvider. While adManualGc is on, every GetAds RPC drives the ad service into sustained GC pressure, so each ad fetch is slow.",
+        "symptom_type": "slow_response",
+        "source_file": "src/frontend/components/Ad/Ad.tsx",
+        "source_line": 9,
+        "calling_service": "frontend",
+        "call_pattern": "Single direct call per page load: AdProvider.useQuery ([`Ad.provider.tsx#L30`](../../opentelemetry-demo/src/frontend/providers/Ad.provider.tsx#L30)) → ApiGateway.listAds ([`Api.gateway.ts#L103`](../../opentelemetry-demo/src/frontend/gateways/Api.gateway.ts#L103)) → [`data.ts#L15`](../../opentelemetry-demo/src/frontend/pages/api/data.ts#L15) → AdGateway.listAds → gRPC client.getAds ([`Ad.gateway.ts#L14`](../../opentelemetry-demo/src/frontend/gateways/rpc/Ad.gateway.ts#L14)). The Ad component blocks on this query before it can render any banner text ([`Ad.tsx#L9`](../../opentelemetry-demo/src/frontend/components/Ad/Ad.tsx#L9)).",
+        "cause": "On every `getAds` call the ad service reads the `adManualGc` flag ([`AdService.java#L209`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L209)); when on, it instantiates a `GarbageCollectionTrigger` and calls `doExecute()` ([`AdService.java#L211-L212`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/AdService.java#L211)). That trigger repeatedly calls `System.gc()` and allocates `Entry` objects whose `finalize()` sleeps 500 ms ([`GarbageCollectionTrigger.java#L75-L77`](../../opentelemetry-demo/src/ad/src/main/java/oteldemo/problempattern/GarbageCollectionTrigger.java#L75)), producing sustained stop-the-world pauses that stall the JVM. GetAds server latency climbs from ~3 ms to ~1500 ms, so the frontend's blocking `data.ts` → gRPC `getAds` call ([`data.ts#L15`](../../opentelemetry-demo/src/frontend/pages/api/data.ts#L15)) takes that long to resolve. The React Query in AdProvider ([`Ad.provider.tsx#L30`](../../opentelemetry-demo/src/frontend/providers/Ad.provider.tsx#L30)) leaves `adList` empty until the slow response returns, so the Ad component ([`Ad.tsx#L9-L10`](../../opentelemetry-demo/src/frontend/components/Ad/Ad.tsx#L9)) shows the empty `{ text: '' }` fallback banner until the delayed ad text arrives."
+      }
+    ],
+    "traces": []
+  }
+}
