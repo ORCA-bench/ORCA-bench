@@ -50,8 +50,12 @@ Published as `orca-bench/orca-bench` (755 tasks), pinned in
 [`core/hub.py`](src/leaderboard/core/hub.py) as
 `sha256:2add497ac2f93468dba1b83977c295a784c89031754e6a35520195345ad62ada`.
 
-**The dataset is currently private.** That has one confusing consequence worth
-knowing before you debug anything: an *unauthenticated* caller gets
+**The dataset is public**, so anyone can fetch it and run the benchmark. CI
+still passes `HARBOR_API_KEY` because the submission flow writes (cloning
+trials, creating rows), not because reading needs it.
+
+If it is ever made private again, the failure mode is worth knowing: an
+*unauthenticated* caller gets
 
 ```
 ValueError: Tag 'latest' not found for dataset 'orca-bench/orca-bench'
@@ -63,14 +67,10 @@ Note also that a credentials file written by an older harbor is rejected by
 0.20 ("Found credentials from an older Harbor version"), which silently
 downgrades you to anonymous.
 
-While the dataset stays private, CI needs `HARBOR_API_KEY` to see it at all,
-and external contributors cannot run the benchmark. Make the dataset public
-before opening submissions up.
-
 ## The leaderboard on the hub
 
 **Created** — `orca-bench/orca-bench` → leaderboard `orca-bench`, title
-"ORCA-bench", **visibility `private`** (matching the dataset), id
+"ORCA-bench", **visibility `public`** (matching the dataset), id
 `dcb96003-d991-4f98-97b6-3813c35daa81`. This matches `LEADERBOARD_PACKAGE` /
 `LEADERBOARD_NAME` in [`ci/submit.py`](src/leaderboard/ci/submit.py).
 
@@ -78,8 +78,11 @@ The board on the retired uppercase package (`orca-bench/ORCA-bench`, id
 `1b72818f-bd2e-4051-a3d1-634fe44808d7`) is superseded and should be deleted; it
 holds no rows.
 
-Make it public in the same change that makes the dataset public — a public
-leaderboard over a private dataset shows scores nobody can reproduce.
+Visibility must not run ahead of the dataset's: a public leaderboard over a
+private dataset shows scores nobody can reproduce or submit against. Both are
+public now. A private board is hidden rather than refused — an anonymous read
+returns `404 leaderboard not found`, not a permission error — so test visibility
+by reading it with no credentials rather than by trusting the field.
 
 ### The package slug must stay lowercase
 

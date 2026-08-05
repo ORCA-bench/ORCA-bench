@@ -3,7 +3,7 @@
   "name": "orca-bench",
   "title": "ORCA-bench",
   "description": "Leaderboard for ORCA-bench: root cause analysis for oncall agents",
-  "visibility": "private",
+  "visibility": "public",
   "metadata_schema": {
     "type": "object",
     "properties": {
