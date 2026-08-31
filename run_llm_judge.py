@@ -127,15 +127,9 @@ async def process_trial(
     if out_path.is_file() and not force:
         existing = json.loads(out_path.read_text())
         if existing.get("mode") not in ("llm_judge_error", "hub_fetch_error"):
-            if not prompt_path.is_file():
-                prompt_text = existing.get("judge_prompt")
-                if prompt_text:
-                    _atomic_write_text(prompt_path, prompt_text)
             return trial_id, None
         logger.info(f"Trial {trial_id}: previous run errored, re-scoring")
 
-    task_meta = truth.get("task_meta", {})
-    flag = task_meta.get("flag", "")
     rubric_data = truth.get("rubric") or []
     expected = truth.get("expected", {})
 
@@ -153,7 +147,6 @@ async def process_trial(
             "batch_number": batch_num,
             "rca_depth": 0,
             "rubric_used": bool(rubric_data),
-            "flag": flag,
         }
 
     # Bounded separately from the judge: a download is disk- and
@@ -183,21 +176,32 @@ async def process_trial(
             _atomic_write_json(out_path, payload)
             return trial_id, payload
 
-    # Materialize the post-hoc rca_depth (mean across rubrics) so the runtime
-    # log and the saved JSON both surface it. Downstream consumers (load_trials
-    # in utils.py) re-derive it from ``nested`` anyway, but having it at the top
-    # level matches the historical schema and makes per-trial files greppable.
+    # The saved payload is the flat rollup, not the judge's raw output. Every
+    # field of ``result`` that names the answer stays out: ``nested`` and
+    # ``judge_response_raw`` key their verdicts by feature_flag, ``judge_prompt``
+    # embeds the rubric, and ``reasoning_summary`` is the judge explaining which
+    # root cause it matched. ``per_rubric`` is dropped from the aggregate for
+    # the same reason -- its entries carry ``feature_flag`` -- while
+    # ``per_rubric_scores`` keeps the per-rubric integers.
+    #
+    # This is what makes a score file publishable next to a submission. The
+    # judge prompt is still written to prompts_dir for local debugging; that
+    # directory is not.
     agg = aggregate_judge_response(result["nested"], mode=result.get("mode"))
     rca_depth = agg["rca_depth"] if agg["rca_depth"] is not None else 0
     payload = {
         "trial_id": trial_id,
         "task_name": task_name,
+        "model": model,
         "reasoning_effort": reasoning_effort,
         "batch_size": bs,
         "batch_number": batch_num,
-        "flag": flag,
-        **result,
+        # Kept from ``result``: the skip check above and the CI summary both
+        # branch on mode, and control tasks are identified by it.
+        "mode": result.get("mode"),
+        **{k: v for k, v in agg.items() if k != "per_rubric"},
         "rca_depth": rca_depth,
+        "reward": rca_depth / 3.0,
     }
     _atomic_write_json(out_path, payload)
     prompt_text = result.get("judge_prompt")

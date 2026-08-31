@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write        # pushes the per-trial scores to the bot branch
   pull-requests: write
   issues: write
 
@@ -93,6 +93,7 @@ jobs:
           path=$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" \
             --jq '[.[] | select((.filename | test("^leaderboard/submissions/[A-Za-z0-9._-]+\\.json$")) and (.status != "removed")) | .filename] | first // empty')
           if [ -z "$path" ]; then echo "::error::no submission JSON on this PR"; exit 1; fi
+          echo "sub_path=$path" >> "$GITHUB_OUTPUT"
           gh api "repos/${{ github.repository }}/contents/$path?ref=$HEAD_SHA" \
             --jq '.content' | base64 -d > /tmp/submission.json
 
@@ -134,11 +135,78 @@ jobs:
             ${{ steps.jobs.outputs.args }} \
             ${{ steps.jobs.outputs.limit }}
 
-      # Counts and aggregates only. The per-trial JSONs carry `flag` and
-      # `judge_prompt` (which embeds the rubric), so neither they nor
-      # judge_prompts/ may be uploaded as an artifact or quoted here -- artifacts
-      # are downloadable by anyone with read access to this repo, and the whole
-      # point of the held-out split is that those answers do not circulate.
+      # Counts and aggregates only.
+      #
+      # scores/ is safe to publish: run_llm_judge saves the flat rollups, with
+      # every field that names the answer (flag, nested, judge_prompt,
+      # judge_response_raw, reasoning_summary, per_rubric) left out.
+      # judge_prompts/ is NOT -- it embeds the rubric verbatim -- so it must
+      # never be uploaded as an artifact, and no per-trial detail is quoted
+      # below. Artifacts are downloadable by anyone with read access to this
+      # repo, and the held-out split exists so those answers do not circulate.
+      # One file per submission, mirroring leaderboard/submissions/<name>.json,
+      # keyed by trial id. Committed to the bot branch so the maintainer reviews
+      # the scores on the same PR and merging carries them to main.
+      #
+      # Safe to publish only because run_llm_judge saves the flat rollups: no
+      # flag, nested, judge_prompt, judge_response_raw, reasoning_summary or
+      # per_rubric. Anything that reintroduces those to the payload also
+      # reintroduces them here.
+      #
+      # A GITHUB_TOKEN push does not re-trigger workflows, which is the same
+      # property the promote job relies on.
+      - name: Save per-trial scores to the repo
+        id: save
+        if: steps.judge.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          SUB_PATH: ${{ steps.jobs.outputs.sub_path }}
+        run: |
+          set -euo pipefail
+          uv run python - "$SUB_PATH" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          out = Path("/tmp/scores.json")
+          records = {}
+          for p in sorted(Path("/tmp/judge/scores").glob("*.json")):
+              d = json.loads(p.read_text())
+              tid = d.get("trial_id")
+              if not tid:
+                  sys.exit(f"{p.name} has no trial_id")
+              # Belt and braces: the payload is built redacted, but this file is
+              # about to be committed, so refuse rather than publish a field that
+              # names the answer.
+              banned = {"flag", "nested", "judge_prompt", "judge_response_raw",
+                        "reasoning_summary", "per_rubric"}
+              leaked = banned & d.keys()
+              if leaked:
+                  sys.exit(f"{p.name} carries {sorted(leaked)}; refusing to commit")
+              records[tid] = d
+          out.write_text(json.dumps(dict(sorted(records.items())), indent=2) + "\n")
+          print(f"{len(records)} trial score(s) -> {out}")
+          PY
+
+          BOT_BRANCH=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.ref')
+          dest="leaderboard/scores/$(basename "$SUB_PATH")"
+          git fetch --depth=1 origin "$BOT_BRANCH"
+          git checkout -B "$BOT_BRANCH" FETCH_HEAD
+          mkdir -p leaderboard/scores
+          cp /tmp/scores.json "$dest"
+          git add "$dest"
+          if git diff --cached --quiet; then
+            echo "scores unchanged; nothing to commit"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Judge scores for $(basename "$SUB_PATH" .json)" \
+                     -m "Written by /judge from run #${{ github.run_id }}."
+          git push origin "$BOT_BRANCH"
+          echo "dest=$dest" >> "$GITHUB_OUTPUT"
+          echo "Committed $dest to $BOT_BRANCH"
+
       # always(), so a failed run still reports what it managed to score
       # rather than leaving the PR with only a red check.
       - name: Summarize
@@ -146,13 +214,13 @@ jobs:
         env:
           JUDGE_OUTCOME: ${{ steps.judge.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SAVED_TO: ${{ steps.save.outputs.dest }}
         run: |
           uv run python - <<'PY' > /tmp/comment.md
           import json
           import os
           from collections import Counter
           from pathlib import Path
-          from check_prediction import aggregate_judge_response
 
           # Control tasks (mode no_incident_llm_judge) have no root cause to find,
           # so they are kept out of the incident metrics -- the same split the
@@ -174,10 +242,11 @@ jobs:
                   n_control += 1
                   continue
               depths.append(d.get("rca_depth") or 0.0)
-              agg = aggregate_judge_response(d.get("nested") or {}, mode=mode)
+              # run_llm_judge stores the aggregate_judge_response rollups flat on
+              # the payload, so there is nothing to re-derive here.
               for key, sink in (("rca_accuracy", acc), ("hallucinate_any", hall)):
-                  if agg.get(key) is not None:
-                      sink.append(bool(agg[key]))
+                  if d.get(key) is not None:
+                      sink.append(bool(d[key]))
 
           def pct(xs):
               return f"{100 * sum(xs) / len(xs):.2f}% (n={len(xs)})" if xs else "—"
@@ -205,9 +274,12 @@ jobs:
           out.append(f"| Control trials (excluded above) | {n_control} |")
           out.append(
               "\n<sub>Judged with the same model and reasoning effort as the "
-              "in-container verifier. Per-trial results stay on the runner: they "
-              "carry the root cause and the rubric, so they are not uploaded.</sub>"
+              "in-container verifier. Per-trial rollups carry no root cause and "
+              "no rubric; the judge prompts, which do, stay on the runner.</sub>"
           )
+          saved = os.environ.get("SAVED_TO")
+          if saved:
+              out.insert(1, f"Per-trial scores committed to `{saved}` on this branch.\n")
           print("\n".join(out))
           PY
           cat /tmp/comment.md

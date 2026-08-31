@@ -36,6 +36,15 @@ no sandbox — to score the held-out split, whose tasks ship without
 `build_harbor_tasks.py`). Same `/judge` trigger and the same write-access gate;
 different work.
 
+It commits its per-trial scores to `leaderboard/scores/<same name as the
+submission>.json` on the bot branch, keyed by trial id. Unlike the submission
+JSON, which holds one row of aggregates, that file holds one record per trial.
+Publishing it is only safe because `run_llm_judge` saves the flat
+`aggregate_judge_response` rollups: no `flag`, `nested`, `judge_prompt`,
+`judge_response_raw`, `reasoning_summary` or `per_rubric`. The workflow re-checks
+for those keys and refuses to commit rather than publish one, so a change that
+puts them back in the payload fails CI instead of leaking the held-out answers.
+
 ## Get your `HARBOR_API_KEY`
 
 `harbor auth login` (GitHub OAuth in the browser) mints a long-lived personal
