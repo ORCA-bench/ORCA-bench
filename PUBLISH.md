@@ -6,15 +6,34 @@
 
 ```bash
 uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
-  --templates-dir harbor-template --force \
-  --dataset-description "An agent benchmark for root cause analysis" \ 
-  --dataset-author "Albert Gong ag2435@cornell.edu"
+  --templates-dir harbor-template --force
 ```
 
-- Dataset(s): Generate `split.json` specifying public, private, and verified splits and publish each split to Harbor Hub with the following command:
+- Dataset(s): re-run the build with `--split` to write `split.json` plus the
+  public / private / verified dataset manifests, then publish each one. Dataset
+  names derive from `--org` (`orca-bench/orca-bench`, `-private`, `-verified`),
+  so the full build and the public split can never claim the same name — a
+  collision that would otherwise republish the public dataset with the private
+  tasks included.
 
 ```bash
+uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
+  --templates-dir harbor-template --force --split \
+  --verified-json human-eval-sample/output/sampled_tasks.json \
+  --dataset-author "Albert Gong <ag2435@cornell.edu>"
+
+# Writes out-0804/harbor/split.json and out-0804/harbor/datasets/{public,private,verified}/
+uv run harbor publish out-0804/harbor/datasets/public --private
+uv run harbor publish out-0804/harbor/datasets/private --private
+uv run harbor publish out-0804/harbor/datasets/verified --private
 ```
+
+> [!NOTE]
+> `split.json` records the disjoint partition under `splits` and the verified
+> subset under `views`. Verified is a *view over public*, not a third split:
+> `convert_job.py` assigns `routing[task_id]` while looping over `splits`, so an
+> overlapping entry there would silently reroute those trials to whichever
+> dataset iterated last.
 
 - Create a leaderboard for each dataset by running the following command:
 
@@ -36,7 +55,7 @@ Hub**, rsyncs only the surviving trial dirs to `--dst`, then rewrites
 uvx --from harbor python convert_job.py \
   --src /root/benchmark/src/sre-agent/examples/otel-demo/jobs-sub \
   --dst /mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-2 \
-  --split /root/benchmark/src/ORCA-bench/out-0804/harbor-split/split.json
+  --split /root/benchmark/src/ORCA-bench/out-0804/harbor/split.json
 ```
 
 > [!NOTE]
@@ -97,7 +116,7 @@ so no trial payload is duplicated.
 ```bash
 uv run python split_jobs.py \
   --src /mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-2 \
-  --split out-0804/harbor-split/split.json \
+  --split out-0804/harbor/split.json \
   --out public=/mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-public-2 \
   --out private=/mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-private-2
 ```
