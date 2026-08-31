@@ -39,7 +39,8 @@ uv run harbor publish out-0804/harbor/datasets/verified --private
 
 > [!IMPORTANT]
 > `orca-bench/orca-bench-private` is the split to hand to submitters. Its tasks
-> ship without `tests/expected.json`, `tests/rubrics/` or `solution/`, and their
+> ship without `tests/expected.json`, `tests/rubrics/`,
+> `tests/check_prediction.py` or `solution/`, and their
 > `task.toml` `[metadata]` keeps only `category`, `tags`, `user_facing_issue`,
 > `current`, `reported_styled` and `difficulty` — every other field,
 > `incident_time`, `flag` and `events` included, names or dates the root
@@ -48,11 +49,31 @@ uv run harbor publish out-0804/harbor/datasets/verified --private
 > runs it, so publishing `-private-oracle` to submitters would hand over the
 > answers for all 324 tasks.
 >
-> The hidden tasks cannot be scored in-container: the verifier fails to open the
-> missing `expected.json` and its except branch writes `reward.json` =
-> `{"reward": 0.0}`. That is a real 0, not an absent verdict, so score these
-> trials out-of-band (`run_llm_judge.py` against a maintainer-side registry)
-> rather than reading the Hub's `evals`.
+> The hidden tasks are not scored in-container. Harbor requires every task to
+> have a test script and to leave a reward file, so their `tests/test.sh` copies
+> `report.md` into the verifier dir and writes an empty rewards map (`{}`). The
+> trial finishes clean, with no metrics, instead of recording a 0 that every
+> mean would average in. Score these trials out-of-band with `run_llm_judge.py`,
+> which reads each trial's report and its oracle twin's rubric straight from the
+> Hub:
+>
+> ```bash
+> uv run python run_llm_judge.py -od out-0804 --job <hidden-job-uuid>
+> ```
+>
+> One thing to confirm on the first real run: how the Hub stores an empty
+> rewards map. `trial_metric` returns `None` (excluded, as intended) when the
+> row's `evals` is empty, but raises `MissingRewardMetricError` if the Hub
+> instead materializes a group with an empty metrics list. Nothing hits that
+> path today — `submission_trials` filters on `source == orca-bench/orca-bench`,
+> so private trials never reach it — but a leaderboard extended to the private
+> split would need to handle it.
+>
+> Do not put a placeholder metric in that map. `trial_metric` raises
+> `MissingRewardMetricError` when a trial reports metrics but not the one asked
+> for, and the Hub takes a row's own reward scalar from the alphabetically first
+> numeric entry — which already mis-scored this leaderboard once, when
+> `hallucinate_any` sorted ahead of `reward`.
 
 > [!NOTE]
 > `split.json` records the disjoint partition under `splits` (`public`,

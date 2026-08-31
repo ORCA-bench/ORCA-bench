@@ -235,7 +235,7 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging(args.log_level)
 
-    df = load_data(args.jobs_dir, args.effort, args.filter_xlsx)
+    df = load_data(args.jobs_dir, args.effort)
     incident_df = df[~df["_is_control"]]
     control_df = df[df["_is_control"]]
     if incident_df.empty:
