@@ -231,13 +231,17 @@ jobs:
 
           paths = sorted(Path("/tmp/judge/scores").glob("*.json"))
           modes, depths, acc, hall = Counter(), [], [], []
-          n_control = 0
+          n_control = n_retried = 0
           for p in paths:
               d = json.loads(p.read_text())
               mode = d.get("mode", "?")
               modes[mode] += 1
               if mode in ERRORS:
                   continue
+              # run_llm_judge records `attempts` only when a trial needed more
+              # than one draw, so this counts the flaky ones.
+              if d.get("attempts", 1) > 1:
+                  n_retried += 1
               if mode == CONTROL:
                   n_control += 1
                   continue
@@ -272,6 +276,7 @@ jobs:
           out.append(f"| RCA accuracy (incident) | {pct(acc)} |")
           out.append(f"| Hallucination rate (incident) | {pct(hall)} |")
           out.append(f"| Control trials (excluded above) | {n_control} |")
+          out.append(f"| Trials that needed a retry | {n_retried} |")
           out.append(
               "\n<sub>Judged with the same model and reasoning effort as the "
               "in-container verifier. Per-trial rollups carry no root cause and "

@@ -32,6 +32,9 @@ before any trial is downloaded.
 Trials already scored under OUTPUT_DIR/scores are skipped *before* their archive
 is fetched, so a re-run costs neither API calls nor downloads. Pass --force to
 re-score.
+
+Failed trials are retried in-run (see --max-retries) and again on the next
+invocation: a trial saved with an error mode is not treated as scored.
 """
 
 import asyncio
@@ -45,7 +48,14 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    AsyncOpenAI,
+    AuthenticationError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
 from harbor_utils import hub_source
 from utils import get_base_parser, setup_logging
@@ -60,6 +70,98 @@ from check_prediction import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Retry policy
+# ---------------------------------------------------------------------------
+#
+# The OpenAI SDK already retries connection failures, 408, 409, 429 and 5xx
+# twice on its own (max_retries=2), so an API error arriving here has survived
+# three attempts. This layer exists for the two cases that survives does not
+# cover: a condition that outlasts the SDK's backoff -- a sustained rate limit
+# or provider incident -- and the parse failures the SDK cannot see at all,
+# because they happen after a perfectly successful HTTP call.
+
+_RETRYABLE_API_ERRORS: tuple[type[Exception], ...] = (
+    APIConnectionError,  # covers APITimeoutError
+    RateLimitError,
+    InternalServerError,
+)
+
+# parse_judge_response raises these after a 200: a model emitting
+# markdown-fenced JSON despite Structured Outputs, output truncated at
+# max_output_tokens, or a per-rubric score outside [0, 3]. They are sampling
+# flakes -- a second draw usually fixes them -- and are the failures most worth
+# retrying, since without this they get exactly one attempt.
+#
+# JSONDecodeError is a ValueError, so the second entry is redundant; both are
+# listed to document the two distinct failures. ValueError is broad enough to
+# also catch a deterministic bug, which then costs max_retries wasted calls --
+# bounded, and preferable to letting a flake lose the trial.
+_RETRYABLE_PARSE_ERRORS: tuple[type[Exception], ...] = (json.JSONDecodeError, ValueError)
+
+# No draw fixes a bad or unentitled key. Not retried, so a misconfigured run
+# fails fast per trial instead of paying max_retries times over for each.
+_FATAL_ERRORS: tuple[type[Exception], ...] = (AuthenticationError, PermissionDeniedError)
+
+_RETRY_BASE_DELAY_SEC = 5.0
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Whether a second attempt at ``judge()`` could plausibly succeed."""
+    if isinstance(exc, _FATAL_ERRORS):
+        return False
+    return isinstance(exc, _RETRYABLE_API_ERRORS + _RETRYABLE_PARSE_ERRORS)
+
+
+async def judge_with_retry(
+    client: AsyncOpenAI,
+    expected: dict[str, Any],
+    predictions: str,
+    rubric_data: list[dict[str, Any]],
+    *,
+    model: str,
+    reasoning_effort: str | None,
+    max_retries: int,
+    label: str,
+) -> tuple[dict[str, Any], int]:
+    """``judge()`` with bounded retries. Returns ``(result, attempts_used)``.
+
+    The backoff sleeps while still holding the caller's judge semaphore. That
+    is deliberate: under a rate limit the stalled slot is one fewer concurrent
+    request, so the retry throttles the run instead of re-queueing the pressure
+    that caused the failure.
+    """
+    for attempt in range(1, max_retries + 2):
+        try:
+            return (
+                await judge(
+                    client,
+                    expected,
+                    predictions,
+                    rubric_data,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                ),
+                attempt,
+            )
+        except Exception as exc:
+            if isinstance(exc, _FATAL_ERRORS):
+                logger.error(
+                    f"{label}: {type(exc).__name__} -- the judge credentials are "
+                    f"rejected, so every remaining trial will fail the same way: {exc}"
+                )
+                raise
+            if attempt > max_retries or not _is_retryable(exc):
+                raise
+            delay = _RETRY_BASE_DELAY_SEC * 2 ** (attempt - 1)
+            logger.warning(
+                f"{label}: attempt {attempt}/{max_retries + 1} failed "
+                f"({type(exc).__name__}: {exc}); retrying in {delay:.0f}s"
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +212,7 @@ async def process_trial(
     prompts_dir: Path,
     work_dir: Path,
     force: bool,
+    max_retries: int,
 ) -> tuple[str, dict[str, Any] | None]:
     """Score a single trial and write its result to a per-trial JSON file.
 
@@ -162,13 +265,15 @@ async def process_trial(
 
     async with judge_sem:
         try:
-            result = await judge(
+            result, attempts = await judge_with_retry(
                 client,
                 expected,
                 predictions,
                 rubric_data,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                max_retries=max_retries,
+                label=f"Trial {trial_id} ({task_name})",
             )
         except Exception as exc:
             logger.error(f"Trial {trial_id} ({task_name}) failed: {exc}")
@@ -203,6 +308,11 @@ async def process_trial(
         "rca_depth": rca_depth,
         "reward": rca_depth / 3.0,
     }
+    # Recorded only when it took more than one draw, so a clean run's schema is
+    # unchanged and a flaky one is visible after the fact -- CI logs are
+    # ephemeral, the score file is not.
+    if attempts > 1:
+        payload["attempts"] = attempts
     _atomic_write_json(out_path, payload)
     prompt_text = result.get("judge_prompt")
     if prompt_text:
@@ -225,6 +335,7 @@ async def process_batch(
     model: str,
     reasoning_effort: str | None,
     bs: int,
+    max_retries: int,
 ) -> None:
     """Process all trials in a batch concurrently; write per-trial JSONs."""
     logger.info(f"=== Batch {batch_num}/{n_batches}: {len(batch)} trials ===")
@@ -244,6 +355,7 @@ async def process_batch(
             prompts_dir,
             work_dir,
             force,
+            max_retries,
         )
         for row in batch
     ]
@@ -309,6 +421,16 @@ async def main() -> None:
         type=int,
         default=10,
         help="Maximum number of concurrent LLM judge API calls (default: 10).",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help=(
+            "Retries per trial for failures a second draw can fix -- malformed "
+            "judge JSON, and rate limits or 5xx that outlast the OpenAI SDK's "
+            "own retries (default: 2). 0 disables."
+        ),
     )
     parser.add_argument(
         "--download-concurrency",
@@ -407,6 +529,7 @@ async def main() -> None:
                 args.model,
                 args.effort,
                 bs,
+                args.max_retries,
             )
     logger.info("Done!")
 
