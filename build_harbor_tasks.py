@@ -15,16 +15,31 @@ under ``output_dir/harbor/``.
 
 No dataset manifest is written by default -- tasks are first-class registry
 packages, so ``harbor publish <task dirs>`` works standalone. ``--split``
-additionally partitions the build at the incident level and writes::
+additionally partitions the build at the incident level and writes four
+dataset manifests (names derived from ``--org``, so the full build and the
+public split can never claim the same name)::
 
-    harbor/split.json                    # auditable record of the partition
-    harbor/datasets/public/dataset.toml  # + README.md
-    harbor/datasets/private/dataset.toml
-    harbor/datasets/verified/dataset.toml   # --verified-json only
+    harbor/split.json                            # auditable record
+    harbor/datasets/public/          <org>/<org>
+    harbor/datasets/private-oracle/  <org>/<org>-private-oracle
+    harbor/datasets/private/         <org>/<org>-private
+    harbor/datasets/verified/        <org>/<org>-verified   # --verified-json only
 
-Dataset names derive from ``--org`` (``<org>/<org>``, ``-private``,
-``-verified``) rather than a flag, so the full build and the public split can
-never claim the same name.
+``--split`` also renders an answer-free duplicate of every private-split task
+at ``harbor/tasks/<task_id>-hidden/``, published as ``<hash>-hidden``. The
+duplicate drops ``tests/expected.json``, ``tests/rubrics/`` and ``solution/``,
+and keeps only ``category``, ``tags``, ``user_facing_issue``, ``current``,
+``reported_styled`` and ``difficulty`` in ``task.toml`` ``[metadata]``. Those
+are the answer-bearing files: a submitter who runs the oracle private tasks
+holds the root cause for every one of them, so the held-out split ships as the
+hidden variant and is scored out-of-band instead.
+
+The hidden tasks build and run exactly like their oracle twins -- same
+instruction, same telemetry -- but their in-container verifier cannot score:
+``tests/check_prediction.py`` fails to open the missing ``expected.json``, and
+its except branch writes ``reward.json`` = ``{"reward": 0.0}``. That is a real
+0, not an absent verdict, so anything aggregating these trials must read the
+score from the out-of-band judge rather than from the Hub's ``evals``.
 
 Each ``task.toml`` gets a ``[task]`` section whose package name is a hash of the
 task id (``<org>/<hash>``), so ``harbor add`` accepts the tasks directly with no
@@ -849,6 +864,8 @@ def write_dataset_dir(
     blurb: str,
     authors: list[Author],
     side: Side,
+    *,
+    org: str,
 ) -> None:
     """Write a publishable dataset directory (dataset.toml + README.md)."""
     dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -856,7 +873,7 @@ def write_dataset_dir(
     manifest = DatasetManifest(
         dataset=DatasetInfo(name=name, description=description, authors=authors),
         tasks=[
-            DatasetTaskRef(name=f"orca-bench/{t.package_name}", digest=t.digest)
+            DatasetTaskRef(name=f"{org}/{t.package_name}", digest=t.digest)
             # Sort by package name so the manifest is stable across runs.
             for t in sorted(side.tasks, key=lambda t: t.package_name)
         ],
@@ -917,6 +934,107 @@ def verified_side(verified_json: Path | None, public: Side) -> Side | None:
         )
     logger.info(f"Verified view: {len(wanted)} task(s) selected from the public side")
     return Side(tasks=[by_id[t] for t in wanted])
+
+
+# Package-name suffix and content policy for the answer-free private variant.
+# The oracle task carries its own ground truth -- tests/expected.json names the
+# root causes and event times, tests/rubrics/<event>.json spells out the flag
+# and mechanism, and solution/ holds a copy of both plus the oracle solver. A
+# split is only held out if none of that ships, so all three go.
+#
+# instruction.md is safe to keep: its template substitutes only `current`,
+# `{reported}` (bound to spec.reported_styled in build_task, NOT to the ISO
+# `reported` metadata field) and `user_facing_issue` -- the feature flag
+# never reaches it.
+HIDDEN_SUFFIX = "-hidden"
+HIDDEN_STRIP = ("tests/expected.json", "tests/rubrics", "solution")
+# task.toml [metadata] is rebuilt from this allowlist, dropping qid,
+# incident_time, events, flag, description, granularity and the rest.
+#
+# `reported_styled` -- not `reported` -- is the timing field kept here. Both
+# say when the issue was reported, but `reported` is the ISO instant
+# `incident_dt + offset_minutes` (task_spec.py), and offsets are only ever 10
+# or 60 minutes, so it narrows the incident time to two candidates. The
+# styled string is the exact text instruction.md already renders into the
+# agent's prompt, so keeping it adds nothing the agent cannot read.
+HIDDEN_METADATA_KEYS = (
+    "category",
+    "tags",
+    "user_facing_issue",
+    "current",
+    "reported_styled",
+    "difficulty",
+)
+
+
+def build_hidden_task(
+    src_dir: Path, dst_dir: Path, *, org: str, package_name: str
+) -> str:
+    """Copy ``src_dir`` to ``dst_dir`` with every answer stripped; return its digest.
+
+    The copy keeps instruction.md, environment/ and the verifier scripts, so it
+    builds and runs exactly like the oracle task -- an agent sees the same
+    prompt and the same telemetry. It just cannot be scored in-container.
+    """
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    shutil.copytree(src_dir, dst_dir)
+
+    for rel in HIDDEN_STRIP:
+        target = dst_dir / rel
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+
+    toml_path = dst_dir / "task.toml"
+    config = TaskConfig.model_validate_toml(toml_path.read_text())
+    config.task = PackageInfo(name=f"{org}/{package_name}", description="")
+    config.metadata = {
+        k: v for k, v in config.metadata.items() if k in HIDDEN_METADATA_KEYS
+    }
+    config.schema_version = "1.3"
+    toml_path.write_text(config.model_dump_toml())
+
+    content_hash, _ = Packager.compute_content_hash(dst_dir)
+    return f"sha256:{content_hash}"
+
+
+def hidden_side(tasks_dir: Path, private: Side, *, org: str) -> Side:
+    """Build one answer-free duplicate per private-split task.
+
+    Same task_id and incident as its oracle twin -- only the package name
+    (``<hash>-hidden``) and the content differ -- so this is recorded as a view,
+    never as a split: ``convert_job.build_routing`` keys on task_id, and two
+    entries for one task_id under ``splits`` would silently reroute those trials
+    to whichever dataset iterated last.
+    """
+    side = Side()
+    for task in sorted(private.tasks, key=lambda t: t.task_id):
+        src = tasks_dir / task.task_id
+        if not src.is_dir():
+            raise FileNotFoundError(f"no built task dir for {task.task_id} at {src}")
+        package_name = f"{task.package_name}{HIDDEN_SUFFIX}"
+        digest = build_hidden_task(
+            src,
+            tasks_dir / f"{task.task_id}{HIDDEN_SUFFIX}",
+            org=org,
+            package_name=package_name,
+        )
+        side.tasks.append(
+            Task(
+                task_id=task.task_id,
+                qid=task.qid,
+                granularity=task.granularity,
+                package_name=package_name,
+                digest=digest,
+            )
+        )
+    logger.info(
+        f"Built {len(side.tasks)} answer-free task(s) -> "
+        f"{tasks_dir}/*{HIDDEN_SUFFIX}"
+    )
+    return side
 
 
 def _side_record(name: str, side: Side) -> dict[str, Any]:
@@ -980,14 +1098,21 @@ def write_splits(
     check_split(public, private, tasks, pinned_qids)
     table = log_counts(public, private)
     verified = verified_side(verified_json, public)
+    hidden = hidden_side(task_root / "tasks", private, org=org)
 
     names = {
         "public": f"{org}/{org}",
+        "private-oracle": f"{org}/{org}-private-oracle",
         "private": f"{org}/{org}-private",
         "verified": f"{org}/{org}-verified",
     }
-    labels = {"public": "public", "private": "held-out private", "verified": "verified"}
-    sides = [("public", public), ("private", private)]
+    labels = {
+        "public": "public",
+        "private-oracle": "held-out private (with answers)",
+        "private": "held-out private (answers removed)",
+        "verified": "verified",
+    }
+    sides = [("public", public), ("private-oracle", private), ("private", hidden)]
     if verified is not None:
         sides.append(("verified", verified))
 
@@ -1001,6 +1126,7 @@ def write_splits(
             blurb,
             authors,
             side,
+            org=org,
         )
 
     split_path = task_root / "split.json"
@@ -1016,14 +1142,19 @@ def write_splits(
                 # iterates it assuming each task_id appears once.
                 "splits": {
                     key: _side_record(names[key], side)
-                    for key, side in (("public", public), ("private", private))
+                    for key, side in (("public", public), ("private-oracle", private))
                 },
-                # Views overlap the splits; keep them out of `splits`.
-                "views": (
-                    {"verified": _side_record(names["verified"], verified)}
-                    if verified is not None
-                    else {}
-                ),
+                # Views share task_ids with a split (verified is a subset of
+                # public; private-hidden is a repackaging of private-oracle),
+                # so they must stay out of `splits`.
+                "views": {
+                    key: _side_record(names[name_key], side)
+                    for key, name_key, side in (
+                        ("verified", "verified", verified),
+                        ("private-hidden", "private", hidden),
+                    )
+                    if side is not None
+                },
             },
             indent=2,
         )
@@ -1198,7 +1329,7 @@ def main() -> None:
     print("\nNext steps:")
     print(f"  harbor add {tasks_dir} --scan       # upload the task content")
     if args.split:
-        for key in ("public", "private", "verified"):
+        for key in ("public", "private-oracle", "private", "verified"):
             path = task_root / "datasets" / key
             if path.is_dir():
                 print(f"  harbor publish {path} --private")

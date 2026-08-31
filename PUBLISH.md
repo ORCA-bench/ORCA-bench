@@ -9,12 +9,18 @@ uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
   --templates-dir harbor-template --force
 ```
 
-- Dataset(s): re-run the build with `--split` to write `split.json` plus the
-  public / private / verified dataset manifests, then publish each one. Dataset
-  names derive from `--org` (`orca-bench/orca-bench`, `-private`, `-verified`),
-  so the full build and the public split can never claim the same name — a
-  collision that would otherwise republish the public dataset with the private
-  tasks included.
+- Dataset(s): re-run the build with `--split` to write `split.json` plus four
+  dataset manifests, then publish each one. Names derive from `--org`, so the
+  full build and the public split can never claim the same name — a collision
+  that would otherwise republish the public dataset with the private tasks
+  included.
+
+| Dataset | Tasks | Contents |
+|---|---|---|
+| `orca-bench/orca-bench` | 755 | public split |
+| `orca-bench/orca-bench-private-oracle` | 324 | held-out split, answers included |
+| `orca-bench/orca-bench-private` | 324 | the same tasks with the answers removed |
+| `orca-bench/orca-bench-verified` | 40 | verified subset of the public split |
 
 ```bash
 uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
@@ -22,18 +28,39 @@ uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
   --verified-json human-eval-sample/output/sampled_tasks.json \
   --dataset-author "Albert Gong <ag2435@cornell.edu>"
 
-# Writes out-0804/harbor/split.json and out-0804/harbor/datasets/{public,private,verified}/
+# Writes out-0804/harbor/split.json, the answer-free tasks/<task_id>-hidden/
+# dirs, and out-0804/harbor/datasets/{public,private-oracle,private,verified}/
+uv run harbor add out-0804/harbor/tasks --scan
 uv run harbor publish out-0804/harbor/datasets/public --private
+uv run harbor publish out-0804/harbor/datasets/private-oracle --private
 uv run harbor publish out-0804/harbor/datasets/private --private
 uv run harbor publish out-0804/harbor/datasets/verified --private
 ```
 
+> [!IMPORTANT]
+> `orca-bench/orca-bench-private` is the split to hand to submitters. Its tasks
+> ship without `tests/expected.json`, `tests/rubrics/` or `solution/`, and their
+> `task.toml` `[metadata]` keeps only `category`, `tags`, `user_facing_issue`,
+> `current`, `reported_styled` and `difficulty` — every other field,
+> `incident_time`, `flag` and `events` included, names or dates the root
+> cause. (`reported_styled` is the phrasing the prompt already shows; the ISO
+> `reported` field is `incident_time + offset_minutes`, so it is not kept.) `harbor run` puts the task directory on the machine that
+> runs it, so publishing `-private-oracle` to submitters would hand over the
+> answers for all 324 tasks.
+>
+> The hidden tasks cannot be scored in-container: the verifier fails to open the
+> missing `expected.json` and its except branch writes `reward.json` =
+> `{"reward": 0.0}`. That is a real 0, not an absent verdict, so score these
+> trials out-of-band (`run_llm_judge.py` against a maintainer-side registry)
+> rather than reading the Hub's `evals`.
+
 > [!NOTE]
-> `split.json` records the disjoint partition under `splits` and the verified
-> subset under `views`. Verified is a *view over public*, not a third split:
-> `convert_job.py` assigns `routing[task_id]` while looping over `splits`, so an
-> overlapping entry there would silently reroute those trials to whichever
-> dataset iterated last.
+> `split.json` records the disjoint partition under `splits` (`public`,
+> `private-oracle`) and the overlapping selections under `views` (`verified` is
+> a subset of public; `private-hidden` repackages private-oracle under new
+> package names). `convert_job.py` assigns `routing[task_id]` while looping over
+> `splits`, so an entry sharing a task_id there would silently reroute those
+> trials to whichever dataset iterated last.
 
 - Create a leaderboard for each dataset by running the following command:
 
