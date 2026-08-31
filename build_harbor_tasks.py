@@ -378,7 +378,7 @@ set -euo pipefail
 echo "[solve] Installing dependencies..."
 pip install tabulate
 echo "[solve] Generating report..."
-python /solution/solve.py --rubric /solution/rubric.json
+python /solution/solve.py --rubrics-dir /solution/rubrics
 """
     solution_dir = task_dir / "solution"
     solution_dir.mkdir(parents=True, exist_ok=True)
@@ -406,16 +406,19 @@ python /solution/solve.py --rubric /solution/rubric.json
     # -- Add rubrics for LLM judge --
     # ``tests/rubrics/<event_id>.json`` carries one rubric per plausible event
     # in ``expected.events``. The verifier (check_prediction.py) loads all of
-    # them and scores the agent against any one of them. The oracle solver
-    # (solve.py) is given just ``solution/rubric.json`` — the *first* event's
-    # rubric (= the authored event when present), so the oracle still produces
-    # a single coherent report.
+    # them, scores the report against each independently, and averages the
+    # per-rubric scores. A report covering only one cause therefore caps at
+    # ``1/len(events)`` of full credit, so ``solution/rubrics/`` mirrors the
+    # full set and the oracle solver (solve.py, via ``--rubrics-dir``) writes
+    # one report covering every plausible cause. This matches what the
+    # agent-facing prompt asks for: "There may be multiple root causes or no
+    # root cause at all" (instruction.md.template).
     if json_dir is not None and events:
         tests_rubrics_dir = tests_dir / "rubrics"
         tests_rubrics_dir.mkdir(parents=True, exist_ok=True)
         solution_rubrics_dir = solution_dir / "rubrics"
         solution_rubrics_dir.mkdir(parents=True, exist_ok=True)
-        for i, ev in enumerate(events):
+        for ev in events:
             event_id = ev.get("event_id")
             flag = ev.get("root_cause")
             if not event_id:
@@ -432,10 +435,6 @@ python /solution/solve.py --rubric /solution/rubric.json
                 continue
             shutil.copy2(rubric_path, tests_rubrics_dir / f"{event_id}.json")
             shutil.copy2(rubric_path, solution_rubrics_dir / f"{event_id}.json")
-            if i == 0:
-                # Canonical rubric for the oracle solver. solve.sh reads this
-                # path; only the first (authored) event's rubric is used.
-                shutil.copy2(rubric_path, solution_dir / "rubric.json")
 
 
 def _csv_row_for(spec: TaskSpec, events: list[dict]) -> dict[str, Any]:

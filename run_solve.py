@@ -58,8 +58,11 @@ async def process_rubric(
 
     async with semaphore:
         try:
+            # One rubric file per call here: run_solve.py batch-generates a
+            # per-cause reference report, unlike the in-task oracle which
+            # covers a task's whole rubric set in one report.
             report_text, prompt, reasoning_summary = await generate_report(
-                client, rubric_data, model=model, effort=effort
+                client, [rubric_data], model=model, effort=effort
             )
         except Exception as exc:
             logger.error(f"Generation failed for {rubric_path.name}: {exc}")
