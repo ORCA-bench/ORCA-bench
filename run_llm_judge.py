@@ -21,6 +21,10 @@ twin's ground truth, which is what makes this script the scoring path for
 ``orca-bench/orca-bench-private`` -- those tasks ship without a rubric and
 cannot be scored in-container (see build_harbor_tasks.py).
 
+Model and reasoning effort default to what the in-container verifier uses
+(``openai-gpt-5.4``, effort ``high``), so scores are comparable with the ones
+the public split's verifier produced. Override with ``-m`` / ``-e``.
+
 Requires HARBOR_API_KEY (or a ``harbor auth login`` session) with read access to
 the oracle tasks, plus OPENAI_API_KEY for the judge itself. Access is checked
 before any trial is downloaded.
@@ -263,7 +267,12 @@ async def main() -> None:
     """Run the LLM judge on every trial of the given Hub jobs."""
     parser = get_base_parser()
     parser.description = "Run LLM-as-a-judge evaluation on Harbor Hub trials."
-    parser.set_defaults(model=DEFAULT_MODEL)
+    # Match the in-container verifier, which is what produced every score
+    # these are compared against: tests/test.sh runs check_prediction.py with
+    # no arguments, so it judges at its own defaults (openai-gpt-5.4, effort
+    # high). The shared base parser defaults --effort to None, which would
+    # silently judge this split at a different reasoning effort.
+    parser.set_defaults(model=DEFAULT_MODEL, effort="high")
     parser.add_argument(
         "--job",
         "-j",
