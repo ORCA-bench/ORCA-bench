@@ -2,9 +2,10 @@
 r"""Run LLM-as-a-judge evaluation on Harbor Hub trials.
 
 Scores every trial of one or more Hub jobs, reading both halves of each judge
-input straight from the Hub (see hub_source): the agent's ``report.md`` from the
-trial archive, and ``expected.json`` + ``tests/rubrics/`` from the task package.
-Per-trial results are written under OUTPUT_DIR.
+input straight from the Hub (see ``harbor_utils.hub_source``): the agent's
+``report.md`` from the trial archive, and ``expected.json`` +
+``tests/rubrics/`` from the task package. Per-trial results are written under
+OUTPUT_DIR.
 
 Usage::
 
@@ -42,6 +43,7 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+from harbor_utils import hub_source
 from utils import get_base_parser, setup_logging
 
 # Add the directory containing check_prediction.py to sys.path so we can
@@ -52,7 +54,6 @@ from check_prediction import (
     aggregate_judge_response,
     judge,
 )
-import hub_source
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 r"""Fetch LLM-judge inputs straight from Harbor Hub.
 
 No local jobs directory is involved -- both halves of a judge input come from
