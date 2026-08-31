@@ -56,6 +56,12 @@ from openai import (
     PermissionDeniedError,
     RateLimitError,
 )
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
 from harbor_utils import hub_source
 from utils import get_base_parser, setup_logging
@@ -108,11 +114,25 @@ _FATAL_ERRORS: tuple[type[Exception], ...] = (AuthenticationError, PermissionDen
 _RETRY_BASE_DELAY_SEC = 5.0
 
 
-def _is_retryable(exc: Exception) -> bool:
+def _is_retryable(exc: BaseException) -> bool:
     """Whether a second attempt at ``judge()`` could plausibly succeed."""
     if isinstance(exc, _FATAL_ERRORS):
         return False
     return isinstance(exc, _RETRYABLE_API_ERRORS + _RETRYABLE_PARSE_ERRORS)
+
+
+def _log_retry(label: str, max_retries: int):
+    """tenacity ``before_sleep`` hook: report the failure and the wait."""
+
+    def hook(retry_state) -> None:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        logger.warning(
+            f"{label}: attempt {retry_state.attempt_number}/{max_retries + 1} "
+            f"failed ({type(exc).__name__}: {exc}); retrying in "
+            f"{retry_state.next_action.sleep:.0f}s"
+        )
+
+    return hook
 
 
 async def judge_with_retry(
@@ -128,40 +148,58 @@ async def judge_with_retry(
 ) -> tuple[dict[str, Any], int]:
     """``judge()`` with bounded retries. Returns ``(result, attempts_used)``.
 
-    The backoff sleeps while still holding the caller's judge semaphore. That
-    is deliberate: under a rate limit the stalled slot is one fewer concurrent
-    request, so the retry throttles the run instead of re-queueing the pressure
-    that caused the failure.
+    Uses tenacity's ``AsyncRetrying`` as an explicit loop rather than the
+    ``@retry`` decorator, which would hide the attempt count this returns. The
+    split matches harbor's own ``supabase_rpc_retry``: the predicate is ours
+    because deciding what is worth another draw is project knowledge; the
+    waiting is the library's because it is not.
+
+    The wait is exponential **with jitter**. That matters at concurrency 10: a
+    rate limit typically rejects several in-flight calls at once, and a fixed
+    backoff would have them all sleep the same interval and retry in a
+    synchronized burst against the limit that just rejected them.
+
+    ``reraise=True`` so the caller sees the original exception -- the error
+    payload records its type, and a ``RetryError`` wrapper would erase that.
+
+    Note that ``process_trial`` holds the judge semaphore across this whole
+    call, so the backoff sleeps with a concurrency slot still taken. That is
+    deliberate, and independent of the retry API used: under a rate limit the
+    stalled slot is one fewer concurrent request, so the wait throttles the run
+    rather than freeing capacity to re-apply the pressure that caused the
+    failure. Moving the acquire inside the loop body would trade that for
+    better throughput on isolated flakes.
     """
-    for attempt in range(1, max_retries + 2):
-        try:
-            return (
-                await judge(
+    attempt_number = 0
+    async for attempt in AsyncRetrying(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(max_retries + 1),
+        wait=wait_random_exponential(multiplier=_RETRY_BASE_DELAY_SEC, max=60),
+        before_sleep=_log_retry(label, max_retries),
+        reraise=True,
+    ):
+        with attempt:
+            attempt_number = attempt.retry_state.attempt_number
+            try:
+                result = await judge(
                     client,
                     expected,
                     predictions,
                     rubric_data,
                     model=model,
                     reasoning_effort=reasoning_effort,
-                ),
-                attempt,
-            )
-        except Exception as exc:
-            if isinstance(exc, _FATAL_ERRORS):
+                )
+            except _FATAL_ERRORS as exc:
+                # _is_retryable already refuses these, so this only adds the
+                # message: one rejected key fails every remaining trial, and
+                # that is worth saying once per occurrence rather than leaving
+                # 324 identical payloads to explain themselves.
                 logger.error(
                     f"{label}: {type(exc).__name__} -- the judge credentials are "
                     f"rejected, so every remaining trial will fail the same way: {exc}"
                 )
                 raise
-            if attempt > max_retries or not _is_retryable(exc):
-                raise
-            delay = _RETRY_BASE_DELAY_SEC * 2 ** (attempt - 1)
-            logger.warning(
-                f"{label}: attempt {attempt}/{max_retries + 1} failed "
-                f"({type(exc).__name__}: {exc}); retrying in {delay:.0f}s"
-            )
-            await asyncio.sleep(delay)
-    raise AssertionError("unreachable")  # pragma: no cover
+    return result, attempt_number
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +467,8 @@ async def main() -> None:
         help=(
             "Retries per trial for failures a second draw can fix -- malformed "
             "judge JSON, and rate limits or 5xx that outlast the OpenAI SDK's "
-            "own retries (default: 2). 0 disables."
+            "own retries (default: 2). Waits are exponential with jitter. "
+            "0 disables."
         ),
     )
     parser.add_argument(
