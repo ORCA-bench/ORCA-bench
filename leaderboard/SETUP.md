@@ -22,13 +22,19 @@ because GitHub only executes workflow files directly in that directory.
 
 harbor-index also ships an LLM **trajectory judge** (`/judge` and `/apply`
 comment commands, `ci/judge.py`, `ci/gen_analysis_tasks.py`, and the
-`leaderboard-judge.yml` / `leaderboard-apply.yml` workflows). Those are **not**
-ported: they run judge agents on Modal against per-task agent images on Docker
-Hub, which ORCA-bench's privileged docker-in-docker otel-demo tasks don't have.
-
-Consequences: no `ANTHROPIC_API_KEY` / Modal secrets are needed, and the
+`leaderboard-judge.yml` / `leaderboard-apply.yml` workflows). The *trajectory*
+judge is **not** ported: it runs judge agents on Modal against per-task agent
+images on Docker Hub, which ORCA-bench's privileged docker-in-docker otel-demo
+tasks don't have. So no `ANTHROPIC_API_KEY` / Modal secrets are needed, and the
 `disqualified_trials` / `credited_trials` override lists are maintained by hand
 on the bot PR instead of by `/apply`. The metric still honors them.
+
+ORCA-bench does ship its own `leaderboard-judge.yml`, but it answers a different
+question. It runs `run_llm_judge.py` on the runner — a plain API call per trial,
+no sandbox — to score the held-out split, whose tasks ship without
+`expected.json` or `rubrics/` and so cannot be scored in-container (see
+`build_harbor_tasks.py`). Same `/judge` trigger and the same write-access gate;
+different work.
 
 ## Get your `HARBOR_API_KEY`
 
@@ -188,7 +194,14 @@ no `harbor hub dataset` subcommand.)
 
 | Secret | Used by | For |
 | --- | --- | --- |
-| `HARBOR_API_KEY` | check, promote, merge, close | hub/registry access, trial cloning, leaderboard submit |
+| `HARBOR_API_KEY` | check, promote, merge, close, judge | hub/registry access, trial cloning, leaderboard submit |
+| `OPENAI_API_KEY` | judge | the LLM judge itself |
+| `OPENAI_BASE_URL` | judge | optional; non-OpenAI inference endpoint |
+
+`OPENAI_API_KEY` is why `/judge` is gated to write-access commenters: `promote`
+runs on any fork PR that passes static analysis, so an automatic trigger would
+hand contributor-controlled spend — one judge call per trial, at effort `high` —
+to whoever opens a valid submission.
 
 **Set.** Sourced from `~/.harbor/credentials.json` (the `api_key` field, present
 once you have logged in with harbor ≥ 0.20):
