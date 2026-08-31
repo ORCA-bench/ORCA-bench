@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
-r"""Run LLM-as-a-judge evaluation on harbor-export output.
+r"""Run LLM-as-a-judge evaluation on Harbor Hub trials.
 
-Reads OUTPUT_DIR/all-predictions.json (produced by ``harbor-export``) and
-scores every trial with GPT 5.4.  Results are written back to OUTPUT_DIR.
+Scores every trial of one or more Hub jobs, reading both halves of each judge
+input straight from the Hub (see hub_source): the agent's ``report.md`` from the
+trial archive, and ``expected.json`` + ``tests/rubrics/`` from the task package.
+Per-trial results are written under OUTPUT_DIR.
 
 Usage::
 
-    # Score all trials
-    uv run python run_llm_judge.py -od out-0224-curl --rubrics-dir rubrics/
+    # Score every trial of a job
+    uv run python run_llm_judge.py -od out-0224 --job <job-uuid>
 
-    # Score batch 2 of size 5 (trials 6-10)
-    uv run python run_llm_judge.py -od out-0224-curl --rubrics-dir rubrics/ \\
-        --batch-size 5 --batch-number 2
+    # Score batch 2 of size 50, across two jobs
+    uv run python run_llm_judge.py -od out-0224 \\
+        --job <uuid-a> --job <uuid-b> --batch-size 50 --batch-number 2
 
-Prerequisite: run ``harbor-export`` with ``--registry-url`` to include
-task_meta and expected in the JSON::
+Trials of the answer-free ``-hidden`` split are scored against their oracle
+twin's ground truth, which is what makes this script the scoring path for
+``orca-bench/orca-bench-private`` -- those tasks ship without a rubric and
+cannot be scored in-container (see build_harbor_tasks.py).
 
-    uv run harbor-export <jobs_dir> -od <output_dir> \\
-        --registry-url https://huggingface.co/datasets/.../registry.json
+Requires HARBOR_API_KEY (or a ``harbor auth login`` session) with read access to
+the oracle tasks, plus OPENAI_API_KEY for the judge itself. Access is checked
+before any trial is downloaded.
 
+Trials already scored under OUTPUT_DIR/scores are skipped *before* their archive
+is fetched, so a re-run costs neither API calls nor downloads. Pass --force to
+re-score.
 """
 
 import asyncio
@@ -27,6 +35,7 @@ import logging
 import math
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +52,7 @@ from check_prediction import (
     aggregate_judge_response,
     judge,
 )
+import hub_source
 
 logger = logging.getLogger(__name__)
 
@@ -83,31 +93,35 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 async def process_trial(
     client: AsyncOpenAI,
-    semaphore: asyncio.Semaphore,
-    trial_id: str,
-    entry: dict[str, Any],
+    judge_sem: asyncio.Semaphore,
+    download_sem: asyncio.Semaphore,
+    row: dict[str, Any],
+    truth: dict[str, Any],
     model: str,
     reasoning_effort: str | None,
     bs: int,
     batch_num: int,
     scores_dir: Path,
     prompts_dir: Path,
+    work_dir: Path,
     force: bool,
 ) -> tuple[str, dict[str, Any] | None]:
     """Score a single trial and write its result to a per-trial JSON file.
 
     Also writes the judge prompt to a sibling ``.md`` under ``prompts_dir``.
 
-    Returns ``(trial_id, None)`` when the trial is skipped because its
-    output file already exists (and ``--force`` was not passed). In that
-    case, the prompt markdown is backfilled from the existing JSON if
-    missing.
+    The already-scored check runs *before* the report is fetched, so a re-run
+    neither downloads archives nor calls the judge. Returns ``(trial_id, None)``
+    when the trial is skipped that way; the prompt markdown is backfilled from
+    the existing JSON if missing.
     """
+    trial_id = row["id"]
+    task_name = row.get("task_name", "")
     out_path = _trial_score_path(scores_dir, model, reasoning_effort, trial_id)
     prompt_path = _trial_prompt_path(prompts_dir, model, reasoning_effort, trial_id)
     if out_path.is_file() and not force:
         existing = json.loads(out_path.read_text())
-        if existing.get("mode") != "llm_judge_error":
+        if existing.get("mode") not in ("llm_judge_error", "hub_fetch_error"):
             if not prompt_path.is_file():
                 prompt_text = existing.get("judge_prompt")
                 if prompt_text:
@@ -115,39 +129,52 @@ async def process_trial(
             return trial_id, None
         logger.info(f"Trial {trial_id}: previous run errored, re-scoring")
 
-    task_meta = entry.get("task_meta", {})
-    task_name = entry.get("result", {}).get("task_name", "")
+    task_meta = truth.get("task_meta", {})
     flag = task_meta.get("flag", "")
-    rubric_data = entry.get("rubric") or []
-    expected = entry.get("expected", {})
+    rubric_data = truth.get("rubric") or []
+    expected = truth.get("expected", {})
 
-    async with semaphore:
+    def _error_payload(mode: str, exc: Exception) -> dict[str, Any]:
+        return {
+            "trial_id": trial_id,
+            "task_name": task_name,
+            "error": f"{type(exc).__name__}: {exc}",
+            "raw_response": getattr(exc, "raw_response", None),
+            "reward": 0.0,
+            "mode": mode,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "batch_size": bs,
+            "batch_number": batch_num,
+            "rca_depth": 0,
+            "rubric_used": bool(rubric_data),
+            "flag": flag,
+        }
+
+    # Bounded separately from the judge: a download is disk- and
+    # bandwidth-bound and pulls a whole trial archive for one markdown file.
+    async with download_sem:
+        try:
+            predictions = await hub_source.fetch_report(trial_id, work_dir)
+        except Exception as exc:
+            logger.error(f"Trial {trial_id} ({task_name}) download failed: {exc}")
+            payload = _error_payload("hub_fetch_error", exc)
+            _atomic_write_json(out_path, payload)
+            return trial_id, payload
+
+    async with judge_sem:
         try:
             result = await judge(
                 client,
                 expected,
-                entry.get("predictions", ""),
+                predictions,
                 rubric_data,
                 model=model,
                 reasoning_effort=reasoning_effort,
             )
         except Exception as exc:
             logger.error(f"Trial {trial_id} ({task_name}) failed: {exc}")
-            payload = {
-                "trial_id": trial_id,
-                "task_name": task_name,
-                "error": f"{type(exc).__name__}: {exc}",
-                "raw_response": getattr(exc, "raw_response", None),
-                "reward": 0.0,
-                "mode": "llm_judge_error",
-                "model": model,
-                "reasoning_effort": reasoning_effort,
-                "batch_size": bs,
-                "batch_number": batch_num,
-                "rca_depth": 0,
-                "rubric_used": bool(rubric_data),
-                "flag": flag,
-            }
+            payload = _error_payload("llm_judge_error", exc)
             _atomic_write_json(out_path, payload)
             return trial_id, payload
 
@@ -176,13 +203,15 @@ async def process_trial(
 
 async def process_batch(
     client: AsyncOpenAI,
-    semaphore: asyncio.Semaphore,
-    batch: list[str],
-    all_data: dict[str, Any],
+    judge_sem: asyncio.Semaphore,
+    download_sem: asyncio.Semaphore,
+    batch: list[dict[str, Any]],
+    truth: dict[str, dict[str, Any]],
     batch_num: int,
     n_batches: int,
     scores_dir: Path,
     prompts_dir: Path,
+    work_dir: Path,
     force: bool,
     model: str,
     reasoning_effort: str | None,
@@ -194,18 +223,20 @@ async def process_batch(
     tasks = [
         process_trial(
             client,
-            semaphore,
-            trial_id,
-            all_data[trial_id],
+            judge_sem,
+            download_sem,
+            row,
+            truth[row["task_name"]],
             model,
             reasoning_effort,
             bs,
             batch_num,
             scores_dir,
             prompts_dir,
+            work_dir,
             force,
         )
-        for trial_id in batch
+        for row in batch
     ]
     results = await asyncio.gather(*tasks)
 
@@ -228,10 +259,18 @@ async def process_batch(
 
 
 async def main() -> None:
-    """Run the LLM judge on all trials in all-predictions.json."""
+    """Run the LLM judge on every trial of the given Hub jobs."""
     parser = get_base_parser()
-    parser.description = "Run LLM-as-a-judge evaluation on harbor-export output."
+    parser.description = "Run LLM-as-a-judge evaluation on Harbor Hub trials."
     parser.set_defaults(model=DEFAULT_MODEL)
+    parser.add_argument(
+        "--job",
+        "-j",
+        action="append",
+        required=True,
+        metavar="UUID",
+        help="Harbor Hub job to score (link or bare UUID). Repeatable.",
+    )
     parser.add_argument(
         "--batch-size",
         "-bs",
@@ -258,67 +297,54 @@ async def main() -> None:
         help="Maximum number of concurrent LLM judge API calls (default: 10).",
     )
     parser.add_argument(
-        "--sampled-tasks-file",
-        type=Path,
-        default=None,
+        "--download-concurrency",
+        type=int,
+        default=4,
         help=(
-            "Optional JSON file whose top-level keys are task names. "
-            "When set, only trials whose task_name is in this set are scored."
+            "Maximum number of concurrent trial-archive downloads (default: 4). "
+            "Each holds one whole archive on disk while its report is read."
         ),
     )
     args = parser.parse_args()
     setup_logging(args.log_level)
 
     output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load predictions
-    predictions_path = output_dir / "all-predictions.json"
-    if not predictions_path.is_file():
-        logger.error(f"No predictions file found at {predictions_path}")
-        logger.error("Run `harbor-export <jobs_dir> -od <output_dir>` first.")
+    # Bare UUIDs or hub links; the trailing path segment is the id either way.
+    job_ids = [link.rstrip("/").split("/")[-1] for link in args.job]
+
+    await hub_source.check_hub_auth()
+
+    rows = await hub_source.list_job_trials(job_ids)
+    if not rows:
+        logger.error(f"No trials found for job(s) {', '.join(job_ids)}")
         sys.exit(1)
+    rows.sort(key=lambda r: r["id"])
 
-    logger.info(f"Loading predictions from {predictions_path}...")
-    with predictions_path.open() as f:
-        all_data = json.load(f)
-
-    # Sort trial IDs deterministically
-    trial_ids = sorted(all_data.keys())
-    logger.info(f"Found {len(trial_ids)} trials total")
-
-    if args.sampled_tasks_file is not None:
-        with args.sampled_tasks_file.open() as f:
-            allowed = set(json.load(f).keys())
-        before = len(trial_ids)
-        trial_ids = [
-            tid
-            for tid in trial_ids
-            if all_data[tid].get("result", {}).get("task_name") in allowed
-        ]
-        logger.info(
-            f"Filtered to {len(trial_ids)}/{before} trials "
-            f"({len(allowed)} allowed task names from {args.sampled_tasks_file})"
-        )
-
-    # Verify that task_meta and expected are present
-    sample_entry = next(iter(all_data.values()), {})
-    if "task_meta" not in sample_entry or "expected" not in sample_entry:
+    # Ground truth is fetched for every task up front: it is deduplicated and
+    # cached by harbor, and a missing rubric should fail before any judging
+    # spend rather than silently scoring a trial against nothing.
+    task_names = [r["task_name"] for r in rows]
+    await hub_source.check_task_access(hub_source.oracle_package(task_names[0]))
+    truth = await hub_source.load_ground_truth(task_names)
+    missing = sorted({n for n in task_names if not truth.get(n, {}).get("expected")})
+    if missing:
         logger.error(
-            "all-predictions.json is missing task_meta and/or expected fields. "
-            "Re-run `harbor-export` with --registry-url to include them."
+            f"{len(missing)} task(s) resolved no ground truth, e.g. {missing[:3]}"
         )
         sys.exit(1)
 
     # Batching
     if args.batch_size is not None:
-        n_batches = math.ceil(len(trial_ids) / args.batch_size)
+        n_batches = math.ceil(len(rows) / args.batch_size)
         batches = [
-            trial_ids[i : i + args.batch_size]
-            for i in range(0, len(trial_ids), args.batch_size)
+            rows[i : i + args.batch_size]
+            for i in range(0, len(rows), args.batch_size)
         ]
     else:
         n_batches = 1
-        batches = [trial_ids]
+        batches = [rows]
 
     if args.batch_number is not None:
         if args.batch_number < 1 or args.batch_number > n_batches:
@@ -338,31 +364,36 @@ async def main() -> None:
     )
 
     # Process batches sequentially (trials within each batch run concurrently)
-    bs = args.batch_size if args.batch_size is not None else len(trial_ids)
+    bs = args.batch_size if args.batch_size is not None else len(rows)
     scores_dir = output_dir / "scores"
     scores_dir.mkdir(exist_ok=True)
     prompts_dir = output_dir / "judge_prompts"
     prompts_dir.mkdir(exist_ok=True)
-    semaphore = asyncio.Semaphore(args.concurrency)
+    judge_sem = asyncio.Semaphore(args.concurrency)
+    download_sem = asyncio.Semaphore(args.download_concurrency)
 
-    for batch_idx, batch in enumerate(batches):
-        batch_num = (
-            args.batch_number if args.batch_number is not None else batch_idx + 1
-        )
-        await process_batch(
-            client,
-            semaphore,
-            batch,
-            all_data,
-            batch_num,
-            n_batches,
-            scores_dir,
-            prompts_dir,
-            args.force,
-            args.model,
-            args.effort,
-            bs,
-        )
+    with tempfile.TemporaryDirectory(prefix="hub-trials-", dir=output_dir) as tmp:
+        work_dir = Path(tmp)
+        for batch_idx, batch in enumerate(batches):
+            batch_num = (
+                args.batch_number if args.batch_number is not None else batch_idx + 1
+            )
+            await process_batch(
+                client,
+                judge_sem,
+                download_sem,
+                batch,
+                truth,
+                batch_num,
+                n_batches,
+                scores_dir,
+                prompts_dir,
+                work_dir,
+                args.force,
+                args.model,
+                args.effort,
+                bs,
+            )
     logger.info("Done!")
 
 

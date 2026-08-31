@@ -40,7 +40,6 @@ from utils import (
     find_trial_dirs,
     format_group_label,
     get_base_parser,
-    load_invalid_trial_ids,
 )
 
 # ── Shell tool helpers ────────────────────────────────────────────────
@@ -342,10 +341,6 @@ def main() -> None:
     args = parser.parse_args()
 
     csv_dir = args.output_dir / "tool_calls"
-    invalid_ids: set[str] = (
-        load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
-    )
-
     # Restrict to trials the analysis layer considers scored — the same set
     # utils.load_trials builds — so tool-call stats cover exactly the trials
     # that appear in the accuracy tables.
@@ -359,8 +354,6 @@ def main() -> None:
     rows = collect_tool_calls(
         args.jobs_dir, csv_dir=csv_dir, valid_trial_ids=valid_trial_ids
     )
-    if invalid_ids:
-        rows = [r for r in rows if r["trial_id"] not in invalid_ids]
 
     if not rows:
         print("No tool calls found.")
@@ -625,8 +618,6 @@ def main() -> None:
     runs_by_group: dict[str, list[dict]] = {g: [] for g in groups}
     for csv_path in sorted(csv_dir.glob("*.csv")):
         trial_id = csv_path.stem
-        if args.filter_xlsx and trial_id in invalid_ids:
-            continue
         group = trial_to_group.get(trial_id)
         if group is None:
             continue

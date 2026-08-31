@@ -27,19 +27,21 @@ public split can never claim the same name)::
 
 ``--split`` also renders an answer-free duplicate of every private-split task
 at ``harbor/tasks/<task_id>-hidden/``, published as ``<hash>-hidden``. The
-duplicate drops ``tests/expected.json``, ``tests/rubrics/`` and ``solution/``,
-and keeps only ``category``, ``tags``, ``user_facing_issue``, ``current``,
-``reported_styled`` and ``difficulty`` in ``task.toml`` ``[metadata]``. Those
-are the answer-bearing files: a submitter who runs the oracle private tasks
-holds the root cause for every one of them, so the held-out split ships as the
-hidden variant and is scored out-of-band instead.
+duplicate drops ``tests/expected.json``, ``tests/rubrics/``,
+``tests/check_prediction.py`` and ``solution/``, and keeps only ``category``,
+``tags``, ``user_facing_issue``, ``current``, ``reported_styled`` and
+``difficulty`` in ``task.toml`` ``[metadata]``. Those are the answer-bearing
+files: a submitter who runs the oracle private tasks holds the root cause for
+every one of them, so the held-out split ships as the hidden variant and is
+scored out-of-band instead.
 
 The hidden tasks build and run exactly like their oracle twins -- same
-instruction, same telemetry -- but their in-container verifier cannot score:
-``tests/check_prediction.py`` fails to open the missing ``expected.json``, and
-its except branch writes ``reward.json`` = ``{"reward": 0.0}``. That is a real
-0, not an absent verdict, so anything aggregating these trials must read the
-score from the out-of-band judge rather than from the Hub's ``evals``.
+instruction, same telemetry -- but they are not scored in-container. Harbor
+requires every task to have a test script and to leave a reward file, so
+``tests/test.sh`` is replaced by one that preserves ``report.md`` and writes an
+empty rewards map (``{}``). The trial then finishes clean with no metrics,
+rather than recording a 0 that every mean would average in. See
+``HIDDEN_TEST_SH``.
 
 Each ``task.toml`` gets a ``[task]`` section whose package name is a hash of the
 task id (``<org>/<hash>``), so ``harbor add`` accepts the tasks directly with no
@@ -946,7 +948,49 @@ def verified_side(verified_json: Path | None, public: Side) -> Side | None:
 # `reported` metadata field) and `user_facing_issue` -- the feature flag
 # never reaches it.
 HIDDEN_SUFFIX = "-hidden"
-HIDDEN_STRIP = ("tests/expected.json", "tests/rubrics", "solution")
+HIDDEN_STRIP = (
+    "tests/expected.json",
+    "tests/rubrics",
+    # The judge cannot run without expected.json, and shipping it with a
+    # dataset that is deliberately not scored in-container only hands the
+    # scoring implementation to whoever holds the tasks.
+    "tests/check_prediction.py",
+    "solution",
+)
+
+# tests/test.sh is replaced rather than stripped. Harbor requires both a test
+# script (verifier._resolve_tests raises FileNotFoundError without one) and a
+# reward file (verify() raises RewardFileNotFoundError, or RewardFileEmptyError
+# on a zero-byte one), so a task cannot simply decline to be scored. An empty
+# rewards map is the closest thing: VerifierResult(rewards={}) reports no
+# metrics, which leaderboard.core.hub.trial_metric reads as None and
+# metrics.submission_by_task then EXCLUDES, instead of the hard 0 that a
+# crashing verifier would record and that every mean would then average in.
+#
+# The map must stay empty, not carry a placeholder: trial_metric raises
+# MissingRewardMetricError when a trial reports metrics but not the one asked
+# for, and the Hub derives a row's own reward scalar from the alphabetically
+# first numeric entry (harbor.hub.models._first_numeric_reward), which has
+# already mis-scored this leaderboard once.
+HIDDEN_TEST_SH = """\
+#!/bin/bash
+# Verifier for the answer-free (-hidden) variant of an ORCA-bench task.
+#
+# This task ships without tests/expected.json and tests/rubrics/, so there is
+# nothing to score against here; scoring happens out-of-band against a
+# maintainer-side registry. Emit an empty rewards map so the trial finishes
+# clean and unscored rather than erroring or recording a 0.
+set -euo pipefail
+
+mkdir -p /logs/verifier
+
+# The agent's report is the only output the out-of-band judge needs.
+if [[ -f /app/report.md ]]; then
+  cp /app/report.md /logs/verifier/report.md 2>/dev/null || true
+fi
+
+printf '{}' > /logs/verifier/reward.json
+"""
 # task.toml [metadata] is rebuilt from this allowlist, dropping qid,
 # incident_time, events, flag, description, granularity and the rest.
 #
@@ -971,9 +1015,10 @@ def build_hidden_task(
 ) -> str:
     """Copy ``src_dir`` to ``dst_dir`` with every answer stripped; return its digest.
 
-    The copy keeps instruction.md, environment/ and the verifier scripts, so it
-    builds and runs exactly like the oracle task -- an agent sees the same
-    prompt and the same telemetry. It just cannot be scored in-container.
+    The copy keeps instruction.md and environment/, so it builds and runs
+    exactly like the oracle task -- an agent sees the same prompt and the same
+    telemetry. Its verifier is replaced by one that emits no metrics, so the
+    trial finishes unscored instead of being scored in-container.
     """
     if dst_dir.exists():
         shutil.rmtree(dst_dir)
@@ -985,6 +1030,11 @@ def build_hidden_task(
             shutil.rmtree(target)
         elif target.exists():
             target.unlink()
+
+    test_sh = dst_dir / "tests" / "test.sh"
+    test_sh.parent.mkdir(parents=True, exist_ok=True)
+    test_sh.write_text(HIDDEN_TEST_SH)
+    test_sh.chmod(0o755)
 
     toml_path = dst_dir / "task.toml"
     config = TaskConfig.model_validate_toml(toml_path.read_text())

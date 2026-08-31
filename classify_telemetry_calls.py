@@ -49,7 +49,6 @@ from format_tool_calls import SHELL_TOOL_NAMES, _extract_shell_cmd
 from utils import (
     TELEM_ALL_CATEGORIES,
     get_base_parser,
-    load_invalid_trial_ids,
     setup_logging,
 )
 
@@ -360,12 +359,8 @@ async def main() -> None:
             "the cleaner signal."
         )
 
-    invalid_ids: set[str] = (
-        load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
-    )
-
     csv_paths = sorted(tool_calls_dir.glob("*.csv"))
-    trial_ids = [p.stem for p in csv_paths if p.stem not in invalid_ids]
+    trial_ids = [p.stem for p in csv_paths]
     logger.info(f"Found {len(trial_ids)} trial CSVs in {tool_calls_dir}")
 
     if args.batch_size is not None:

@@ -41,7 +41,6 @@ Examples::
 
 import re
 from collections import Counter, defaultdict
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -62,7 +61,6 @@ from utils import (
     TELEM_DISCOVERY_CATEGORIES,
     find_trial_dirs,
     get_base_parser,
-    load_invalid_trial_ids,
     model_alias,
     model_sort_key,
 )
@@ -483,10 +481,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    invalid_ids: set[str] = (
-        load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
-    )
-
     # Restrict to trials the analysis layer considers scored — the same set
     # utils.load_trials builds — so the transition counts cover exactly the
     # trials that appear in the accuracy tables.
@@ -500,8 +494,6 @@ def main() -> None:
     rows = collect_tool_calls(
         args.jobs_dir, csv_dir=None, valid_trial_ids=valid_trial_ids
     )
-    if invalid_ids:
-        rows = [r for r in rows if r["trial_id"] not in invalid_ids]
     if not rows:
         print("No tool calls found.")
         return

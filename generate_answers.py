@@ -65,8 +65,7 @@ TRUSTED_GRANULARITIES: tuple[str, ...] = ()
 
 # Feature flags that are too generic to stand as a ground-truth answer when a
 # more specific incident is also present. Dropped from a task's answer set only
-# when at least one non-excluded event remains; kept when sole (mirrors the
-# logic in src/harbor_utils/export_predictions.py).
+# when at least one non-excluded event remains; kept when sole.
 EXCLUDED_FEATURE_FLAGS: frozenset[str] = frozenset({"imageSlowLoad"})
 
 

@@ -64,9 +64,6 @@ docs = [
 
 # [project.urls] redacted for double-blind review.
 
-[project.scripts]
-harbor-export = "harbor_utils.export_predictions:cli_main"
-
 [tool.ruff]
 
 exclude = [
