@@ -10,13 +10,13 @@
 #   run_harbor_cached.sh <harbor-run-args...>
 #
 # Examples:
-#   ./run_harbor_cached.sh -c configs/harbor_job_share2w_base.yaml
-#   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
-#       ./run_harbor_cached.sh -c configs/foo.yaml --n-trials 1
+#   ./run_harbor_cached.sh -c job-config.yaml
+#   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2 \
+#       ./run_harbor_cached.sh -p /path/to/task
 
 set -euo pipefail
 
-IMAGE="${SNAPSHOT_IMAGE:-orcabench/sre-otel-snapshot:data-0418-harbor-template}"
+IMAGE="${SNAPSHOT_IMAGE:-orcabench/sre-otel-snapshot:data-0418-harbor-template-v2}"
 
 # Run this script from examples/otel-demo so ./stage_snapshot_cache.sh resolves.
 
