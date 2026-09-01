@@ -70,7 +70,7 @@ from utils import get_base_parser, setup_logging
 # import the judge helpers.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_prediction import (
-    DEFAULT_MODEL,
+    default_model,
     aggregate_judge_response,
     judge,
 )
@@ -426,7 +426,9 @@ async def main() -> None:
     # no arguments, so it judges at its own defaults (openai-gpt-5.4, effort
     # high). The shared base parser defaults --effort to None, which would
     # silently judge this split at a different reasoning effort.
-    parser.set_defaults(model=DEFAULT_MODEL, effort="high")
+    # Resolved here, not at import: load_dotenv() runs in __main__, after
+    # this module is imported, and the default follows $OPENAI_BASE_URL.
+    parser.set_defaults(model=default_model(), effort="high")
     parser.add_argument(
         "--job",
         "-j",
