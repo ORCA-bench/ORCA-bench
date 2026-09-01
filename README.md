@@ -92,6 +92,34 @@ cp patches/litellm_gradient_ai_chat_transformation.py \
 
 </details>
 
+## Quick start
+
+1. Pull the Docker image (only need to do this step once):
+```bash
+IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2
+CACHE_ROOT="/root/.cache/sre-snapshot-cache"
+CACHE_DIR="$(./stage_snapshot_cache.sh --image "$IMAGE" --cache-root "$CACHE_ROOT")"
+```
+
+2. Run the oracle solution on a single task:
+```bash
+SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" uv run harbor run \
+    --mounts-json "[{\"type\":\"bind\",\"source\":\"$CACHE_DIR\",\"target\":\"$CACHE_DIR\",\"read_only\":true}]" \
+    -t orca-bench/05216f608f940a48
+```
+
+2. Run Claude Sonnet 4.6 using the Terminus-2 agent harness on a single task:
+```bash
+SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" uv run harbor run \
+    --mounts-json "[{\"type\":\"bind\",\"source\":\"$CACHE_DIR\",\"target\":\"$CACHE_DIR\",\"read_only\":true}]" \
+    -t orca-bench/05216f608f940a48 \
+    -a terminus-2 \
+    -m gradient_ai/anthropic-claude-4.6-sonnet \
+    --ak temperature=1 \
+    --ak reasoning_effort=medium \
+    --ak 'llm_kwargs={"max_tokens": 16384}'
+```
+
 ## Submitting to the leaderboard
 
 See [`leaderboard/SUBMIT.md`](./leaderboard/SUBMIT.md) for the full walkthrough; the short version:
@@ -105,7 +133,6 @@ See [`leaderboard/SUBMIT.md`](./leaderboard/SUBMIT.md) for the full walkthrough;
 SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
     ./run_harbor_cached.sh -c job-config.yaml \
       -a <agent> -m <provider/model> \
-      --ve OPENAI_API_KEY="$OPENAI_API_KEY" \
       --upload --public
 ```
 
