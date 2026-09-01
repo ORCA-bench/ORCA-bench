@@ -44,7 +44,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from check_prediction import DEFAULT_MODEL, async_call_llm_judge
+from check_prediction import async_call_llm_judge, default_model
 from format_tool_calls import SHELL_TOOL_NAMES, _extract_shell_cmd
 from utils import (
     TELEM_ALL_CATEGORIES,
@@ -205,7 +205,7 @@ async def _classify_call(
 
     async with semaphore:
         try:
-            raw, _ = await async_call_llm_judge(
+            raw, _, _ = await async_call_llm_judge(
                 client, prompt, model=model, reasoning_effort=reasoning_effort
             )
             record.update(_parse_response(raw))
@@ -297,7 +297,9 @@ async def main() -> None:
     parser.description = (
         "Classify each telemetry tool call as success/error/empty using an LLM judge."
     )
-    parser.set_defaults(model=DEFAULT_MODEL)
+    # Resolved here, not at import: load_dotenv() runs in __main__, after
+    # this module is imported, and the default follows $OPENAI_BASE_URL.
+    parser.set_defaults(model=default_model())
     parser.add_argument(
         "--batch-size",
         "-bs",

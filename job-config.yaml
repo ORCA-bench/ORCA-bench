@@ -1,27 +1,19 @@
 # Harbor job config for ORCA-bench leaderboard runs.
 #
-# This is the config a leaderboard submission should be produced with. It runs
-# the ORCA-bench dataset as published on the Harbor Hub — the version CI pins
-# and validates against. (configs/harbor_job_orca_bench.yaml is the local-dev
-# equivalent, sourcing tasks from the HuggingFace registry instead; trials from
-# it carry a different source and are filtered out of submissions.)
+# Run with:
 #
-# Full harbor-template environment (telemetry + code). Run with:
-#
+#   export OPENAI_API_KEY=...   # REQUIRED: the verifier is an LLM judge
+#   export OPENAI_BASE_URL=...  # picks the judge/oracle model. One of
+#     https://api.openai.com/v1 (default) -> gpt-5.4
+#     https://inference.do-ai.run/v1      -> openai-gpt-5.4
+#     https://openrouter.ai/api/v1        -> openai/gpt-5.4
 #   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
-#       ./run_harbor_cached.sh -c job-config.yaml \
-#         --ve OPENAI_API_KEY="$OPENAI_API_KEY" \
-#         --upload --public
+#       ./run_harbor_cached.sh -c job-config.yaml --upload --public
 #
 # REQUIRED for a submission:
 #   --upload --public   the leaderboard reads trials from the hub, and CI needs
 #                       them publicly readable.
-#   --ve OPENAI_API_KEY the verifier (check_prediction.py) is an LLM judge and
-#                       crashes without it. Add --ve OPENAI_BASE_URL=... if your
-#                       provider needs a custom endpoint. Never put keys in this
-#                       file. Unlike some benchmarks the judge model and effort
-#                       are baked into the task content, so there is nothing to
-#                       configure and nothing that can drift between runs.
+#
 #
 # SNAPSHOT_CACHE_HOST_DIR is exported by run_harbor_cached.sh after staging
 # the snapshot image to a host-side cache. It propagates to the agent

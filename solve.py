@@ -17,6 +17,10 @@ Examples::
     # Inside Harbor container (solve.sh calls this):
     python solve.py --rubrics-dir /solution/rubrics --output /app/report.md
 
+    # The provenance of the report (mode, model, reasoning effort/summary,
+    # prompt, raw response, token usage) is written to --details, defaulting
+    # to /logs/agent/solve-details.json.
+
     # With custom model/effort:
     python solve.py --rubrics-dir /solution/rubrics -m openai-gpt-5.4 -e high
 """
@@ -29,11 +33,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from check_prediction import async_call_llm_judge, format_rubric
+from check_prediction import DEFAULT_MODEL, async_call_llm_judge, format_rubric
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL: str | None = None
+# DEFAULT_MODEL is imported from check_prediction: it is picked from
+# $OPENAI_BASE_URL via that module's MODEL_BY_BASE_URL map, so the oracle and
+# the judge name the same model the same way on whichever endpoint is configured.
 DEFAULT_EFFORT = "high"
 
 # Report format from harbor-template/instruction.md.template — sections 1-4.
@@ -250,12 +256,58 @@ def build_solution_prompt(rubrics_md: list[str]) -> str:
     )
 
 
+# Provenance record for a generated report, mirroring the verifier's
+# reward-details.json (``check_prediction.judge``): ``mode``, ``model``,
+# ``reasoning_effort``, ``reasoning_summary``, ``usage``, and the prompt/raw
+# response the verifier records as ``judge_prompt``/``judge_response_raw``. As
+# in the verifier's short-circuit modes, the LLM-only keys are omitted when no
+# call was made, so their presence alone says whether a model produced the
+# report.
+def build_details(
+    mode: str,
+    model: str | None,
+    effort: str | None,
+    *,
+    prompt: str | None = None,
+    reasoning_summary: list[dict] | None = None,
+    response_raw: str | None = None,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble the provenance record written alongside a generated report."""
+    details: dict[str, Any] = {
+        "mode": mode,
+        "model": model,
+        "reasoning_effort": effort,
+    }
+    if prompt is not None:
+        details["reasoning_summary"] = reasoning_summary
+        details["prompt"] = prompt
+        details["response_raw"] = response_raw
+        details["usage"] = usage
+    return details
+
+
+def write_details(details_path: Path, details: dict[str, Any]) -> None:
+    """Write the provenance record, warning rather than failing on I/O errors.
+
+    The report itself is already on disk by the time this is called, so a
+    non-writable log directory should not fail an otherwise successful run.
+    """
+    try:
+        details_path.parent.mkdir(parents=True, exist_ok=True)
+        details_path.write_text(json.dumps(details, indent=2))
+    except OSError as exc:
+        logger.warning(f"Could not write solve details to {details_path}: {exc}")
+        return
+    logger.info(f"Wrote solve details to {details_path}")
+
+
 async def generate_report(
     client: Any,
     rubrics_data: list[dict],
     model: str | None = DEFAULT_MODEL,
     effort: str | None = DEFAULT_EFFORT,
-) -> tuple[str, str, list[dict] | None]:
+) -> tuple[str, dict[str, Any]]:
     """Generate one incident report covering every rubric in ``rubrics_data``.
 
     Each rubric is one plausible root cause and the verifier scores the report
@@ -267,20 +319,31 @@ async def generate_report(
     single incident report.
 
     Returns:
-        A tuple of (report_text, prompt, reasoning_summary). When ``model``
-        is ``None``, ``prompt`` is empty and ``reasoning_summary`` is ``None``.
+        A tuple of (report_text, details), where ``details`` is the provenance
+        record built by :func:`build_details`. With ``model=None`` nothing was
+        prompted, so the record carries only ``mode``, ``model`` and
+        ``reasoning_effort``.
 
     """
     if not rubrics_data:
         raise ValueError("generate_report called with no rubrics")
     rubrics_md = [format_rubric(r) for r in rubrics_data]
     if model is None:
-        return "\n\n---\n\n".join(rubrics_md), "", None
+        report_text = "\n\n---\n\n".join(rubrics_md)
+        return report_text, build_details("rubric_passthrough", model, effort)
     prompt = build_solution_prompt(rubrics_md)
-    response_text, reasoning_summary = await async_call_llm_judge(
+    response_text, reasoning_summary, usage = await async_call_llm_judge(
         client, prompt, model=model, reasoning_effort=effort
     )
-    return response_text, prompt, reasoning_summary
+    return response_text, build_details(
+        "llm_solve",
+        model,
+        effort,
+        prompt=prompt,
+        reasoning_summary=reasoning_summary,
+        response_raw=response_text,
+        usage=usage,
+    )
 
 
 async def async_main() -> None:
@@ -312,14 +375,22 @@ async def async_main() -> None:
         help="Path to write the generated report.",
     )
     parser.add_argument(
+        "--details",
+        type=str,
+        default="/logs/agent/solve-details.json",
+        help=(
+            "Path to write the provenance record (mode, model, reasoning "
+            "effort/summary, prompt, raw response, token usage) for the "
+            "generated report. The default lands in the trial's agent log "
+            "directory, alongside the verifier's reward-details.json."
+        ),
+    )
+    parser.add_argument(
         "--model",
         "-m",
         type=str,
         default=DEFAULT_MODEL,
-        help=(
-            "LLM model name. If omitted, the formatted rubrics are written "
-            "directly as the report with no LLM call."
-        ),
+        help=f"LLM model name (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--effort",
@@ -337,6 +408,7 @@ async def async_main() -> None:
     )
 
     output_path = Path(args.output)
+    details_path = Path(args.details)
 
     # sorted() matches the order the verifier loads rubrics in
     # (check_prediction.py). build_harbor_tasks.py only creates this directory
@@ -352,6 +424,9 @@ async def async_main() -> None:
         logger.info(f"No rubric directory at {rubrics_dir}; writing empty report")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text("")
+        write_details(
+            details_path, build_details("no_incident", args.model, args.effort)
+        )
         return
 
     rubrics_data = [
@@ -374,7 +449,7 @@ async def async_main() -> None:
             base_url=os.getenv("OPENAI_BASE_URL"),
         )
 
-    report_text, _prompt, reasoning_summary = await generate_report(
+    report_text, details = await generate_report(
         client, rubrics_data, model=args.model, effort=args.effort
     )
 
@@ -382,8 +457,10 @@ async def async_main() -> None:
     output_path.write_text(report_text)
     logger.info(f"Wrote report to {output_path}")
 
-    if reasoning_summary:
-        logger.info(f"Reasoning summary: {reasoning_summary}")
+    write_details(details_path, details)
+
+    if details.get("reasoning_summary"):
+        logger.info(f"Reasoning summary: {details['reasoning_summary']}")
 
 
 if __name__ == "__main__":
