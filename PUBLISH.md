@@ -25,7 +25,7 @@ uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
 ```bash
 uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
   --templates-dir harbor-template --force --split \
-  --verified-json human-eval-sample/output/sampled_tasks.json \
+  --verified-json sampled_tasks.json \
   --dataset-author "Albert Gong <ag2435@cornell.edu>"
 
 # Writes out-0804/harbor/split.json, the answer-free tasks/<task_id>-hidden/

@@ -1,0 +1,841 @@
+{
+  "d3-d2dep-productcatalogfailure-on-08-easy_control_pre60m_at": {
+    "difficulty": "easy",
+    "scenario": "d3-d2dep",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "Submitting checkout with National Park Foundation Explorascope in the basket ends in HTTP 500 and shows the message 'failed to get product OLJCESPC7Z'.",
+    "reported_styled": "at 9:00 AM today ET",
+    "num_rubrics": 0,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-d4dep-cartfailure-on-03-easy_ttd480m_period_same-period": {
+    "difficulty": "easy",
+    "scenario": "d5-d4dep",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "On the cart page, clicking Place Order sits for about 15 seconds and then returns an HTTP 504 timeout on POST /api/checkout; the shopper stays on the cart page, never reaches the confirmation screen, and the cart still shows the items.",
+    "reported_styled": "sometime in the afternoon today",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-ic2-adfailure-on-04-easy_ttd480m_range30m_off+60m": {
+    "difficulty": "easy",
+    "scenario": "d5-ic",
+    "section": "exact_range",
+    "ttd_minutes": 480,
+    "user_facing_issue": "On product detail and checkout confirmation pages, the yellow ad banner intermittently appears as a blank yellow strip with no ad text and no clickable link, and there is no visible error message.",
+    "reported_styled": "between 10:56 AM and 11:56 AM today ET",
+    "num_rubrics": 1,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-d1dep-cartfailure-on-05-easy_ttd60m_at_off+10m": {
+    "difficulty": "easy",
+    "scenario": "d2-d1dep",
+    "section": "exact",
+    "ttd_minutes": 60,
+    "user_facing_issue": "Cart checkout hangs for about 15 seconds after clicking Place Order, then times out and never reaches the order confirmation page; the shopper stays on the cart and the cart is not emptied.",
+    "reported_styled": "at 5:19 PM today ET",
+    "num_rubrics": 4,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d6-big-productcatalogfailure-on-05-easy_ttd1440m_day_same-day": {
+    "difficulty": "easy",
+    "scenario": "d6-big",
+    "section": "broad_range_day",
+    "ttd_minutes": 1440,
+    "user_facing_issue": "Viewing the National Park Foundation Explorascope detail page for SKU OLJCESPC7Z shows a 500 error instead of the product information.",
+    "reported_styled": "sometime yesterday",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-d3dep-productcatalogfailure-on-11-easy_ttd15m_at_off+10m": {
+    "difficulty": "easy",
+    "scenario": "d4-d3dep",
+    "section": "exact",
+    "ttd_minutes": 15,
+    "user_facing_issue": "The recommendations section on product pages can disappear and return HTTP 500 when National Park Foundation Explorascope is included in the suggested items.",
+    "reported_styled": "at 3:02 PM today ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-cc2-adhighcpu-on-03-easy_control_pre60m_at": {
+    "difficulty": "easy",
+    "scenario": "d4-cc",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "Yellow ad banner on product detail and checkout confirmation pages is loading very slowly and stays blank for several seconds before the ad text and link appear for shoppers",
+    "reported_styled": "at 9:00 AM today ET",
+    "num_rubrics": 0,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-cc1-admanualgc-on-03-easy_ttd480m_range30m_off+60m": {
+    "difficulty": "easy",
+    "scenario": "d2-cc",
+    "section": "exact_range",
+    "ttd_minutes": 480,
+    "user_facing_issue": "The yellow promotion banner on product detail and checkout confirmation pages can stay blank for several seconds before the ad text and link appear, and there is no visible error message.",
+    "reported_styled": "between 11:03 AM and 12:03 PM today ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-n1-loadgeneratorfloodhomepage-on-03-easy_ttd1440m_day_same-day": {
+    "difficulty": "easy",
+    "scenario": "d1-n",
+    "section": "broad_range_day",
+    "ttd_minutes": 1440,
+    "user_facing_issue": "The OpenTelemetry Demo homepage is noticeably slow to load and respond for shoppers visiting the storefront, and no explicit error message is shown.",
+    "reported_styled": "sometime yesterday",
+    "num_rubrics": 1,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-i2-adfailure-on-03-easy_ttd480m_period_same-period": {
+    "difficulty": "easy",
+    "scenario": "d1-i",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "The yellow ad banner on product detail and checkout confirmation pages sometimes renders as a blank yellow box with no ad text and no link, and no visible error message is shown.",
+    "reported_styled": "sometime in the afternoon today",
+    "num_rubrics": 1,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d6-big-cartfailure-on-02-medium_ttd60m_range30m_off+10m": {
+    "difficulty": "medium",
+    "scenario": "d6-big",
+    "section": "exact_range",
+    "ttd_minutes": 60,
+    "user_facing_issue": "placing an order freezes, then fails",
+    "reported_styled": "between 1:15 PM and 2:15 PM today ET",
+    "num_rubrics": 4,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-ic2-adfailure-on-03-medium_ttd480m_at_off+10m": {
+    "difficulty": "medium",
+    "scenario": "d5-ic",
+    "section": "exact",
+    "ttd_minutes": 480,
+    "user_facing_issue": "ad banner sometimes loads with no content",
+    "reported_styled": "at 10:36 AM today ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d3-d2dep-paymentfailure-10-02-medium_ttd480m_period_previous-period": {
+    "difficulty": "medium",
+    "scenario": "d3-d2dep",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "placing an order sometimes breaks",
+    "reported_styled": "sometime in the morning yesterday",
+    "num_rubrics": 4,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-d4dep-paymentfailure-10-02-medium_control_post60m_at": {
+    "difficulty": "medium",
+    "scenario": "d5-d4dep",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "the final purchase step can fail unexpectedly",
+    "reported_styled": "at 10:00 PM today ET",
+    "num_rubrics": 0,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-d3dep-paymentunreachable-on-03-medium_ttd1440m_day_same-day": {
+    "difficulty": "medium",
+    "scenario": "d4-d3dep",
+    "section": "broad_range_day",
+    "ttd_minutes": 1440,
+    "user_facing_issue": "order submission fails immediately",
+    "reported_styled": "sometime yesterday",
+    "num_rubrics": 6,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d3-ic1-loadgeneratorfloodhomepage-on-02-medium_ttd60m_range30m_off+10m": {
+    "difficulty": "medium",
+    "scenario": "d3-ic",
+    "section": "exact_range",
+    "ttd_minutes": 60,
+    "user_facing_issue": "landing experience is unusually slow",
+    "reported_styled": "between 10:39 AM and 11:39 AM today ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-c1-admanualgc-on-02-medium_ttd15m_at_off+10m": {
+    "difficulty": "medium",
+    "scenario": "d1-c",
+    "section": "exact",
+    "ttd_minutes": 15,
+    "user_facing_issue": "ad banner is loading slowly",
+    "reported_styled": "at 7:49 PM today ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-i1-imageslowload-on-02-medium_ttd480m_period_previous-period": {
+    "difficulty": "medium",
+    "scenario": "d1-i",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "product thumbnails are loading very slowly",
+    "reported_styled": "sometime in the early morning today",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-cc2-adhighcpu-on-02-medium_control_pre60m_at": {
+    "difficulty": "medium",
+    "scenario": "d4-cc",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "ads are loading very slowly",
+    "reported_styled": "at 9:00 AM today ET",
+    "num_rubrics": 0,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-cc1-adfailure-on-02-medium_ttd1440m_day_same-day": {
+    "difficulty": "medium",
+    "scenario": "d2-cc",
+    "section": "broad_range_day",
+    "ttd_minutes": 1440,
+    "user_facing_issue": "promotional banner content is intermittently missing",
+    "reported_styled": "sometime yesterday",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-ic2-loadgeneratorfloodhomepage-on-01-hard_control_pre60m_at": {
+    "difficulty": "hard",
+    "scenario": "d5-ic",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "shoppers find the storefront sluggish",
+    "reported_styled": "at 9:00 AM today ET",
+    "num_rubrics": 0,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-d3dep-paymentfailure-10-01-hard_ttd1440m_day_same-day": {
+    "difficulty": "hard",
+    "scenario": "d4-d3dep",
+    "section": "broad_range_day",
+    "ttd_minutes": 1440,
+    "user_facing_issue": "shoppers are seeing checkout problems",
+    "reported_styled": "sometime yesterday",
+    "num_rubrics": 5,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-n1-loadgeneratorfloodhomepage-on-00-hard_ttd480m_at_off+10m": {
+    "difficulty": "hard",
+    "scenario": "d1-n",
+    "section": "exact",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are having issues with homepage",
+    "reported_styled": "at 4:58 PM yesterday ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-d4dep-paymentunreachable-on-00-hard_ttd480m_range30m_off+60m": {
+    "difficulty": "hard",
+    "scenario": "d5-d4dep",
+    "section": "exact_range",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are having trouble checking out",
+    "reported_styled": "between 5:58 PM and 6:58 PM yesterday ET",
+    "num_rubrics": 4,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-i2-adfailure-on-01-hard_ttd480m_period_previous-period": {
+    "difficulty": "hard",
+    "scenario": "d1-i",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "shoppers see problems with ads",
+    "reported_styled": "sometime in the morning today",
+    "num_rubrics": 1,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d6-big-productcatalogfailure-on-01-hard_ttd15m_at_off+10m": {
+    "difficulty": "hard",
+    "scenario": "d6-big",
+    "section": "exact",
+    "ttd_minutes": 15,
+    "user_facing_issue": "shoppers cannot use their cart",
+    "reported_styled": "at 1:14 PM today ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-cc1-adfailure-on-01-hard_ttd1440m_day_same-day": {
+    "difficulty": "hard",
+    "scenario": "d2-cc",
+    "section": "broad_range_day",
+    "ttd_minutes": 1440,
+    "user_facing_issue": "shoppers are seeing ad placement trouble",
+    "reported_styled": "sometime yesterday",
+    "num_rubrics": 3,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d3-d2dep-productcatalogfailure-on-00-hard_ttd480m_range30m_off+10m": {
+    "difficulty": "hard",
+    "scenario": "d3-d2dep",
+    "section": "exact_range",
+    "ttd_minutes": 480,
+    "user_facing_issue": "shoppers run into product page issues",
+    "reported_styled": "between 2:25 PM and 3:25 PM today ET",
+    "num_rubrics": 2,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-d1dep-cartfailure-on-00-hard_ttd480m_period_same-period": {
+    "difficulty": "hard",
+    "scenario": "d2-d1dep",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are having issues with checkout",
+    "reported_styled": "sometime in the evening yesterday",
+    "num_rubrics": 4,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d3-ic1-imageslowload-on-00-hard_control_post60m_at": {
+    "difficulty": "hard",
+    "scenario": "d3-ic",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "customers notice delays with product photos",
+    "reported_styled": "at 10:00 PM today ET",
+    "num_rubrics": 0,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-c1-admanualgc-on-00-hard_ttd60m_at_off+10m": {
+    "difficulty": "hard",
+    "scenario": "d1-c",
+    "section": "exact",
+    "ttd_minutes": 60,
+    "user_facing_issue": "users are having issues with ads",
+    "reported_styled": "at 7:49 PM today ET",
+    "num_rubrics": 1,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-cc2-admanualgc-on-01-hard_control_post60m_at": {
+    "difficulty": "hard",
+    "scenario": "d4-cc",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "shoppers are experiencing ad display trouble",
+    "reported_styled": "at 10:00 PM today ET",
+    "num_rubrics": 0,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-d3dep-paymentfailure-50-02-hard_ttd60m_range30m_off+10m": {
+    "difficulty": "hard",
+    "scenario": "d4-d3dep",
+    "section": "exact_range",
+    "ttd_minutes": 60,
+    "user_facing_issue": "users cannot complete their purchase",
+    "reported_styled": "between 4:32 PM and 5:32 PM today ET",
+    "num_rubrics": 4,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-d1dep-paymentfailure-50-01-hard_ttd1440m_day_same-day": {
+    "difficulty": "hard",
+    "scenario": "d2-d1dep",
+    "section": "broad_range_day",
+    "ttd_minutes": 1440,
+    "user_facing_issue": "customers run into payment trouble",
+    "reported_styled": "sometime yesterday",
+    "num_rubrics": 6,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d6-big-paymentfailure-50-01-hard_ttd480m_period_same-period": {
+    "difficulty": "hard",
+    "scenario": "d6-big",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are having trouble ordering",
+    "reported_styled": "sometime in the afternoon today",
+    "num_rubrics": 5,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d6-big-cartfailure-on-univ00-universal_ttd480m_range30m_off+60m": {
+    "difficulty": "universal",
+    "scenario": "d6-big",
+    "section": "exact_range",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "between 2:05 PM and 3:05 PM today ET",
+    "num_rubrics": 6,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-d4dep-paymentunreachable-on-univ00-universal_ttd15m_at_off+10m": {
+    "difficulty": "universal",
+    "scenario": "d5-d4dep",
+    "section": "exact",
+    "ttd_minutes": 15,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "at 5:38 PM today ET",
+    "num_rubrics": 6,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-ic2-imageslowload-on-univ00-universal_ttd480m_period_previous-period": {
+    "difficulty": "universal",
+    "scenario": "d5-ic",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "sometime in the early morning today",
+    "num_rubrics": 6,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-cc2-adhighcpu-on-univ00-universal_control_post60m_at": {
+    "difficulty": "universal",
+    "scenario": "d4-cc",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "at 10:00 PM today ET",
+    "num_rubrics": 0,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d3-d2dep-paymentunreachable-on-univ00-universal_ttd15m_at_off+10m": {
+    "difficulty": "universal",
+    "scenario": "d3-d2dep",
+    "section": "exact",
+    "ttd_minutes": 15,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "at 5:26 PM today ET",
+    "num_rubrics": 5,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d4-d3dep-paymentfailure-50-univ00-universal_ttd60m_range30m_off+10m": {
+    "difficulty": "universal",
+    "scenario": "d4-d3dep",
+    "section": "exact_range",
+    "ttd_minutes": 60,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "between 4:32 PM and 5:32 PM today ET",
+    "num_rubrics": 4,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d3-ic1-imageslowload-on-univ00-universal_control_pre60m_at": {
+    "difficulty": "universal",
+    "scenario": "d3-ic",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "at 9:00 AM today ET",
+    "num_rubrics": 0,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-i2-adfailure-on-univ00-universal_ttd480m_period_same-period": {
+    "difficulty": "universal",
+    "scenario": "d1-i",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "sometime in the afternoon today",
+    "num_rubrics": 2,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-n1-loadgeneratorfloodhomepage-on-univ00-universal_ttd60m_range30m_off+10m": {
+    "difficulty": "universal",
+    "scenario": "d1-n",
+    "section": "exact_range",
+    "ttd_minutes": 60,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "between 4:28 PM and 5:28 PM today ET",
+    "num_rubrics": 2,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-cc1-adfailure-on-univ00-universal_ttd480m_at_off+10m": {
+    "difficulty": "universal",
+    "scenario": "d2-cc",
+    "section": "exact",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "at 11:18 AM today ET",
+    "num_rubrics": 5,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d1-c1-admanualgc-on-univ00-universal_control_pre60m_at": {
+    "difficulty": "universal",
+    "scenario": "d1-c",
+    "section": "control",
+    "ttd_minutes": 0,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "at 9:00 AM today ET",
+    "num_rubrics": 0,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d2-d1dep-paymentfailure-50-univ00-universal_ttd480m_period_same-period": {
+    "difficulty": "universal",
+    "scenario": "d2-d1dep",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "sometime in the afternoon yesterday",
+    "num_rubrics": 5,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d6-big-productcatalogfailure-on-univ00-universal_ttd480m_period_previous-period": {
+    "difficulty": "universal",
+    "scenario": "d6-big",
+    "section": "broad_range_time_of_day",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "sometime in the morning today",
+    "num_rubrics": 6,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d3-d2dep-productcatalogfailure-on-univ00-universal_ttd480m_at_off+10m": {
+    "difficulty": "universal",
+    "scenario": "d3-d2dep",
+    "section": "exact",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "at 2:55 PM today ET",
+    "num_rubrics": 5,
+    "num_trials": 5,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "deepseek-v4-pro",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  },
+  "d5-d4dep-paymentfailure-10-univ00-universal_ttd480m_range30m_off+10m": {
+    "difficulty": "universal",
+    "scenario": "d5-d4dep",
+    "section": "exact_range",
+    "ttd_minutes": 480,
+    "user_facing_issue": "users are reporting site issues",
+    "reported_styled": "between 4:08 PM and 5:08 PM yesterday ET",
+    "num_rubrics": 6,
+    "num_trials": 4,
+    "models": [
+      "claude-4.6-sonnet",
+      "claude-opus-4.7",
+      "glm-5",
+      "gpt-5.5"
+    ]
+  }
+}
