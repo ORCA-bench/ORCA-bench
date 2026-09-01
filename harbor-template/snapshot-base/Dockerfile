@@ -31,7 +31,8 @@ COPY jaeger-config-snapshot.yml /app/jaeger-config-snapshot.yml
 
 COPY entrypoint.sh /app/entrypoint.sh
 COPY check_health.sh /app/check_health.sh
-RUN chmod +x /app/entrypoint.sh /app/check_health.sh
+COPY set_max_span_age.sh /app/set_max_span_age.sh
+RUN chmod +x /app/entrypoint.sh /app/check_health.sh /app/set_max_span_age.sh
 
 # Non-root user for the agent. No docker group → no /var/run/docker.sock access,
 # which would otherwise let the agent `docker exec` into concurrent trials'
