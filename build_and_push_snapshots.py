@@ -52,54 +52,48 @@ def assemble_build_context(
 
     # ALL Prometheus TSDB snapshots
     prom_snapshots_src = data_dir / "prometheus" / "snapshots"
-    if prom_snapshots_src.exists():
-        logger.info(f"Copying all Prometheus snapshots from {prom_snapshots_src} ...")
-        shutil.copytree(
-            prom_snapshots_src,
-            data_dest / "prometheus" / "snapshots",
-            symlinks=False,
-            dirs_exist_ok=True,
-            copy_function=os.link,
-        )
-    else:
-        logger.warning(
-            f"Prometheus snapshots directory not found: {prom_snapshots_src}"
-        )
+    assert prom_snapshots_src.exists(), f"Prometheus snapshots directory not found: {prom_snapshots_src}"
+    logger.info(f"Copying all Prometheus snapshots from {prom_snapshots_src} ...")
+    shutil.copytree(
+        prom_snapshots_src,
+        data_dest / "prometheus" / "snapshots",
+        symlinks=False,
+        dirs_exist_ok=True,
+        copy_function=os.link,
+    )
 
     # Prometheus read-only config
     prom_config_src = Path("prometheus-config-readonly.yaml").resolve()
-    if prom_config_src.exists():
-        logger.info(
-            f"Copying Prometheus config from {prom_config_src} to build context ..."
-        )
-        shutil.copy2(prom_config_src, data_dest / "prometheus-config.yaml")
+    assert prom_config_src.exists(), f"Prometheus config not found: {prom_config_src}"
+    logger.info(
+        f"Copying Prometheus config from {prom_config_src} to build context ..."
+    )
+    shutil.copy2(prom_config_src, data_dest / "prometheus-config.yaml")
 
     # OpenSearch snapshot repo (but NOT opensearch-data — OpenSearch starts
     # with an empty node and the snapshot restore recreates the indices).
     os_repo_src = data_dir / "opensearch-repo-snapshots"
-    if os_repo_src.exists():
-        logger.info(
-            f"Copying OpenSearch repo snapshots from {os_repo_src} to build context ..."
-        )
-        shutil.copytree(
-            os_repo_src,
-            data_dest / "opensearch-repo-snapshots",
-            symlinks=False,
-            dirs_exist_ok=True,
-            copy_function=os.link,
-        )
+    assert os_repo_src.exists(), f"OpenSearch repo snapshots directory not found: {os_repo_src}"
+    logger.info(
+        f"Copying OpenSearch repo snapshots from {os_repo_src} to build context ..."
+    )
+    shutil.copytree(
+        os_repo_src,
+        data_dest / "opensearch-repo-snapshots",
+        symlinks=False,
+        dirs_exist_ok=True,
+        copy_function=os.link,
+    )
     # Create empty opensearch-data dir (will be populated by snapshot restore at runtime)
     (data_dest / "opensearch-data").mkdir(parents=True, exist_ok=True)
 
     # docker-compose-base.yml (no bind-mount volumes)
     compose_src = Path("docker-compose-base.yml").resolve()
-    if compose_src.exists():
-        logger.info(
-            f"Copying docker-compose-base.yml from {compose_src} to build context ..."
-        )
-        shutil.copy2(compose_src, build_ctx / "docker-compose-base.yml")
-    else:
-        logger.warning(f"docker-compose-base.yml not found: {compose_src}")
+    assert compose_src.exists(), f"docker-compose-base.yml not found: {compose_src}"
+    logger.info(
+        f"Copying docker-compose-base.yml from {compose_src} to build context ..."
+    )
+    shutil.copy2(compose_src, build_ctx / "docker-compose-base.yml")
 
     # Snapshot-mode overrides (read-only Prometheus, OTel Collector, Jaeger)
     for snapshot_file in [
@@ -108,17 +102,15 @@ def assemble_build_context(
         "jaeger-config-snapshot.yml",
     ]:
         src = Path(snapshot_file).resolve()
-        if src.exists():
-            logger.info(f"Copying {snapshot_file} to build context ...")
-            shutil.copy2(src, build_ctx / snapshot_file)
+        assert src.exists(), f"{snapshot_file} not found: {src}"
+        logger.info(f"Copying {snapshot_file} to build context ...")
+        shutil.copy2(src, build_ctx / snapshot_file)
 
     # Runtime helper: sizes Jaeger's max_span_age to the snapshot data date
     max_span_age_src = Path("set_max_span_age.sh").resolve()
-    if max_span_age_src.exists():
-        logger.info("Copying set_max_span_age.sh to build context ...")
-        shutil.copy2(max_span_age_src, build_ctx / "set_max_span_age.sh")
-    else:
-        logger.warning(f"set_max_span_age.sh not found: {max_span_age_src}")
+    assert max_span_age_src.exists(), f"set_max_span_age.sh not found: {max_span_age_src}"
+    logger.info("Copying set_max_span_age.sh to build context ...")
+    shutil.copy2(max_span_age_src, build_ctx / "set_max_span_age.sh")
 
     # Entrypoint and health check
     logger.info("Copying entrypoint and health check scripts to build context ...")
@@ -204,7 +196,10 @@ def main() -> None:
     setup_logging(getattr(logging, args.log_level))
 
     data_dir = args.data_dir.resolve()
-    tag = f"{args.docker_repo}:{args.data_dir.name}-{args.templates_dir.name}"
+    if False:
+        tag = f"{args.docker_repo}:{args.data_dir.name}-{args.templates_dir.name}"
+    else:
+        tag = f"{args.docker_repo}:{args.data_dir.name}-{args.templates_dir.name}-v2"
 
     if not args.force and image_exists_on_hub(tag):
         logger.info(f"Skipping {tag} (already exists on Docker Hub)")
