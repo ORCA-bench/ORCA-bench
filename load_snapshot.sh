@@ -102,7 +102,11 @@ echo ""
 echo "[load_snapshot] Starting OpenTelemetry Demo services..."
 export OPENSEARCH_READ_ONLY=true
 export OTEL_COLLECTOR_CONFIG="$(pwd)/otelcol-config-snapshot.yml"
-export JAEGER_CONFIG="$(pwd)/jaeger-config-snapshot.yml"
+# Size Jaeger's max_span_age to the snapshot data date. Written into the
+# (gitignored) working dir so the checked-in config stays clean.
+./set_max_span_age.sh "$(pwd)/jaeger-config-snapshot.yml" \
+                      "$(pwd)/$DATA_LINK/jaeger-config-snapshot.yml"
+export JAEGER_CONFIG="$(pwd)/$DATA_LINK/jaeger-config-snapshot.yml"
 docker compose -f opentelemetry-demo/docker-compose.yml -f docker-compose.snapshot.yml up --force-recreate --remove-orphans --detach
 
 # ── 5. Wait for services to initialise ──────────────────────────────────────

@@ -168,7 +168,12 @@ fi
 cp -f "${SNAPSHOT_CACHE_HOST_DIR}/docker-compose-base.yml"     "${OTEL_DIR}/docker-compose-base.yml"
 cp -f "${SNAPSHOT_CACHE_HOST_DIR}/docker-compose.snapshot.yml" "${OTEL_DIR}/docker-compose.snapshot.yml"
 cp -f "${SNAPSHOT_CACHE_HOST_DIR}/otelcol-config-snapshot.yml" "${OTEL_DIR}/otelcol-config-snapshot.yml"
-cp -f "${SNAPSHOT_CACHE_HOST_DIR}/jaeger-config-snapshot.yml"  "${OTEL_DIR}/jaeger-config-snapshot.yml"
+# Jaeger's max_span_age must still reach back to the snapshot's trace data,
+# which is frozen while wall-clock time advances, so size it at start-up
+# rather than copying the baked-in value.
+"${SNAPSHOT_CACHE_HOST_DIR}/set_max_span_age.sh" \
+    "${SNAPSHOT_CACHE_HOST_DIR}/jaeger-config-snapshot.yml" \
+    "${OTEL_DIR}/jaeger-config-snapshot.yml"
 # Ensure the .env file is present — docker compose reads it automatically
 # from the compose file's directory for variable substitution.
 if [ -f "${SNAPSHOT_CACHE_HOST_DIR}/opentelemetry-demo/.env" ] && [ ! -f "${OTEL_DIR}/.env" ]; then
