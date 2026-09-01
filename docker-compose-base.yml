@@ -915,6 +915,14 @@ services:
       - bootstrap.memory_lock=true
       - discovery.type=single-node
       - OPENSEARCH_JAVA_OPTS=-Xms400m -Xmx400m
+      # Jaeger names one index per day in the query URL; snapshot data far
+      # enough in the past overflows the 4kb default. 64kb covers ~1724 days of
+      # names (verified: an 873-name/33kb query returns 200). Only the URL grows
+      # with the window -- ignore_unavailable means shard count tracks the real
+      # index count, not the name count. Keep in sync with
+      # OPENSEARCH_MAX_LINE_BYTES in set_max_span_age.sh and in the inlined
+      # set_max_span_age() in harbor-template/environment/entrypoint.sh.
+      - http.max_initial_line_length=64kb
       - DISABLE_INSTALL_DEMO_CONFIG=true
       - DISABLE_SECURITY_PLUGIN=true
       - cluster.blocks.read_only=${OPENSEARCH_READ_ONLY:-false}
