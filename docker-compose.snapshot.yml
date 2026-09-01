@@ -1,0 +1,17 @@
+# Compose override for snapshot / read-only mode.
+# Disables the OTLP receiver so the OTel Collector cannot push new metrics,
+# and disables the admin API to prevent writes via that path.
+services:
+  prometheus:
+    command:
+      - --web.console.templates=/etc/prometheus/consoles
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --storage.tsdb.retention.time=7d
+      - --config.file=/etc/prometheus/prometheus-config.yaml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+      - --no-web.enable-admin-api
+      - --web.route-prefix=/
+      - --no-web.enable-otlp-receiver
+      - --no-web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
