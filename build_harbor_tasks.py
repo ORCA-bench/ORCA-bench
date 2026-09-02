@@ -19,11 +19,11 @@ additionally partitions the build at the incident level and writes four
 dataset manifests (names derived from ``--org``, so the full build and the
 public split can never claim the same name)::
 
-    harbor/split.json                            # auditable record
-    harbor/datasets/public/          <org>/<org>
-    harbor/datasets/private-oracle/  <org>/<org>-private-oracle
-    harbor/datasets/private/         <org>/<org>-private
-    harbor/datasets/verified/        <org>/<org>-verified   # --verified-json only
+    harbor/split.json                              # auditable record
+    harbor/datasets/public/            <org>/<org>
+    harbor/datasets/private-internal/  <org>/<org>-private-internal
+    harbor/datasets/private/           <org>/<org>-private
+    harbor/datasets/verified/          <org>/<org>-verified   # --verified-json only
 
 ``--split`` also renders an answer-free duplicate of every private-split task
 at ``harbor/tasks/<task_id>-hidden/``, published as ``<hash>-hidden``. The
@@ -1151,17 +1151,17 @@ def write_splits(
 
     names = {
         "public": f"{org}/{org}",
-        "private-oracle": f"{org}/{org}-private-oracle",
+        "private-internal": f"{org}/{org}-private-internal",
         "private": f"{org}/{org}-private",
         "verified": f"{org}/{org}-verified",
     }
     labels = {
         "public": "public",
-        "private-oracle": "held-out private (with answers)",
+        "private-internal": "held-out private (with answers)",
         "private": "held-out private (answers removed)",
         "verified": "verified",
     }
-    sides = [("public", public), ("private-oracle", private), ("private", hidden)]
+    sides = [("public", public), ("private-internal", private), ("private", hidden)]
     if verified is not None:
         sides.append(("verified", verified))
 
@@ -1191,10 +1191,10 @@ def write_splits(
                 # iterates it assuming each task_id appears once.
                 "splits": {
                     key: _side_record(names[key], side)
-                    for key, side in (("public", public), ("private-oracle", private))
+                    for key, side in (("public", public), ("private-internal", private))
                 },
                 # Views share task_ids with a split (verified is a subset of
-                # public; private-hidden is a repackaging of private-oracle),
+                # public; private-hidden is a repackaging of private-internal),
                 # so they must stay out of `splits`.
                 "views": {
                     key: _side_record(names[name_key], side)
@@ -1378,7 +1378,7 @@ def main() -> None:
     print("\nNext steps:")
     print(f"  harbor add {tasks_dir} --scan       # upload the task content")
     if args.split:
-        for key in ("public", "private-oracle", "private", "verified"):
+        for key in ("public", "private-internal", "private", "verified"):
             path = task_root / "datasets" / key
             if path.is_dir():
                 print(f"  harbor publish {path} --private")
