@@ -18,7 +18,7 @@ uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
 | Dataset | Tasks | Contents |
 |---|---|---|
 | `orca-bench/orca-bench` | 755 | public split |
-| `orca-bench/orca-bench-private-oracle` | 324 | held-out split, answers included |
+| `orca-bench/orca-bench-private-internal` | 324 | held-out split, answers included |
 | `orca-bench/orca-bench-private` | 324 | the same tasks with the answers removed |
 | `orca-bench/orca-bench-verified` | 40 | verified subset of the public split |
 
@@ -29,10 +29,10 @@ uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
   --dataset-author "Albert Gong <ag2435@cornell.edu>"
 
 # Writes out-0804/harbor/split.json, the answer-free tasks/<task_id>-hidden/
-# dirs, and out-0804/harbor/datasets/{public,private-oracle,private,verified}/
+# dirs, and out-0804/harbor/datasets/{public,private-internal,private,verified}/
 uv run harbor add out-0804/harbor/tasks --scan
 uv run harbor publish out-0804/harbor/datasets/public --private
-uv run harbor publish out-0804/harbor/datasets/private-oracle --private
+uv run harbor publish out-0804/harbor/datasets/private-internal --private
 uv run harbor publish out-0804/harbor/datasets/private --private
 uv run harbor publish out-0804/harbor/datasets/verified --private
 ```
@@ -46,7 +46,7 @@ uv run harbor publish out-0804/harbor/datasets/verified --private
 > `incident_time`, `flag` and `events` included, names or dates the root
 > cause. (`reported_styled` is the phrasing the prompt already shows; the ISO
 > `reported` field is `incident_time + offset_minutes`, so it is not kept.) `harbor run` puts the task directory on the machine that
-> runs it, so publishing `-private-oracle` to submitters would hand over the
+> runs it, so publishing `-private-internal` to submitters would hand over the
 > answers for all 324 tasks.
 >
 > The hidden tasks are not scored in-container. Harbor requires every task to
@@ -77,8 +77,8 @@ uv run harbor publish out-0804/harbor/datasets/verified --private
 
 > [!NOTE]
 > `split.json` records the disjoint partition under `splits` (`public`,
-> `private-oracle`) and the overlapping selections under `views` (`verified` is
-> a subset of public; `private-hidden` repackages private-oracle under new
+> `private-internal`) and the overlapping selections under `views` (`verified` is
+> a subset of public; `private-hidden` repackages private-internal under new
 > package names). `convert_job.py` assigns `routing[task_id]` while looping over
 > `splits`, so an entry sharing a task_id there would silently reroute those
 > trials to whichever dataset iterated last.
