@@ -57,6 +57,8 @@ extensions:
         opensearch:
           server_urls:
             - http://${env:OPENSEARCH_HOST}:${env:OPENSEARCH_PORT}
+          # Sized at start-up by set_max_span_age.sh from SNAPSHOT_DATA_DATE;
+          # the value checked in here is only a fallback. See README.md.
           max_span_age: 2160h
           indices:
             index_prefix: "jaeger-main"

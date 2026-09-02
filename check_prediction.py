@@ -19,6 +19,7 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from tabulate import tabulate
 
@@ -147,7 +148,39 @@ CONTROL_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
-DEFAULT_MODEL = "openai-gpt-5.4"
+# Every OpenAI-compatible endpoint namespaces model ids its own way, so the
+# judge and the oracle pick their default from $OPENAI_BASE_URL. Keyed by host
+# (with port) rather than the full URL, so ``/v1``, no ``/v1``, and trailing
+# slashes all match the same entry.
+OPENAI_DEFAULT_HOST = "api.openai.com"
+OPENAI_DEFAULT_BASE_URL = f"https://{OPENAI_DEFAULT_HOST}/v1"
+
+MODEL_BY_HOST = {
+    OPENAI_DEFAULT_HOST: "gpt-5.4",  # OpenAI: unprefixed
+    "inference.do-ai.run": "openai-gpt-5.4",  # Gradient AI: dash-prefixed
+    "openrouter.ai": "openai/gpt-5.4",  # OpenRouter: slash-prefixed
+}
+
+
+def default_model(base_url: str | None = None) -> str:
+    """Default model id for ``base_url`` (default: ``$OPENAI_BASE_URL``).
+
+    An unset or empty ``OPENAI_BASE_URL`` means the SDK's own default endpoint,
+    api.openai.com. A host that isn't in the map falls back to the
+    OpenAI-native (unprefixed) id; pass ``--model`` to override.
+    """
+    url = (base_url or os.getenv("OPENAI_BASE_URL") or OPENAI_DEFAULT_BASE_URL).strip()
+    host = urlparse(url).netloc.lower()
+    return MODEL_BY_HOST.get(host, MODEL_BY_HOST[OPENAI_DEFAULT_HOST])
+
+
+DEFAULT_MODEL = default_model()
+
+# Output-token ceiling for every LLM call in this module and in solve.py, which
+# calls through ``async_call_llm_judge``. Reasoning tokens count against it on
+# the Responses API, so it has to cover the model's thinking as well as the
+# visible output. Change it here only.
+DEFAULT_MAX_TOKENS = 128_000
 
 
 # ---------------------------------------------------------------------------
@@ -639,15 +672,18 @@ async def async_call_llm_judge(
     model: str = DEFAULT_MODEL,
     reasoning_effort: str | None = None,
     output_schema: dict | None = None,
-) -> tuple[str, list[dict] | None]:
+) -> tuple[str, list[dict] | None, dict[str, Any] | None]:
     """Call the LLM judge via the OpenAI Responses API (falling back to Chat).
 
     When ``output_schema`` is provided, uses Structured Outputs (strict JSON
     Schema) so the returned text is guaranteed to conform to the schema.
 
     Returns:
-        A tuple of (output_text, reasoning_summaries). reasoning_summaries is
-        None when reasoning_effort is not set.
+        A tuple of (output_text, reasoning_summaries, usage).
+        reasoning_summaries is None when reasoning_effort is not set; usage is
+        the provider's token accounting verbatim (``response.usage``, dumped),
+        whose shape follows whichever API served the call, or None when the
+        provider reported none.
 
     """
     text_format: dict[str, Any] = (
@@ -667,7 +703,7 @@ async def async_call_llm_judge(
             "text": {"format": text_format},
             "tools": [],
             "store": True,
-            "max_output_tokens": 16384,
+            "max_output_tokens": DEFAULT_MAX_TOKENS,
         }
         if reasoning_effort is not None:
             kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
@@ -683,7 +719,12 @@ async def async_call_llm_judge(
                 if getattr(item, "type", None) == "reasoning"
                 and getattr(item, "summary", None) is not None
             ]
-        return response.output_text, reasoning_summaries
+        usage = getattr(response, "usage", None)
+        return (
+            response.output_text,
+            reasoning_summaries,
+            usage.model_dump() if usage is not None else None,
+        )
     except Exception as exc:
         if "404" not in str(exc):
             raise
@@ -693,7 +734,7 @@ async def async_call_llm_judge(
         chat_kwargs: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 16384,
+            "max_tokens": DEFAULT_MAX_TOKENS,
         }
         if output_schema is not None:
             chat_kwargs["response_format"] = {
@@ -716,7 +757,12 @@ async def async_call_llm_judge(
                 reasoning_summaries = [{"type": "text", "text": reasoning_content}]
             else:
                 reasoning_summaries = []
-        return response.choices[0].message.content, reasoning_summaries
+        usage = getattr(response, "usage", None)
+        return (
+            response.choices[0].message.content,
+            reasoning_summaries,
+            usage.model_dump() if usage is not None else None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +1037,7 @@ async def _judge_control(
         predictions=predictions,
     )
 
-    raw_response, reasoning_summary = await async_call_llm_judge(
+    raw_response, reasoning_summary, usage = await async_call_llm_judge(
         client,
         prompt,
         model=model,
@@ -1013,6 +1059,7 @@ async def _judge_control(
         "reasoning_summary": reasoning_summary,
         "judge_prompt": prompt,
         "judge_response_raw": raw_response,
+        "usage": usage,
         "claims_incident_in_quiet_window": claims,
         "judge_reasoning": parsed.get("reasoning", ""),
         "nested": {"rubrics": [_synth_rubric_verdict("(no_incident)", score)]},
@@ -1037,8 +1084,8 @@ async def judge(
     Returns:
         A dict with keys ``mode``, ``model``, ``nested``, and (for the LLM
         judge mode) ``reasoning_summary``, ``rubric_used``, ``judge_prompt``,
-        ``judge_response_raw``. All scoring (the ``rca_depth`` mean and the
-        per-section rollups) is derived post-hoc from ``nested`` by
+        ``judge_response_raw``, ``usage``. All scoring (the ``rca_depth`` mean
+        and the per-section rollups) is derived post-hoc from ``nested`` by
         :func:`aggregate_judge_response`.
 
     """
@@ -1098,7 +1145,7 @@ async def judge(
     prompt = build_judge_prompt(rubrics_data, predictions)
     output_schema = build_judge_output_schema(rubrics_data)
 
-    raw_response, reasoning_summary = await async_call_llm_judge(
+    raw_response, reasoning_summary, usage = await async_call_llm_judge(
         client,
         prompt,
         model=model,
@@ -1119,6 +1166,7 @@ async def judge(
         "rubric_used": bool(rubrics_data),
         "judge_prompt": prompt,
         "judge_response_raw": raw_response,
+        "usage": usage,
         "nested": parsed,
     }
 

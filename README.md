@@ -30,7 +30,7 @@ The telemetry data collection was performed on a DigitalOcean Droplet with 32 GB
 
 We collect telemetry data using the codebase at https://github.com/open-telemetry/opentelemetry-demo with the following modifications:
 
-1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and by default only looks back 72 hours (`max_span_age`) when querying. When loading historical snapshots older than 3 days, the `max_span_age` in `jaeger-config-snapshot.yml` must be large enough to cover the age of the snapshot data, otherwise the Jaeger service list will appear empty. It is currently set to `2160h` (90 days). Note: very large values (e.g. 1 year+) cause OpenSearch's 4096-byte HTTP line limit to be exceeded, since Jaeger generates one index name per day in the query URL.
+1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and only looks back `max_span_age` when querying — it builds the index-name list from `now - max_span_age`, so once that window no longer reaches the snapshot's dates, the service list silently comes back empty. Because snapshot data is frozen while wall-clock time advances, `max_span_age` is **computed at start-up** by `set_max_span_age.sh` from `SNAPSHOT_DATA_DATE` (default `2026-04-18`) plus `MAX_SPAN_AGE_MARGIN_DAYS` (default 7); the value in `jaeger-config-snapshot.yml` is only a placeholder. Jaeger names one index per day in the query URL, so a long window needs a matching `http.max_initial_line_length` on the opensearch service (set to `64kb` in `patches/docker-compose.yml`, ~1724 days of headroom); `set_max_span_age.sh` warns when the estimate passes 75% of that limit.
 
 2. We also increase the memory resources for certain containers:
 
@@ -92,6 +92,34 @@ cp patches/litellm_gradient_ai_chat_transformation.py \
 
 </details>
 
+## Quick start
+
+1. Pull the Docker image (only need to do this step once):
+```bash
+IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2
+CACHE_ROOT="/root/.cache/sre-snapshot-cache"
+CACHE_DIR="$(./stage_snapshot_cache.sh --image "$IMAGE" --cache-root "$CACHE_ROOT")"
+```
+
+2. Run the oracle solution on a single task:
+```bash
+SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" uv run harbor run \
+    --mounts-json "[{\"type\":\"bind\",\"source\":\"$CACHE_DIR\",\"target\":\"$CACHE_DIR\",\"read_only\":true}]" \
+    -t orca-bench/05216f608f940a48
+```
+
+2. Run Claude Sonnet 4.6 using the Terminus-2 agent harness on a single task:
+```bash
+SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" uv run harbor run \
+    --mounts-json "[{\"type\":\"bind\",\"source\":\"$CACHE_DIR\",\"target\":\"$CACHE_DIR\",\"read_only\":true}]" \
+    -t orca-bench/05216f608f940a48 \
+    -a terminus-2 \
+    -m gradient_ai/anthropic-claude-4.6-sonnet \
+    --ak temperature=1 \
+    --ak reasoning_effort=medium \
+    --ak 'llm_kwargs={"max_tokens": 16384}'
+```
+
 ## Submitting to the leaderboard
 
 See [`leaderboard/SUBMIT.md`](./leaderboard/SUBMIT.md) for the full walkthrough; the short version:
@@ -102,10 +130,9 @@ See [`leaderboard/SUBMIT.md`](./leaderboard/SUBMIT.md) for the full walkthrough;
    the hub:
 
 ```bash
-SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2 \
     ./run_harbor_cached.sh -c job-config.yaml \
       -a <agent> -m <provider/model> \
-      --ve OPENAI_API_KEY="$OPENAI_API_KEY" \
       --upload --public
 ```
 

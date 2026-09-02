@@ -16,8 +16,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CONTEXT_DIR}:${CONTEXT_DIR}
-      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}
-      - ${HOST_AGENT_LOGS_PATH}:${ENV_AGENT_LOGS_PATH}
     deploy:
       resources:
         limits:

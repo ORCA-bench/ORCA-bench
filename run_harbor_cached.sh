@@ -10,13 +10,13 @@
 #   run_harbor_cached.sh <harbor-run-args...>
 #
 # Examples:
-#   ./run_harbor_cached.sh -c configs/harbor_job_share2w_base.yaml
-#   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
-#       ./run_harbor_cached.sh -c configs/foo.yaml --n-trials 1
+#   ./run_harbor_cached.sh -c job-config.yaml
+#   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2 \
+#       ./run_harbor_cached.sh -p /path/to/task
 
 set -euo pipefail
 
-IMAGE="${SNAPSHOT_IMAGE:-orcabench/sre-otel-snapshot:data-0418-harbor-template}"
+IMAGE="${SNAPSHOT_IMAGE:-orcabench/sre-otel-snapshot:data-0418-harbor-template-v2}"
 
 # Run this script from examples/otel-demo so ./stage_snapshot_cache.sh resolves.
 
@@ -34,5 +34,24 @@ MOUNTS=$(printf '[{"type":"bind","source":"%s","target":"%s","read_only":true}]'
 # SNAPSHOT_CACHE_HOST_DIR rides through Harbor's resolve_env_vars() into the
 # docker-compose subprocess env, then into the main container via the
 # harbor-template docker-compose.yaml's `environment:` passthrough.
-SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" \
-    exec uv run harbor run --mounts-json "$MOUNTS" "$@"
+export SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR"
+# Quote an argument so the echoed command can be pasted straight into an
+# interactive shell. Without this, zsh treats the bare JSON's [...] as a glob
+# and fails with "no matches found" before harbor ever runs.
+shell_quote() {
+    local arg out="" sq="'"
+    for arg in "$@"; do
+        if [[ "$arg" =~ ^[A-Za-z0-9_./=:+@%,-]+$ ]]; then
+            out+="$arg "
+        else
+            # Wrap in single quotes, closing/escaping/reopening any embedded one.
+            out+="$sq${arg//$sq/$sq\\$sq$sq}$sq "
+        fi
+    done
+    printf '%s' "${out% }"
+}
+
+CMD=(uv run harbor run --mounts-json "$MOUNTS" "$@")
+echo "[run_harbor_cached] Running the following command:" >&2
+echo "  $(shell_quote "${CMD[@]}")" >&2
+exec "${CMD[@]}"

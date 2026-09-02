@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
-"""Generate an incident report from a rubric JSON via LLM.
+"""Generate an incident report from one or more rubric JSONs via LLM.
 
 Standalone script designed to run inside a Harbor task container.
 Also importable by ``run_solve.py`` for local batch generation.
 
+A task carries one rubric per *plausible* root cause (see
+``build_harbor_tasks.py``), and the verifier scores the report against every
+one of them, averaging the per-rubric scores. A report that nails a single
+cause therefore caps at ``1/N`` of full credit, so the oracle must cover all
+N causes -- ``--rubrics-dir`` points at the task's rubric directory. A task
+with no rubric directory is a control task with no incident, and is reported
+as an empty report.
+
 Examples::
 
     # Inside Harbor container (solve.sh calls this):
-    python solve.py --rubric /tests/rubric.json --output /app/report.md
+    python solve.py --rubrics-dir /solution/rubrics --output /app/report.md
+
+    # The provenance of the report (mode, model, reasoning effort/summary,
+    # prompt, raw response, token usage) is written to --details, defaulting
+    # to /logs/agent/solve-details.json.
 
     # With custom model/effort:
-    python solve.py --rubric /tests/rubric.json --output /app/report.md -m openai-gpt-5.4 -e high
+    python solve.py --rubrics-dir /solution/rubrics -m openai-gpt-5.4 -e high
 """
 
 import argparse
@@ -21,11 +33,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from check_prediction import async_call_llm_judge, format_rubric
+from check_prediction import DEFAULT_MODEL, async_call_llm_judge, format_rubric
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL: str | None = None
+# DEFAULT_MODEL is imported from check_prediction: it is picked from
+# $OPENAI_BASE_URL via that module's MODEL_BY_BASE_URL map, so the oracle and
+# the judge name the same model the same way on whichever endpoint is configured.
 DEFAULT_EFFORT = "high"
 
 # Report format from harbor-template/instruction.md.template — sections 1-4.
@@ -163,15 +177,15 @@ Output format:
 """
 
 SOLUTION_PROMPT_TEMPLATE = """\
-You are an expert site reliability engineer. You are given a ground-truth \
-rubric describing an incident's root cause, mechanism, and telemetry evidence.
+You are an expert site reliability engineer. You are given {intro} \
+describing an incident's root cause, mechanism, and telemetry evidence.
 
 Your task: write an incident report as if you investigated this incident \
 yourself. Use the rubric evidence to populate each section. Do NOT mention \
 the rubric or that you were given ground-truth data — write as though you \
 discovered everything through telemetry analysis.
-
-## Ground-Truth Rubric
+{multi_cause_guidance}
+## Ground-Truth {heading}
 
 {rubric}
 
@@ -180,52 +194,179 @@ discovered everything through telemetry analysis.
 {report_format}
 """
 
+# Injected only when a task has more than one plausible root cause. The
+# verifier scores the report against every rubric independently and averages
+# (check_prediction.py: ``aggregate_judge_response``), so a report that
+# investigates one cause and files the rest under "Unexplored branches" scores
+# 0 on those rubrics. Each cause needs its own named mechanism and its own
+# cited evidence to score. The agent-facing prompt sets the same expectation
+# ("There may be multiple root causes" — instruction.md.template).
+MULTI_CAUSE_GUIDANCE = """
+## Multiple Root Causes
 
-def build_solution_prompt(rubric_md: str) -> str:
-    """Build the LLM prompt from a formatted rubric markdown string."""
+These {n} rubrics describe {n} distinct root causes, each of which could \
+independently explain the reported issue. All {n} are ground truth — the \
+report must cover every one of them rather than choosing the likeliest. For \
+each root cause, name it, explain its own mechanism from the feature flag \
+through to the user-visible failure, and cite that cause's own metric, log, \
+and trace evidence. Applying this to the four sections:
+
+- Section 1 (Summary): name all {n} root causes.
+- Section 2 (Timeline): a single chronological narrative covering all {n}. \
+When entries for different causes interleave, say which cause each belongs to.
+- Section 3 (5 Whys): one complete, separately headed chain per root cause — \
+`### Chain 1 of {n}: <feature flag>`, `### Chain 2 of {n}: <feature flag>`, \
+and so on. Each chain gets its own problem statement, its own why-steps with \
+evidence, and its own `Root cause:` line. Do not merge the chains into one, \
+and do not relegate any cause to `Unexplored branches` — every cause needs a \
+fully worked chain of its own.
+- Section 4 (Remediation): list actions for all {n} causes in one table, and \
+name the root cause each action targets in the `Targets` column.
+"""
+
+
+def build_solution_prompt(rubrics_md: list[str]) -> str:
+    """Build the LLM prompt from formatted rubric markdown strings.
+
+    With a single rubric the prompt is unchanged from the single-cause form.
+    With several, the rubrics are labelled and separated using the same
+    convention as the judge prompt (``build_judge_prompt``), and
+    :data:`MULTI_CAUSE_GUIDANCE` is prepended so the report covers each one.
+    """
+    if not rubrics_md:
+        raise ValueError("build_solution_prompt called with no rubrics")
+
+    if len(rubrics_md) == 1:
+        return SOLUTION_PROMPT_TEMPLATE.format(
+            intro="a ground-truth rubric",
+            multi_cause_guidance="",
+            heading="Rubric",
+            rubric=rubrics_md[0],
+            report_format=REPORT_FORMAT,
+        )
+
+    n = len(rubrics_md)
+    blocks = [f"### Rubric {i + 1} of {n}\n\n{md}" for i, md in enumerate(rubrics_md)]
     return SOLUTION_PROMPT_TEMPLATE.format(
-        rubric=rubric_md,
+        intro=f"{n} ground-truth rubrics, each",
+        multi_cause_guidance=MULTI_CAUSE_GUIDANCE.format(n=n),
+        heading="Rubrics",
+        rubric="\n\n---\n\n".join(blocks),
         report_format=REPORT_FORMAT,
     )
 
 
+# Provenance record for a generated report, mirroring the verifier's
+# reward-details.json (``check_prediction.judge``): ``mode``, ``model``,
+# ``reasoning_effort``, ``reasoning_summary``, ``usage``, and the prompt/raw
+# response the verifier records as ``judge_prompt``/``judge_response_raw``. As
+# in the verifier's short-circuit modes, the LLM-only keys are omitted when no
+# call was made, so their presence alone says whether a model produced the
+# report.
+def build_details(
+    mode: str,
+    model: str | None,
+    effort: str | None,
+    *,
+    prompt: str | None = None,
+    reasoning_summary: list[dict] | None = None,
+    response_raw: str | None = None,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble the provenance record written alongside a generated report."""
+    details: dict[str, Any] = {
+        "mode": mode,
+        "model": model,
+        "reasoning_effort": effort,
+    }
+    if prompt is not None:
+        details["reasoning_summary"] = reasoning_summary
+        details["prompt"] = prompt
+        details["response_raw"] = response_raw
+        details["usage"] = usage
+    return details
+
+
+def write_details(details_path: Path, details: dict[str, Any]) -> None:
+    """Write the provenance record, warning rather than failing on I/O errors.
+
+    The report itself is already on disk by the time this is called, so a
+    non-writable log directory should not fail an otherwise successful run.
+    """
+    try:
+        details_path.parent.mkdir(parents=True, exist_ok=True)
+        details_path.write_text(json.dumps(details, indent=2))
+    except OSError as exc:
+        logger.warning(f"Could not write solve details to {details_path}: {exc}")
+        return
+    logger.info(f"Wrote solve details to {details_path}")
+
+
 async def generate_report(
     client: Any,
-    rubric_data: dict,
+    rubrics_data: list[dict],
     model: str | None = DEFAULT_MODEL,
     effort: str | None = DEFAULT_EFFORT,
-) -> tuple[str, str, list[dict] | None]:
-    """Generate an incident report from rubric JSON.
+) -> tuple[str, dict[str, Any]]:
+    """Generate one incident report covering every rubric in ``rubrics_data``.
 
-    If ``model`` is ``None``, the formatted rubric is returned directly with
-    no LLM call. Otherwise the rubric is passed to the LLM to be reformatted
-    into an incident report.
+    Each rubric is one plausible root cause and the verifier scores the report
+    against all of them, so the report must address every rubric rather than
+    the first.
+
+    If ``model`` is ``None``, the formatted rubrics are returned directly with
+    no LLM call. Otherwise they are passed to the LLM to be reformatted into a
+    single incident report.
 
     Returns:
-        A tuple of (report_text, prompt, reasoning_summary). When ``model``
-        is ``None``, ``prompt`` is empty and ``reasoning_summary`` is ``None``.
+        A tuple of (report_text, details), where ``details`` is the provenance
+        record built by :func:`build_details`. With ``model=None`` nothing was
+        prompted, so the record carries only ``mode``, ``model`` and
+        ``reasoning_effort``.
 
     """
-    rubric_md = format_rubric(rubric_data)
+    if not rubrics_data:
+        raise ValueError("generate_report called with no rubrics")
+    rubrics_md = [format_rubric(r) for r in rubrics_data]
     if model is None:
-        return rubric_md, "", None
-    prompt = build_solution_prompt(rubric_md)
-    response_text, reasoning_summary = await async_call_llm_judge(
+        report_text = "\n\n---\n\n".join(rubrics_md)
+        return report_text, build_details("rubric_passthrough", model, effort)
+    prompt = build_solution_prompt(rubrics_md)
+    response_text, reasoning_summary, usage = await async_call_llm_judge(
         client, prompt, model=model, reasoning_effort=effort
     )
-    return response_text, prompt, reasoning_summary
+    return response_text, build_details(
+        "llm_solve",
+        model,
+        effort,
+        prompt=prompt,
+        reasoning_summary=reasoning_summary,
+        response_raw=response_text,
+        usage=usage,
+    )
 
 
 async def async_main() -> None:
-    """CLI entry point: read rubric, call LLM, write report."""
+    """CLI entry point: read the task's rubric(s), call LLM, write report."""
     parser = argparse.ArgumentParser(
-        description="Generate an incident report from a rubric JSON via LLM."
+        description=(
+            "Generate an incident report from one or more rubric JSONs via LLM."
+        ),
+        # Prefix abbreviation would quietly bind a stale ``--rubric <file>``
+        # to ``--rubrics-dir``, which globs nothing and writes an empty report
+        # with a zero exit -- a silent 0 for every task. Reject it instead.
+        allow_abbrev=False,
     )
     parser.add_argument(
-        "--rubric",
+        "--rubrics-dir",
         type=str,
-        default="/tests/rubric.json",
-        help="Path to rubric JSON file.",
+        default="/solution/rubrics",
+        help=(
+            "Directory of rubric JSON files, one per plausible root cause; "
+            "every rubric in it is covered by the generated report. An absent "
+            "directory means a control task with no incident and yields an "
+            "empty report."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -234,14 +375,22 @@ async def async_main() -> None:
         help="Path to write the generated report.",
     )
     parser.add_argument(
+        "--details",
+        type=str,
+        default="/logs/agent/solve-details.json",
+        help=(
+            "Path to write the provenance record (mode, model, reasoning "
+            "effort/summary, prompt, raw response, token usage) for the "
+            "generated report. The default lands in the trial's agent log "
+            "directory, alongside the verifier's reward-details.json."
+        ),
+    )
+    parser.add_argument(
         "--model",
         "-m",
         type=str,
         default=DEFAULT_MODEL,
-        help=(
-            "LLM model name. If omitted, the formatted rubric is written "
-            "directly as the report with no LLM call."
-        ),
+        help=f"LLM model name (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--effort",
@@ -258,20 +407,38 @@ async def async_main() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 
-    rubric_path = Path(args.rubric)
     output_path = Path(args.output)
+    details_path = Path(args.details)
 
-    if not rubric_path.is_file():
-        logger.warning(f"Rubric file not found: {rubric_path}; writing empty report")
+    # sorted() matches the order the verifier loads rubrics in
+    # (check_prediction.py). build_harbor_tasks.py only creates this directory
+    # for tasks that have events, so its absence means a control task -- the
+    # correct report for which is the empty one the verifier scores as
+    # "no incident".
+    rubrics_dir = Path(args.rubrics_dir)
+    if rubrics_dir.exists() and not rubrics_dir.is_dir():
+        raise NotADirectoryError(
+            f"--rubrics-dir must be a directory of rubric JSONs, got {rubrics_dir}"
+        )
+    if not rubrics_dir.is_dir():
+        logger.info(f"No rubric directory at {rubrics_dir}; writing empty report")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text("")
+        write_details(
+            details_path, build_details("no_incident", args.model, args.effort)
+        )
         return
 
-    rubric_data = json.loads(rubric_path.read_text())
-    logger.info(
-        f"Loaded rubric: {rubric_data.get('feature_flag', 'unknown')} "
-        f"from {rubric_path}"
-    )
+    rubrics_data = [
+        json.loads(p.read_text()) for p in sorted(rubrics_dir.glob("*.json"))
+    ]
+    if not rubrics_data:
+        # The directory only exists for tasks that have events, so an empty
+        # one means every rubric lookup failed at build time.
+        raise FileNotFoundError(f"Rubric directory {rubrics_dir} contains no JSONs")
+
+    flags = ", ".join(r.get("feature_flag", "unknown") for r in rubrics_data)
+    logger.info(f"Loaded {len(rubrics_data)} rubric(s) from {rubrics_dir}: {flags}")
 
     client: Any = None
     if args.model is not None:
@@ -282,16 +449,18 @@ async def async_main() -> None:
             base_url=os.getenv("OPENAI_BASE_URL"),
         )
 
-    report_text, _prompt, reasoning_summary = await generate_report(
-        client, rubric_data, model=args.model, effort=args.effort
+    report_text, details = await generate_report(
+        client, rubrics_data, model=args.model, effort=args.effort
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report_text)
     logger.info(f"Wrote report to {output_path}")
 
-    if reasoning_summary:
-        logger.info(f"Reasoning summary: {reasoning_summary}")
+    write_details(details_path, details)
+
+    if details.get("reasoning_summary"):
+        logger.info(f"Reasoning summary: {details['reasoning_summary']}")
 
 
 if __name__ == "__main__":

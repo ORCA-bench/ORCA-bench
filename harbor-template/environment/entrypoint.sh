@@ -168,7 +168,66 @@ fi
 cp -f "${SNAPSHOT_CACHE_HOST_DIR}/docker-compose-base.yml"     "${OTEL_DIR}/docker-compose-base.yml"
 cp -f "${SNAPSHOT_CACHE_HOST_DIR}/docker-compose.snapshot.yml" "${OTEL_DIR}/docker-compose.snapshot.yml"
 cp -f "${SNAPSHOT_CACHE_HOST_DIR}/otelcol-config-snapshot.yml" "${OTEL_DIR}/otelcol-config-snapshot.yml"
-cp -f "${SNAPSHOT_CACHE_HOST_DIR}/jaeger-config-snapshot.yml"  "${OTEL_DIR}/jaeger-config-snapshot.yml"
+# Jaeger's max_span_age must still reach back to the snapshot's trace data,
+# which is frozen while wall-clock time advances, so size it at start-up
+# rather than copying the baked-in value.
+#
+# Inlined rather than exec'ing set_max_span_age.sh: BASH_ENV points at
+# /etc/profile.d/wait-env-ready.sh, which every non-interactive bash sources and
+# which blocks until /tmp/env-ready exists.  That gate exempts PID 1 only, so a
+# bash child spawned here would wait on a file this script does not create until
+# step 6b -- a deadlock.  load_snapshot.sh runs on the host, where BASH_ENV is
+# unset, and keeps a standalone copy in set_max_span_age.sh; keep the two in
+# sync.  Returns non-zero on error; `set -e` turns that into an entrypoint exit.
+set_max_span_age() {
+    local src="$1" dst="$2"
+    local snapshot_date="${SNAPSHOT_DATA_DATE:-2026-04-18}"
+    local margin_days="${MAX_SPAN_AGE_MARGIN_DAYS:-7}"
+    local limit_bytes="${OPENSEARCH_MAX_LINE_BYTES:-65536}"
+    local now_s snap_s age_days window_days hours est_bytes
+
+    if [ -e "$dst" ] && [ "$src" -ef "$dst" ]; then
+        echo "[max-span-age] ERROR: src and dst are the same file: $src" >&2
+        return 1
+    fi
+
+    now_s=$(date -u +%s)
+    if ! snap_s=$(date -u -d "$snapshot_date" +%s 2>/dev/null); then
+        echo "[max-span-age] ERROR: unparseable SNAPSHOT_DATA_DATE: $snapshot_date" >&2
+        return 1
+    fi
+
+    age_days=$(( (now_s - snap_s) / 86400 ))
+    if [ "$age_days" -lt 0 ]; then
+        age_days=0
+    fi
+    window_days=$(( age_days + margin_days ))
+    hours=$(( window_days * 24 ))
+
+    # Jaeger puts one index name per day in the query URL, and OpenSearch rejects
+    # a request line longer than http.max_initial_line_length.  Of the four index
+    # families the service name is longest, at 38 bytes/day including its comma.
+    est_bytes=$(( window_days * 38 ))
+    if [ "$est_bytes" -gt $(( limit_bytes * 3 / 4 )) ]; then
+        echo "[max-span-age] WARNING: ${window_days}d needs ~${est_bytes}B of index names," \
+             "against a ${limit_bytes}B OpenSearch line limit. Raise" \
+             "http.max_initial_line_length on the opensearch service." >&2
+    fi
+
+    mkdir -p "$(dirname "$dst")"
+    sed -E "s|^([[:space:]]*max_span_age:[[:space:]]*).*|\1${hours}h|" "$src" > "$dst"
+
+    if ! grep -qE "^[[:space:]]*max_span_age:[[:space:]]*${hours}h[[:space:]]*$" "$dst"; then
+        echo "[max-span-age] ERROR: no max_span_age key found in $src" >&2
+        return 1
+    fi
+
+    echo "[max-span-age] snapshot ${snapshot_date} is ${age_days}d old;" \
+         "set max_span_age=${hours}h (${window_days}d) -> ${dst}"
+}
+
+set_max_span_age "${SNAPSHOT_CACHE_HOST_DIR}/jaeger-config-snapshot.yml" \
+                 "${OTEL_DIR}/jaeger-config-snapshot.yml"
 # Ensure the .env file is present — docker compose reads it automatically
 # from the compose file's directory for variable substitution.
 if [ -f "${SNAPSHOT_CACHE_HOST_DIR}/opentelemetry-demo/.env" ] && [ ! -f "${OTEL_DIR}/.env" ]; then
@@ -302,7 +361,7 @@ curl -s -X PUT "http://opensearch:9200/_snapshot/scheduled_backups?verify=false"
 sleep 2
 
 # Restore the snapshot (no need to close indices — opensearch-data starts empty)
-curl -s -X POST "http://opensearch:9200/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}/_restore?wait_for_completion=true" \
+curl -s -X POST "http://opensearch:9200/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}-consolidated/_restore?wait_for_completion=true" \
     -H 'Content-Type: application/json' \
     -d '{"indices": "*", "include_global_state": false}' \
     || echo "[entrypoint] Warning: OpenSearch snapshot restore failed (may not exist for this snapshot)"

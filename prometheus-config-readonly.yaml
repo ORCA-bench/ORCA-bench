@@ -1,0 +1,6 @@
+# Read-only Prometheus config: no scrape targets.
+# Used by load_snapshot.sh so Prometheus serves snapshot data without ingesting new metrics.
+global:
+  scrape_interval: 60s
+  scrape_timeout: 10s
+  evaluation_interval: 60s

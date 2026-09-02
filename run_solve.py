@@ -26,7 +26,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from solve import DEFAULT_EFFORT, DEFAULT_MODEL, generate_report
+from check_prediction import default_model
+from solve import DEFAULT_EFFORT, generate_report
 from utils import get_base_parser, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -58,8 +59,11 @@ async def process_rubric(
 
     async with semaphore:
         try:
-            report_text, prompt, reasoning_summary = await generate_report(
-                client, rubric_data, model=model, effort=effort
+            # One rubric file per call here: run_solve.py batch-generates a
+            # per-cause reference report, unlike the in-task oracle which
+            # covers a task's whole rubric set in one report.
+            report_text, details = await generate_report(
+                client, [rubric_data], model=model, effort=effort
             )
         except Exception as exc:
             logger.error(f"Generation failed for {rubric_path.name}: {exc}")
@@ -68,21 +72,12 @@ async def process_rubric(
     out_path.write_text(report_text)
     logger.info(f"Wrote {out_path}")
 
-    # Only persist a response record when an LLM was actually called.
+    # Only persist a response record when an LLM was actually called. The
+    # record is solve.py's provenance dict verbatim, so it matches what the
+    # in-task oracle writes to /logs/agent/solve-details.json.
     if model is not None:
         response_path = responses_dir / f"{rubric_path.stem}-{model}-{effort}.json"
-        response_path.write_text(
-            json.dumps(
-                {
-                    "model": model,
-                    "effort": effort,
-                    "prompt": prompt,
-                    "reasoning": reasoning_summary,
-                    "response": report_text,
-                },
-                indent=2,
-            )
-        )
+        response_path.write_text(json.dumps(details, indent=2))
         logger.info(f"Wrote {response_path}")
     return out_path
 
@@ -91,7 +86,9 @@ async def async_main() -> None:
     """Process all rubric JSONs and generate solution reports concurrently."""
     parser = get_base_parser()
     parser.description = "Batch-generate solution reports from rubric JSONs via LLM."
-    parser.set_defaults(model=DEFAULT_MODEL)
+    # Resolved here, not at import: load_dotenv() runs in __main__, after
+    # this module is imported, and the default follows $OPENAI_BASE_URL.
+    parser.set_defaults(model=default_model())
     parser.add_argument(
         "--concurrency",
         type=int,

@@ -10,7 +10,6 @@ x-default-logging: &logging
 
 networks:
   default:
-    name: opentelemetry-demo
     driver: bridge
 
 services:
@@ -20,7 +19,7 @@ services:
   # Accounting service
   accounting:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-accounting
-    container_name: accounting
+
     build:
       context: ./
       dockerfile: ${ACCOUNTING_DOCKERFILE}
@@ -49,7 +48,6 @@ services:
   # AdService
   ad:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-ad
-    container_name: ad
     build:
       context: ./
       dockerfile: ${AD_DOCKERFILE}
@@ -85,7 +83,6 @@ services:
   # Cart service
   cart:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-cart
-    container_name: cart
     build:
       context: ./
       dockerfile: ${CART_DOCKERFILE}
@@ -120,7 +117,6 @@ services:
   # Checkout service
   checkout:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-checkout
-    container_name: checkout
     build:
       context: ./
       dockerfile: ${CHECKOUT_DOCKERFILE}
@@ -173,7 +169,6 @@ services:
   # Currency service
   currency:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-currency
-    container_name: currency
     build:
       context: ./
       dockerfile: ${CURRENCY_DOCKERFILE}
@@ -204,7 +199,6 @@ services:
   # Email service
   email:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-email
-    container_name: email
     build:
       context: ./
       dockerfile: ${EMAIL_DOCKERFILE}
@@ -234,7 +228,6 @@ services:
   # Fraud Detection service
   fraud-detection:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-fraud-detection
-    container_name: fraud-detection
     build:
       context: ./
       dockerfile: ${FRAUD_DOCKERFILE}
@@ -267,7 +260,6 @@ services:
   # Frontend
   frontend:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-frontend
-    container_name: frontend
     build:
       context: ./
       dockerfile: ${FRONTEND_DOCKERFILE}
@@ -329,7 +321,6 @@ services:
   # Frontend Proxy (Envoy)
   frontend-proxy:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-frontend-proxy
-    container_name: frontend-proxy
     build:
       context: ./
       dockerfile: ${FRONTEND_PROXY_DOCKERFILE}
@@ -341,8 +332,8 @@ services:
           memory: 65M
     restart: unless-stopped
     ports:
-      - "${ENVOY_PORT}:${ENVOY_PORT}"
-      - "${ENVOY_ADMIN_PORT}:${ENVOY_ADMIN_PORT}"
+      - "${ENVOY_HOST_PORT:-${ENVOY_PORT}}:${ENVOY_PORT}"
+      - "${ENVOY_ADMIN_HOST_PORT:-${ENVOY_ADMIN_PORT}}:${ENVOY_ADMIN_PORT}"
     environment:
       - FRONTEND_PORT
       - FRONTEND_HOST
@@ -382,7 +373,6 @@ services:
   # image-provider
   image-provider:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-image-provider
-    container_name: image-provider
     build:
       context: ./
       dockerfile: ${IMAGE_PROVIDER_DOCKERFILE}
@@ -409,7 +399,6 @@ services:
   # Load Generator
   load-generator:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-load-generator
-    container_name: load-generator
     build:
       context: ./
       dockerfile: ${LOAD_GENERATOR_DOCKERFILE}
@@ -448,7 +437,6 @@ services:
   # Payment service
   payment:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-payment
-    container_name: payment
     build:
       context: ./
       dockerfile: ${PAYMENT_DOCKERFILE}
@@ -480,7 +468,6 @@ services:
   # Product Catalog service
   product-catalog:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-product-catalog
-    container_name: product-catalog
     build:
       context: ./
       dockerfile: ${PRODUCT_CATALOG_DOCKERFILE}
@@ -516,7 +503,6 @@ services:
   # Product reviews service
   product-reviews:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-product-reviews
-    container_name: product-reviews
     build:
       context: ./
       dockerfile: ${PRODUCT_REVIEWS_DOCKERFILE}
@@ -561,7 +547,6 @@ services:
   # Quote service
   quote:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-quote
-    container_name: quote
     build:
       context: ./
       dockerfile: ${QUOTE_DOCKERFILE}
@@ -591,7 +576,6 @@ services:
   # Recommendation service
   recommendation:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-recommendation
-    container_name: recommendation
     build:
       context: ./
       dockerfile: ${RECOMMENDATION_DOCKERFILE}
@@ -627,7 +611,6 @@ services:
   # Shipping service
   shipping:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-shipping
-    container_name: shipping
     build:
       context: ./
       dockerfile: ${SHIPPING_DOCKERFILE}
@@ -659,7 +642,6 @@ services:
   # Flagd, feature flagging service
   flagd:
     image: ${FLAGD_IMAGE}
-    container_name: flagd
     deploy:
       resources:
         limits:
@@ -687,7 +669,6 @@ services:
   # Flagd UI for configuring the feature flag service
   flagd-ui:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-flagd-ui
-    container_name: flagd-ui
     build:
       context: ./
       dockerfile: ${FLAGD_UI_DOCKERFILE}
@@ -719,7 +700,6 @@ services:
   # Kafka used by Checkout, Accounting, and Fraud Detection services
   kafka:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-kafka
-    container_name: kafka
     build:
       context: ./
       dockerfile: ${KAFKA_DOCKERFILE}
@@ -754,7 +734,6 @@ services:
   # LLM used by Product Review service
   llm:
     image: ${IMAGE_NAME}:${DEMO_VERSION}-llm
-    container_name: llm
     build:
       context: ./
       dockerfile: ${LLM_DOCKERFILE}
@@ -778,7 +757,6 @@ services:
   # Postgresql used by Accounting service
   postgresql:
     image: ${POSTGRES_IMAGE}
-    container_name: postgresql
     deploy:
       resources:
         limits:
@@ -797,7 +775,6 @@ services:
   # Valkey used by Cart service
   valkey-cart:
     image: ${VALKEY_IMAGE}
-    container_name: valkey-cart
     user: valkey
     deploy:
       resources:
@@ -815,7 +792,6 @@ services:
   # Jaeger
   jaeger:
     image: ${JAEGERTRACING_IMAGE}
-    container_name: jaeger
     command:
       - "--config=file:/etc/jaeger/config.yml"
     deploy:
@@ -844,7 +820,6 @@ services:
   # Grafana
   grafana:
     image: ${GRAFANA_IMAGE}
-    container_name: grafana
     deploy:
       resources:
         limits:
@@ -862,7 +837,6 @@ services:
   # OpenTelemetry Collector
   otel-collector:
     image: ${COLLECTOR_CONTRIB_IMAGE}
-    container_name: otel-collector
     deploy:
       resources:
         limits:
@@ -900,11 +874,10 @@ services:
   # Prometheus
   prometheus:
     image: ${PROMETHEUS_IMAGE}
-    container_name: prometheus
     command:
       - --web.console.templates=/etc/prometheus/consoles
       - --web.console.libraries=/etc/prometheus/console_libraries
-      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.time=7d
       - --config.file=/etc/prometheus/prometheus-config.yaml
       - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle
@@ -913,20 +886,19 @@ services:
       - --web.enable-otlp-receiver
       - --enable-feature=exemplar-storage
     volumes:
-      - ${PROMETHEUS_CONFIG_PATH:-./src/prometheus/prometheus-config.yaml}:/etc/prometheus/prometheus-config.yaml
-      - ${PROMETHEUS_MOUNT_DIR}:/prometheus
+      - ./src/prometheus/prometheus-config.yaml:/etc/prometheus/prometheus-config.yaml
+      - ./data/prometheus:/prometheus
     deploy:
       resources:
         limits:
           memory: 200M
     restart: unless-stopped
     ports:
-      - "${PROMETHEUS_PORT}:${PROMETHEUS_PORT}"
+      - "${PROMETHEUS_HOST_PORT:-${PROMETHEUS_PORT}}:${PROMETHEUS_PORT}"
     logging: *logging
 
   # OpenSearch
   opensearch:
-    container_name: opensearch
     build:
       context: ./
       dockerfile: ${OPENSEARCH_DOCKERFILE}
@@ -948,7 +920,8 @@ services:
       # names (verified: an 873-name/33kb query returns 200). Only the URL grows
       # with the window -- ignore_unavailable means shard count tracks the real
       # index count, not the name count. Keep in sync with
-      # OPENSEARCH_MAX_LINE_BYTES in set_max_span_age.sh.
+      # OPENSEARCH_MAX_LINE_BYTES in set_max_span_age.sh and in the inlined
+      # set_max_span_age() in harbor-template/environment/entrypoint.sh.
       - http.max_initial_line_length=64kb
       - DISABLE_INSTALL_DEMO_CONFIG=true
       - DISABLE_SECURITY_PLUGIN=true
@@ -964,14 +937,17 @@ services:
         soft: 65536
         hard: 65536
     ports:
-      - "9200:9200"
+      - "${OPENSEARCH_HOST_PORT:-9200}:9200"
     volumes:
-      - ${OPENSEARCH_DATA_MOUNT_DIR}:/usr/share/opensearch/data
-      - ${OPENSEARCH_SNAPSHOTS_MOUNT_DIR}:/usr/share/opensearch/snapshots
+      - ./data/opensearch-data:/usr/share/opensearch/data
+      # Bind the snapshot repo directly from the host-side cache (read-only,
+      # shared across trials) instead of deep-copying ~41 GB into every
+      # per-trial dir. OpenSearch only reads this path during restore.
+      - ${SNAPSHOT_CACHE_HOST_DIR}/data/opensearch-repo-snapshots:/usr/share/opensearch/snapshots:ro
     healthcheck:
       test: curl -s http://localhost:9200/_cluster/health | grep -E '"status":"(green|yellow)"'
-      start_period: 10s
-      interval: 5s
+      start_period: 30s
+      interval: 10s
       timeout: 10s
-      retries: 10
+      retries: 20
     logging: *logging

@@ -389,7 +389,7 @@ async def process_spec(spec_path: Path, ctx: _Ctx) -> None:
     # Single LLM call per task (semaphore-bounded).
     async with ctx.semaphore:
         try:
-            raw, reasoning_summary_raw = await async_call_llm_judge(
+            raw, reasoning_summary_raw, _usage = await async_call_llm_judge(
                 ctx.client,
                 prompt,
                 model=ctx.model,

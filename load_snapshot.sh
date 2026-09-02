@@ -28,8 +28,9 @@ set -euo pipefail
 #   4. Starts services with snapshot-mode configs (read-only Prometheus, OTel Collector, Jaeger)
 #   5. Restores the named OpenSearch snapshot (Jaeger traces + OTel logs).
 #      Set RESTORE_NAMED_SNAPSHOT=false to skip this — useful when you intend to
-#      restore a different snapshot manually into the empty cluster afterwards,
-#      and want to avoid the overlap-on-existing-index error from a double restore.
+#      restore a different snapshot manually (e.g. post_consolidation_<date> or
+#      ${SNAPSHOT_NAME}-consolidated) into the empty cluster afterwards, and want
+#      to avoid the overlap-on-existing-index error from a double restore.
 #
 # Note: Jaeger traces are stored in OpenSearch, so they are captured
 # automatically by the OpenSearch snapshot — no separate Jaeger data needed.
@@ -102,7 +103,11 @@ echo ""
 echo "[load_snapshot] Starting OpenTelemetry Demo services..."
 export OPENSEARCH_READ_ONLY=true
 export OTEL_COLLECTOR_CONFIG="$(pwd)/otelcol-config-snapshot.yml"
-export JAEGER_CONFIG="$(pwd)/jaeger-config-snapshot.yml"
+# Size Jaeger's max_span_age to the snapshot data date. Written into the
+# (gitignored) working dir so the checked-in config stays clean.
+./set_max_span_age.sh "$(pwd)/jaeger-config-snapshot.yml" \
+                      "$(pwd)/$DATA_LINK/jaeger-config-snapshot.yml"
+export JAEGER_CONFIG="$(pwd)/$DATA_LINK/jaeger-config-snapshot.yml"
 docker compose -f opentelemetry-demo/docker-compose.yml -f docker-compose.snapshot.yml up --force-recreate --remove-orphans --detach
 
 # ── 5. Wait for services to initialise ──────────────────────────────────────
@@ -111,7 +116,8 @@ sleep 30
 
 # ── 6. Restore OpenSearch snapshot (includes Jaeger traces + OTel logs) ────
 # Always register the snapshot repository so subsequent manual restores
-# can find it even when we skip the named snapshot restore below.
+# (e.g. post_consolidation_<date>) can find it even when we skip the named
+# snapshot restore below.
 echo "[load_snapshot] Registering OpenSearch snapshot repository..."
 curl -s -X PUT 'http://localhost:9200/_snapshot/scheduled_backups' \
     -H 'Content-Type: application/json' \
@@ -132,7 +138,7 @@ if [ "${RESTORE_NAMED_SNAPSHOT:-true}" = "true" ]; then
 else
     echo "[load_snapshot] RESTORE_NAMED_SNAPSHOT=false — skipping named snapshot restore."
     echo "[load_snapshot] Cluster left empty; restore your chosen snapshot manually, e.g.:"
-    echo "[load_snapshot]   curl -X POST 'http://localhost:9200/_snapshot/scheduled_backups/<snapshot_name>/_restore?wait_for_completion=true' \\"
+    echo "[load_snapshot]   curl -X POST 'http://localhost:9200/_snapshot/scheduled_backups/post_consolidation_<date>/_restore?wait_for_completion=true' \\"
     echo "[load_snapshot]     -H 'Content-Type: application/json' -d '{\"indices\": \"*\", \"include_global_state\": false}'"
 fi
 
