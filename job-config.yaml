@@ -7,7 +7,7 @@
 #     https://api.openai.com/v1 (default) -> gpt-5.4
 #     https://inference.do-ai.run/v1      -> openai-gpt-5.4
 #     https://openrouter.ai/api/v1        -> openai/gpt-5.4
-#   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
+#   SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2 \
 #       ./run_harbor_cached.sh -c job-config.yaml --upload --public
 #
 # REQUIRED for a submission:

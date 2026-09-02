@@ -130,7 +130,7 @@ See [`leaderboard/SUBMIT.md`](./leaderboard/SUBMIT.md) for the full walkthrough;
    the hub:
 
 ```bash
-SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template \
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2 \
     ./run_harbor_cached.sh -c job-config.yaml \
       -a <agent> -m <provider/model> \
       --upload --public
