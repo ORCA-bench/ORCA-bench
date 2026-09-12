@@ -537,22 +537,10 @@ async def main() -> None:
         sys.exit(1)
     rows.sort(key=lambda r: r["id"])
 
-    # Ground truth is fetched for every task up front: it is deduplicated and
-    # cached by harbor, and a missing rubric should fail before any judging
-    # spend rather than silently scoring a trial against nothing.
-    task_names = [r["task_name"] for r in rows]
     if args.jobs_dir is not None:
         # A trial dir carries no rubric, so the task packages still come from
         # the registry even when the reports are local.
         await hub_source.check_hub_auth()
-    await hub_source.check_task_access(hub_source.oracle_package(task_names[0]))
-    truth = await hub_source.load_ground_truth(task_names)
-    missing = sorted({n for n in task_names if not truth.get(n, {}).get("expected")})
-    if missing:
-        logger.error(
-            f"{len(missing)} task(s) resolved no ground truth, e.g. {missing[:3]}"
-        )
-        sys.exit(1)
 
     # Batching
     if args.batch_size is not None:
@@ -575,6 +563,23 @@ async def main() -> None:
         logger.info(
             f"Running batch {args.batch_number}/{n_batches} ({len(batches[0])} trials)"
         )
+
+    # Ground truth is fetched up front, but only for the tasks this run will
+    # actually judge -- resolving it before batching meant `--batch-size 1`
+    # downloaded every task package in the tree to score one trial. Fetching
+    # ahead of the batches still buys the thing it was for: a missing rubric
+    # fails before any judging spend rather than silently scoring a trial
+    # against nothing. With no batching flags this is every row, as before.
+    selected = [row for batch in batches for row in batch]
+    task_names = [r["task_name"] for r in selected]
+    await hub_source.check_task_access(hub_source.oracle_package(task_names[0]))
+    truth = await hub_source.load_ground_truth(task_names)
+    missing = sorted({n for n in task_names if not truth.get(n, {}).get("expected")})
+    if missing:
+        logger.error(
+            f"{len(missing)} task(s) resolved no ground truth, e.g. {missing[:3]}"
+        )
+        sys.exit(1)
 
     # Init async OpenAI client
     client = AsyncOpenAI(
