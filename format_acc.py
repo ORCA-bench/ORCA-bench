@@ -69,18 +69,16 @@ if True:
     output_dir = args.output_dir
     jobs_dir = args.jobs_dir
     effort = args.effort
-    filter_xlsx = args.filter_xlsx
 else:
     output_dir = Path("out-0423-2")
     jobs_dir = Path("jobs")
     effort = "high"
-    filter_xlsx = None
 
 # %%
 # Scores come from each trial's verifier/reward-details.json; output_dir is
 # only the write location for the CSVs below. ``_report_path`` is set by
-# load_trials, so no all-predictions.json join is needed.
-df = load_data(jobs_dir, effort, filter_xlsx)
+# load_trials, so no separate join is needed to reach the agent's report.
+df = load_data(jobs_dir, effort)
 
 # %%
 df.columns

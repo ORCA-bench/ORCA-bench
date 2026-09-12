@@ -9,17 +9,45 @@ Reads:
   * ``output_dir/json/<event_id>.json``       (per-event rubrics)
 
 Writes the full Harbor task tree under ``output_dir/harbor/tasks/<task_id>/``
-(instruction.md, task.toml, environment/, tests/, solution/),
-plus the top-level ``tasks.csv``, ``task_snapshot_map.json``,
-``used_snapshots.json``, and ``dataset.toml`` under ``output_dir/harbor/``.
+(instruction.md, task.toml, environment/, tests/, solution/), plus the
+top-level ``tasks.csv``, ``task_snapshot_map.json`` and ``used_snapshots.json``
+under ``output_dir/harbor/``.
+
+No dataset manifest is written by default -- tasks are first-class registry
+packages, so ``harbor publish <task dirs>`` works standalone. ``--split``
+additionally partitions the build at the incident level and writes four
+dataset manifests (names derived from ``--org``, so the full build and the
+public split can never claim the same name)::
+
+    harbor/split.json                              # auditable record
+    harbor/datasets/public/            <org>/<org>
+    harbor/datasets/private-internal/  <org>/<org>-private-internal
+    harbor/datasets/private/           <org>/<org>-private
+    harbor/datasets/verified/          <org>/<org>-verified   # --verified-json only
+
+``--split`` also renders an answer-free duplicate of every private-split task
+at ``harbor/tasks/<task_id>-hidden/``, published as ``<hash>-hidden``. The
+duplicate drops ``tests/expected.json``, ``tests/rubrics/``,
+``tests/check_prediction.py`` and ``solution/``, and keeps only ``category``,
+``tags``, ``user_facing_issue``, ``current``, ``reported_styled`` and
+``difficulty`` in ``task.toml`` ``[metadata]``. Those are the answer-bearing
+files: a submitter who runs the oracle private tasks holds the root cause for
+every one of them, so the held-out split ships as the hidden variant and is
+scored out-of-band instead.
+
+The hidden tasks build and run exactly like their oracle twins -- same
+instruction, same telemetry -- but they are not scored in-container. Harbor
+requires every task to have a test script and to leave a reward file, so
+``tests/test.sh`` is replaced by one that preserves ``report.md`` and writes an
+empty rewards map (``{}``). The trial then finishes clean with no metrics,
+rather than recording a 0 that every mean would average in. See
+``HIDDEN_TEST_SH``.
 
 Each ``task.toml`` gets a ``[task]`` section whose package name is a hash of the
 task id (``<org>/<hash>``), so ``harbor add`` accepts the tasks directly with no
 separate ``harbor task update`` pass, and the hub identity does not leak the
 feature flag. ``tasks.csv`` maps the real ``task_id`` to its hashed
-``package_name``. ``dataset.toml`` is a ready-to-publish manifest (mirrors
-``harbor dataset init`` + ``harbor add --scan``), so only ``harbor add`` +
-``harbor publish`` remain.
+``package_name``.
 
 ``tests/expected.json`` schema:
 
@@ -46,16 +74,24 @@ Examples::
     uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
       --templates-dir harbor-template-telemetry-only --force
 
+    # Build and split into public / private / verified dataset manifests
+    uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
+      --templates-dir harbor-template --force --split \
+      --verified-json human-eval-sample/output/sampled_tasks.json \
+      --dataset-author "Albert Gong <ag2435@cornell.edu>"
+
 """
 
 import csv
 import hashlib
 import json
 import logging
+import random
 import re
 import shutil
 import textwrap
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -483,6 +519,9 @@ class _BuildOutputs:
     task_snapshot_map: dict[str, str | None]
     csv_rows: list[dict[str, Any]]
     dataset_refs: list[DatasetTaskRef]
+    # Everything --split needs, collected during the build so the split
+    # never has to re-read and re-join tasks/, tasks.csv and a manifest.
+    split_tasks: list["Task"]
 
 
 def _build_all(
@@ -504,6 +543,7 @@ def _build_all(
         task_snapshot_map={},
         csv_rows=[],
         dataset_refs=[],
+        split_tasks=[],
     )
     spec_paths = sorted(specs_dir.glob("*.json"))
     if not spec_paths:
@@ -557,14 +597,619 @@ def _build_all(
 
         # Pin the task by name + content digest (same digest harbor add computes).
         content_hash, _ = Packager.compute_content_hash(task_dir)
+        package_name = task_name_hash(spec.task_id)
+        digest = f"sha256:{content_hash}"
         out.dataset_refs.append(
-            DatasetTaskRef(
-                name=f"{org}/{task_name_hash(spec.task_id)}",
-                digest=f"sha256:{content_hash}",
+            DatasetTaskRef(name=f"{org}/{package_name}", digest=digest)
+        )
+        out.split_tasks.append(
+            Task(
+                task_id=spec.task_id,
+                qid=spec.qid,
+                granularity=spec.granularity,
+                package_name=package_name,
+                digest=digest,
             )
         )
 
     return out
+
+
+# ───────────────────────────── Dataset splitting ─────────────────────────────
+# Only reached under --split. The partition is incident-level: ~10 tasks share
+# each qid (same root cause, same telemetry snapshot, different reported-time
+# phrasing), so splitting by task would put the same incident on both sides and
+# the held-out set would not actually be held out.
+
+# Difficulty strata, in ascending-difficulty order. `medium` tasks exist in
+# tasks.csv specs but were never rendered into the task tree, so they never reach
+# this script.
+GRANULARITIES = ("easy", "hard", "universal")
+
+# Public-facing tier names. The internal `granularity` values predate the
+# published naming: what the pipeline calls `hard` ships as `medium`, and
+# `universal` ships as `hard`. Applies to dataset descriptions and READMEs only —
+# split.json and the log table keep the internal values so they stay joinable
+# against tasks.csv.
+GRANULARITY_DISPLAY = {"easy": "easy", "hard": "medium", "universal": "hard"}
+
+DEFAULT_AUTHORS = ("Albert Gong <ag2435@cornell.edu>",)
+
+README_TEMPLATE = """\
+# {name}
+
+An agent benchmark for root cause analysis — {blurb}
+
+## Quick Start
+
+> [!NOTE]
+> These instructions use GradientAI serverless inference from DigitalOcean, for both the agent
+> LLM (`gradient_ai/...`) and the LLM judge in the task verifier. To run against another
+> provider, swap the `-m` model name and export that provider's credentials instead.
+
+> [!IMPORTANT]
+> Harbor needs a one-time patch before the first run, and GradientAI needs a LiteLLM patch for
+> `reasoning_effort` passthrough — see
+> [Additional setup instructions for Harbor](https://github.com/ORCA-bench/ORCA-bench#additional-setup-instructions-for-harbor).
+
+```bash
+# Point the agent LLM and the verifier's judge at GradientAI serverless inference.
+# Model access key: https://cloud.digitalocean.com/gen-ai/model-access-keys
+export GRADIENT_AI_API_KEY=$MODEL_ACCESS_KEY
+export OPENAI_API_KEY=$MODEL_ACCESS_KEY
+export OPENAI_BASE_URL=https://inference.do-ai.run/v1
+
+# Stage the snapshot's /app/ to a host-side cache keyed by image id.
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template
+docker pull "$SNAPSHOT_IMAGE"
+CACHE_DIR="$HOME/.cache/sre-snapshot-cache/$(docker image inspect "$SNAPSHOT_IMAGE" -f '{{{{.Id}}}}' | cut -d: -f2 | cut -c1-12)"
+[ -z "$(ls -A "$CACHE_DIR" 2>/dev/null)" ] && {{ mkdir -p "$CACHE_DIR"; CID=$(docker create "$SNAPSHOT_IMAGE"); docker cp "$CID:/app/." "$CACHE_DIR/"; docker rm "$CID"; }}
+
+# Run the Harbor trials with the cache (read-only) bind-mounted
+SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" harbor run \\
+    --mounts-json "[{{\\"type\\":\\"bind\\",\\"source\\":\\"$CACHE_DIR\\",\\"target\\":\\"$CACHE_DIR\\",\\"read_only\\":true}}]" \\
+    -d {name} \\
+    -a terminus-2 \\
+    -m gradient_ai/openai-gpt-5.5 \\
+    --ak temperature=1 \\
+    --ak reasoning_effort=medium \\
+    --ak 'llm_kwargs={{"max_tokens": 16384}}'
+```
+
+Pass `-a` / `-m` explicitly — without them `harbor run` falls back to the built-in oracle agent.
+`--ak` values are parsed as JSON, so nested settings like `llm_kwargs` can be given inline (mind
+the single quotes). To sweep several models in one job, list them under `agents:` in a YAML job
+config and use `-c` instead.
+
+The bind mount uses `target` = `source` so the path is identical inside and outside the container,
+letting the task entrypoint `cp -al` from the cache without translating paths.
+`SNAPSHOT_CACHE_HOST_DIR` must be set — the entrypoint fails fast without it.
+
+## License
+
+Shield: [![CC BY 4.0][cc-by-shield]][cc-by]
+
+This work is licensed under a
+[Creative Commons Attribution 4.0 International License][cc-by].
+
+[![CC BY 4.0][cc-by-image]][cc-by]
+
+[cc-by]: http://creativecommons.org/licenses/by/4.0/
+[cc-by-image]: https://i.creativecommons.org/l/by/4.0/88x31.png
+[cc-by-shield]: https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg
+"""
+
+
+@dataclass
+class Task:
+    """One built Harbor task, joined from the task tree and ``tasks.csv``."""
+
+    task_id: str
+    qid: str
+    granularity: str
+    package_name: str
+    digest: str
+
+
+@dataclass
+class Side:
+    """One side of the split (public or private)."""
+
+    tasks: list[Task] = field(default_factory=list)
+
+    @property
+    def qids(self) -> set[str]:
+        return {t.qid for t in self.tasks}
+
+    def by_granularity(self, granularity: str) -> list[Task]:
+        return [t for t in self.tasks if t.granularity == granularity]
+
+
+def load_pinned_qids(verified_json: Path, tasks: list[Task]) -> set[str]:
+    """Resolve the verified-subset task ids to the incidents backing them.
+
+    ``sampled_tasks.json`` includes ``medium`` entries that were never built;
+    those are dropped rather than treated as missing.
+    """
+    if not verified_json.exists():
+        logger.warning(f"{verified_json} not found — no incidents will be pinned")
+        return set()
+
+    sampled = json.loads(verified_json.read_text())
+    wanted = {k for k, v in sampled.items() if v.get("difficulty") != "medium"}
+    dropped = len(sampled) - len(wanted)
+    if dropped:
+        logger.info(f"Dropped {dropped} `medium` entry(ies) from {verified_json}")
+
+    qid_by_task = {t.task_id: t.qid for t in tasks}
+    missing = sorted(wanted - qid_by_task.keys())
+    if missing:
+        raise KeyError(
+            f"{len(missing)} verified task(s) have no built task directory: "
+            f"{missing[:3]}{'...' if len(missing) > 3 else ''}"
+        )
+
+    pinned = {qid_by_task[t] for t in wanted}
+    logger.info(f"Pinned {len(pinned)} incident(s) from {len(wanted)} verified task(s)")
+    return pinned
+
+
+# ───────────────────────────── Splitting ─────────────────────────────
+def split_by_incident(
+    tasks: list[Task], pinned_qids: set[str], frac: float, seed: int
+) -> tuple[Side, Side]:
+    """Partition tasks into (public, private) at the incident level.
+
+    Stratified by granularity. Within a stratum, pinned incidents go public
+    first, then shuffled incidents are added while each one moves the running
+    task count closer to ``frac`` of the stratum total.
+    """
+    strata: dict[str, dict[str, list[Task]]] = defaultdict(lambda: defaultdict(list))
+    for task in tasks:
+        strata[task.granularity][task.qid].append(task)
+
+    public, private = Side(), Side()
+    rng = random.Random(seed)
+
+    for granularity in GRANULARITIES:
+        incidents = strata[granularity]
+        total = sum(len(v) for v in incidents.values())
+        target = frac * total
+
+        # Sort before shuffling so the RNG draw doesn't depend on dict order.
+        pinned = sorted(q for q in incidents if q in pinned_qids)
+        rest = sorted(q for q in incidents if q not in pinned_qids)
+        rng.shuffle(rest)
+
+        selected = list(pinned)
+        count = sum(len(incidents[q]) for q in selected)
+        if count > target:
+            logger.warning(
+                f"{granularity}: pinned incidents already hold {count} task(s), "
+                f"over the {target:.0f}-task target"
+            )
+        for qid in rest:
+            if abs(count + len(incidents[qid]) - target) < abs(count - target):
+                selected.append(qid)
+                count += len(incidents[qid])
+
+        chosen = set(selected)
+        for qid, group in incidents.items():
+            (public if qid in chosen else private).tasks.extend(group)
+
+    return public, private
+
+
+def check_split(
+    public: Side, private: Side, tasks: list[Task], pinned_qids: set[str]
+) -> None:
+    """Fail loudly if the partition is not a clean, incident-disjoint cover."""
+    pub_ids = {t.task_id for t in public.tasks}
+    priv_ids = {t.task_id for t in private.tasks}
+
+    if overlap := pub_ids & priv_ids:
+        raise AssertionError(f"{len(overlap)} task(s) on both sides: {sorted(overlap)[:3]}")
+    if (pub_ids | priv_ids) != {t.task_id for t in tasks}:
+        raise AssertionError("split does not cover every built task")
+    if shared := public.qids & private.qids:
+        raise AssertionError(
+            f"{len(shared)} incident(s) span both sides: {sorted(shared)[:3]}"
+        )
+    if leaked := pinned_qids - public.qids:
+        raise AssertionError(f"pinned incident(s) not in public set: {sorted(leaked)}")
+
+    logger.info("Split checks passed: disjoint, complete, incident-clean, pins honored")
+
+
+def log_counts(public: Side, private: Side) -> list[dict[str, object]]:
+    """Log the per-stratum counts table and return it for split.json."""
+    table: list[dict[str, object]] = []
+    header = (
+        f"{'granularity':<12}{'pub_inc':>8}{'pub_tasks':>11}{'pub_pct':>9}"
+        f"{'priv_inc':>10}{'priv_tasks':>12}"
+    )
+    logger.info(header)
+    for granularity in GRANULARITIES:
+        pub = public.by_granularity(granularity)
+        priv = private.by_granularity(granularity)
+        total = len(pub) + len(priv)
+        pct = len(pub) / total if total else 0.0
+        row = {
+            "granularity": granularity,
+            "public_incidents": len({t.qid for t in pub}),
+            "public_tasks": len(pub),
+            "public_frac": round(pct, 4),
+            "private_incidents": len({t.qid for t in priv}),
+            "private_tasks": len(priv),
+            "total_tasks": total,
+        }
+        table.append(row)
+        logger.info(
+            f"{granularity:<12}{row['public_incidents']:>8}{row['public_tasks']:>11}"
+            f"{pct:>8.1%}{row['private_incidents']:>10}{row['private_tasks']:>12}"
+        )
+
+    total_tasks = len(public.tasks) + len(private.tasks)
+    logger.info(
+        f"{'TOTAL':<12}{len(public.qids):>8}{len(public.tasks):>11}"
+        f"{len(public.tasks) / total_tasks:>8.1%}"
+        f"{len(private.qids):>10}{len(private.tasks):>12}"
+    )
+    return table
+
+
+def write_dataset_dir(
+    dataset_dir: Path,
+    name: str,
+    description: str,
+    blurb: str,
+    authors: list[Author],
+    side: Side,
+    *,
+    org: str,
+) -> None:
+    """Write a publishable dataset directory (dataset.toml + README.md)."""
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = DatasetManifest(
+        dataset=DatasetInfo(name=name, description=description, authors=authors),
+        tasks=[
+            DatasetTaskRef(name=f"{org}/{t.package_name}", digest=t.digest)
+            # Sort by package name so the manifest is stable across runs.
+            for t in sorted(side.tasks, key=lambda t: t.package_name)
+        ],
+    )
+    manifest._header = (
+        f"# Dataset manifest for {name}\n"
+        "# Add tasks using: harbor add <org>/<name>\n"
+        "# Publish using: harbor publish\n\n"
+    )
+    (dataset_dir / "dataset.toml").write_text(manifest.to_toml())
+    (dataset_dir / "README.md").write_text(
+        README_TEMPLATE.format(name=name, blurb=blurb)
+    )
+    logger.info(f"Wrote {len(manifest.tasks)} task ref(s) -> {dataset_dir}")
+
+
+def side_blurb(side: Side, label: str) -> str:
+    """One-line composition summary used in the description and README.
+
+    Uses the public-facing tier names from ``GRANULARITY_DISPLAY``.
+    """
+    counts = ", ".join(
+        f"{len(side.by_granularity(g))} {GRANULARITY_DISPLAY[g]}" for g in GRANULARITIES
+    )
+    return (
+        f"{label} split of {len(side.tasks)} tasks "
+        f"across {len(side.qids)} incidents ({counts})."
+    )
+
+
+def verified_side(verified_json: Path | None, public: Side) -> Side | None:
+    """The verified subset as a **view over the public side**, not a third split.
+
+    ``--verified-json`` pins these incidents public (see ``load_pinned_qids``),
+    so every verified task is also a public task. It is recorded under
+    ``views`` in split.json rather than ``splits`` precisely because it
+    overlaps: ``convert_job.build_routing`` assigns ``routing[task_id]`` while
+    looping over ``splits``, so an overlapping entry there would silently
+    reroute those trials to whichever dataset iterated last.
+
+    ``sampled_tasks.json`` includes ``medium`` entries that were never built;
+    those are dropped, matching ``load_pinned_qids``.
+    """
+    if verified_json is None:
+        return None
+    if not verified_json.exists():
+        logger.warning(f"{verified_json} not found -- writing no verified view")
+        return None
+
+    sampled = json.loads(verified_json.read_text())
+    wanted = sorted(k for k, v in sampled.items() if v.get("difficulty") != "medium")
+    by_id = {t.task_id: t for t in public.tasks}
+    missing = [t for t in wanted if t not in by_id]
+    if missing:
+        raise KeyError(
+            f"{len(missing)} verified task(s) are not on the public side: "
+            f"{missing[:3]}{'...' if len(missing) > 3 else ''}"
+        )
+    logger.info(f"Verified view: {len(wanted)} task(s) selected from the public side")
+    return Side(tasks=[by_id[t] for t in wanted])
+
+
+# Package-name suffix and content policy for the answer-free private variant.
+# The oracle task carries its own ground truth -- tests/expected.json names the
+# root causes and event times, tests/rubrics/<event>.json spells out the flag
+# and mechanism, and solution/ holds a copy of both plus the oracle solver. A
+# split is only held out if none of that ships, so all three go.
+#
+# instruction.md is safe to keep: its template substitutes only `current`,
+# `{reported}` (bound to spec.reported_styled in build_task, NOT to the ISO
+# `reported` metadata field) and `user_facing_issue` -- the feature flag
+# never reaches it.
+HIDDEN_SUFFIX = "-hidden"
+HIDDEN_STRIP = (
+    "tests/expected.json",
+    "tests/rubrics",
+    # The judge cannot run without expected.json, and shipping it with a
+    # dataset that is deliberately not scored in-container only hands the
+    # scoring implementation to whoever holds the tasks.
+    "tests/check_prediction.py",
+    "solution",
+)
+
+# tests/test.sh is replaced rather than stripped. Harbor requires both a test
+# script (verifier._resolve_tests raises FileNotFoundError without one) and a
+# reward file (verify() raises RewardFileNotFoundError, or RewardFileEmptyError
+# on a zero-byte one), so a task cannot simply decline to be scored. An empty
+# rewards map is the closest thing: VerifierResult(rewards={}) reports no
+# metrics, which leaderboard.core.hub.trial_metric reads as None and
+# metrics.submission_by_task then EXCLUDES, instead of the hard 0 that a
+# crashing verifier would record and that every mean would then average in.
+#
+# The map must stay empty, not carry a placeholder: trial_metric raises
+# MissingRewardMetricError when a trial reports metrics but not the one asked
+# for, and the Hub derives a row's own reward scalar from the alphabetically
+# first numeric entry (harbor.hub.models._first_numeric_reward), which has
+# already mis-scored this leaderboard once.
+HIDDEN_TEST_SH = """\
+#!/bin/bash
+# Verifier for the answer-free (-hidden) variant of an ORCA-bench task.
+#
+# This task ships without tests/expected.json and tests/rubrics/, so there is
+# nothing to score against here; scoring happens out-of-band against a
+# maintainer-side registry. Emit an empty rewards map so the trial finishes
+# clean and unscored rather than erroring or recording a 0.
+set -euo pipefail
+
+mkdir -p /logs/verifier
+
+# The agent's report is the only output the out-of-band judge needs.
+if [[ -f /app/report.md ]]; then
+  cp /app/report.md /logs/verifier/report.md 2>/dev/null || true
+fi
+
+printf '{}' > /logs/verifier/reward.json
+"""
+# task.toml [metadata] is rebuilt from this allowlist, dropping qid,
+# incident_time, events, flag, description, granularity and the rest.
+#
+# `reported_styled` -- not `reported` -- is the timing field kept here. Both
+# say when the issue was reported, but `reported` is the ISO instant
+# `incident_dt + offset_minutes` (task_spec.py), and offsets are only ever 10
+# or 60 minutes, so it narrows the incident time to two candidates. The
+# styled string is the exact text instruction.md already renders into the
+# agent's prompt, so keeping it adds nothing the agent cannot read.
+HIDDEN_METADATA_KEYS = (
+    "category",
+    "tags",
+    "user_facing_issue",
+    "current",
+    "reported_styled",
+    "difficulty",
+)
+
+
+def build_hidden_task(
+    src_dir: Path, dst_dir: Path, *, org: str, package_name: str
+) -> str:
+    """Copy ``src_dir`` to ``dst_dir`` with every answer stripped; return its digest.
+
+    The copy keeps instruction.md and environment/, so it builds and runs
+    exactly like the oracle task -- an agent sees the same prompt and the same
+    telemetry. Its verifier is replaced by one that emits no metrics, so the
+    trial finishes unscored instead of being scored in-container.
+    """
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    shutil.copytree(src_dir, dst_dir)
+
+    for rel in HIDDEN_STRIP:
+        target = dst_dir / rel
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+
+    test_sh = dst_dir / "tests" / "test.sh"
+    test_sh.parent.mkdir(parents=True, exist_ok=True)
+    test_sh.write_text(HIDDEN_TEST_SH)
+    test_sh.chmod(0o755)
+
+    toml_path = dst_dir / "task.toml"
+    config = TaskConfig.model_validate_toml(toml_path.read_text())
+    config.task = PackageInfo(name=f"{org}/{package_name}", description="")
+    config.metadata = {
+        k: v for k, v in config.metadata.items() if k in HIDDEN_METADATA_KEYS
+    }
+    config.schema_version = "1.3"
+    toml_path.write_text(config.model_dump_toml())
+
+    content_hash, _ = Packager.compute_content_hash(dst_dir)
+    return f"sha256:{content_hash}"
+
+
+def hidden_side(tasks_dir: Path, private: Side, *, org: str) -> Side:
+    """Build one answer-free duplicate per private-split task.
+
+    Same task_id and incident as its oracle twin -- only the package name
+    (``<hash>-hidden``) and the content differ -- so this is recorded as a view,
+    never as a split: ``convert_job.build_routing`` keys on task_id, and two
+    entries for one task_id under ``splits`` would silently reroute those trials
+    to whichever dataset iterated last.
+    """
+    side = Side()
+    for task in sorted(private.tasks, key=lambda t: t.task_id):
+        src = tasks_dir / task.task_id
+        if not src.is_dir():
+            raise FileNotFoundError(f"no built task dir for {task.task_id} at {src}")
+        package_name = f"{task.package_name}{HIDDEN_SUFFIX}"
+        digest = build_hidden_task(
+            src,
+            tasks_dir / f"{task.task_id}{HIDDEN_SUFFIX}",
+            org=org,
+            package_name=package_name,
+        )
+        side.tasks.append(
+            Task(
+                task_id=task.task_id,
+                qid=task.qid,
+                granularity=task.granularity,
+                package_name=package_name,
+                digest=digest,
+            )
+        )
+    logger.info(
+        f"Built {len(side.tasks)} answer-free task(s) -> "
+        f"{tasks_dir}/*{HIDDEN_SUFFIX}"
+    )
+    return side
+
+
+def _side_record(name: str, side: Side) -> dict[str, Any]:
+    """One split.json entry: dataset name, counts, incident ids, task rows."""
+    return {
+        "dataset_name": name,
+        "n_tasks": len(side.tasks),
+        "n_incidents": len(side.qids),
+        "incidents": sorted(side.qids),
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "qid": t.qid,
+                "granularity": t.granularity,
+                "package_name": t.package_name,
+            }
+            for t in sorted(side.tasks, key=lambda t: t.task_id)
+        ],
+    }
+
+
+def write_splits(
+    task_root: Path,
+    tasks: list[Task],
+    *,
+    org: str,
+    frac: float,
+    seed: int,
+    verified_json: Path | None,
+    authors: list[Author],
+) -> None:
+    """Partition ``tasks`` and write datasets/ + split.json under ``task_root``.
+
+    Dataset names derive from ``org`` rather than a flag: a hand-passed name let
+    the full build and the public split both claim ``orca-bench/orca-bench``,
+    where publishing the wrong manifest would overwrite the public dataset with
+    the private tasks included. Deriving them makes that unrepresentable, and
+    keeps the slug lowercase (the registry validates package selectors against
+    a lowercase-only pattern).
+    """
+    # Only the published strata are split. A build can legitimately contain
+    # other granularities -- `medium` tasks are rendered but deliberately never
+    # published -- and they belong to no dataset. Dropping them here (loudly)
+    # rather than in the caller keeps check_split's "covers every task"
+    # assertion meaningful over the tasks that ARE being split. This guard
+    # replaces the granularity validation that used to live in the standalone
+    # splitter's load_tasks.
+    skipped = [t for t in tasks if t.granularity not in GRANULARITIES]
+    tasks = [t for t in tasks if t.granularity in GRANULARITIES]
+    if skipped:
+        by_gran = Counter(t.granularity for t in skipped)
+        logger.warning(
+            f"Excluding {len(skipped)} task(s) from the split -- granularity not "
+            f"in {GRANULARITIES}: {dict(sorted(by_gran.items()))}"
+        )
+    if not tasks:
+        raise ValueError(f"no tasks left to split (granularities: {GRANULARITIES})")
+
+    pinned_qids = load_pinned_qids(verified_json, tasks) if verified_json else set()
+    public, private = split_by_incident(tasks, pinned_qids, frac, seed)
+    check_split(public, private, tasks, pinned_qids)
+    table = log_counts(public, private)
+    verified = verified_side(verified_json, public)
+    hidden = hidden_side(task_root / "tasks", private, org=org)
+
+    names = {
+        "public": f"{org}/{org}",
+        "private-internal": f"{org}/{org}-private-internal",
+        "private": f"{org}/{org}-private",
+        "verified": f"{org}/{org}-verified",
+    }
+    labels = {
+        "public": "public",
+        "private-internal": "held-out private (with answers)",
+        "private": "held-out private (answers removed)",
+        "verified": "verified",
+    }
+    sides = [("public", public), ("private-internal", private), ("private", hidden)]
+    if verified is not None:
+        sides.append(("verified", verified))
+
+    datasets_dir = task_root / "datasets"
+    for key, side in sides:
+        blurb = side_blurb(side, labels[key])
+        write_dataset_dir(
+            datasets_dir / key,
+            names[key],
+            f"An agent benchmark for root cause analysis - {blurb}",
+            blurb,
+            authors,
+            side,
+            org=org,
+        )
+
+    split_path = task_root / "split.json"
+    split_path.write_text(
+        json.dumps(
+            {
+                "harbor_dir": str(task_root),
+                "frac": frac,
+                "seed": seed,
+                "counts": table,
+                "excluded_task_ids": sorted(t.task_id for t in skipped),
+                # `splits` is the disjoint cover, and only that -- convert_job.py
+                # iterates it assuming each task_id appears once.
+                "splits": {
+                    key: _side_record(names[key], side)
+                    for key, side in (("public", public), ("private-internal", private))
+                },
+                # Views share task_ids with a split (verified is a subset of
+                # public; private-hidden is a repackaging of private-internal),
+                # so they must stay out of `splits`.
+                "views": {
+                    key: _side_record(names[name_key], side)
+                    for key, name_key, side in (
+                        ("verified", "verified", verified),
+                        ("private-hidden", "private", hidden),
+                    )
+                    if side is not None
+                },
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    logger.info(f"Wrote split record -> {split_path}")
 
 
 # ───────────────────────────── Main ─────────────────────────────
@@ -606,23 +1251,48 @@ def main() -> None:
         help="Org for the [task] package name (default: orca-bench).",
     )
     parser.add_argument(
-        "--dataset-name",
-        default="orca-bench/orca-bench",
-        help="Dataset manifest name in org/name format.",
+        "--split",
+        action="store_true",
+        help=(
+            "Partition the built tasks into public/private dataset manifests "
+            "under harbor/datasets/ and write harbor/split.json. Without this, "
+            "no dataset manifest is written and the tasks are published "
+            "standalone."
+        ),
     )
     parser.add_argument(
-        "--dataset-description",
-        default="",
-        help="Dataset description for dataset.toml.",
+        "--frac",
+        type=float,
+        default=0.70,
+        help="--split: target fraction of tasks on the public side (default: 0.70).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="--split: RNG seed for incident shuffling (default: 0).",
+    )
+    parser.add_argument(
+        "--verified-json",
+        type=Path,
+        default=None,
+        help=(
+            "--split: verified-subset tasks (JSON keyed by task id). Their "
+            "incidents are pinned to the public side and they are written as "
+            "the `verified` view."
+        ),
     )
     parser.add_argument(
         "--dataset-author",
         action="append",
         default=None,
-        help="Dataset author 'Name <email>' (repeatable).",
+        help="--split: dataset author 'Name <email>' (repeatable).",
     )
     args = parser.parse_args()
     setup_logging(args.log_level)
+
+    if args.split and not 0.0 < args.frac < 1.0:
+        parser.error(f"--frac must be in (0, 1), got {args.frac}")
 
     output_dir: Path = args.output_dir
     specs_dir = output_dir / "task_specs"
@@ -689,31 +1359,31 @@ def main() -> None:
             )
     logger.info(f"Wrote {len(out.csv_rows)} row(s) to {csv_path}")
 
-    # -- Write dataset.toml manifest (mirrors `harbor dataset init` + `harbor add --scan`) --
-    manifest = DatasetManifest(
-        dataset=DatasetInfo(
-            name=args.dataset_name,
-            description=args.dataset_description,
-            authors=_parse_authors(args.dataset_author),
-        ),
-        tasks=out.dataset_refs,
-    )
-    manifest._header = (
-        f"# Dataset manifest for {args.dataset_name}\n"
-        "# Add tasks using: harbor add <org>/<name>\n"
-        "# Publish using: harbor publish\n\n"
-    )
-    dataset_path = task_root / "dataset.toml"
-    dataset_path.write_text(manifest.to_toml())
-    logger.info(
-        f"Wrote dataset manifest ({len(out.dataset_refs)} tasks) -> {dataset_path}"
-    )
+    # -- Optionally split into dataset manifests --
+    # No manifest is written by default: tasks are first-class registry
+    # packages, so `harbor publish <task dirs>` works standalone and a dataset
+    # is only needed to group them.
+    if args.split:
+        write_splits(
+            task_root,
+            out.split_tasks,
+            org=args.org,
+            frac=args.frac,
+            seed=args.seed,
+            verified_json=args.verified_json,
+            authors=_parse_authors(args.dataset_author or list(DEFAULT_AUTHORS)),
+        )
 
     print(f"Wrote {len(out.task_dirs)} task(s) -> {tasks_dir}")
-    print(f"Wrote dataset manifest ({len(out.dataset_refs)} tasks) -> {dataset_path}")
     print("\nNext steps:")
-    print(f"  harbor publish {tasks_dir}       # publish the tasks")
-    print(f"  harbor publish {dataset_path}       # publish the dataset")
+    print(f"  harbor add {tasks_dir} --scan       # upload the task content")
+    if args.split:
+        for key in ("public", "private-internal", "private", "verified"):
+            path = task_root / "datasets" / key
+            if path.is_dir():
+                print(f"  harbor publish {path} --private")
+    else:
+        print(f"  harbor publish {tasks_dir}       # publish the tasks standalone")
 
 
 if __name__ == "__main__":

@@ -255,20 +255,18 @@ uv run python generate_answers.py -od OUTPUT_DIR -dd data-0418 -e high --concurr
 #   - tasks/<hash>/            one Harbor task per question; task.toml [task].name is a
 #                              hash of the task id so the published name doesn't leak the
 #                              feature flag, and all metadata is mirrored into [metadata].
-#   - dataset.toml             ready-to-publish manifest (no separate `harbor dataset init`
-#                              / `harbor add --scan` needed).
 #   - tasks.csv                maps the real task_id -> hashed package_name.
 #   - used_snapshots.json, task_snapshot_map.json
+# No dataset manifest is written by default -- tasks are first-class registry
+# packages and publish standalone. Pass --split to also write the dataset
+# manifests (see below).
 uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd data-0418 \
-  --templates-dir harbor-template --force \
-  --dataset-name orca-bench/orca-bench \
-  --dataset-description "An agent benchmark for root cause analysis" \
-  --dataset-author "Your Name <your@email.com>"
+  --templates-dir harbor-template --force
 
-# Upload the task content to the Harbor Hub, then publish the dataset manifest
-# (the script prints these two commands when it finishes):
+# Upload the task content to the Harbor Hub, then publish the tasks
+# (the script prints these commands when it finishes):
 uv run harbor add OUTPUT_DIR/harbor/tasks --scan
-uv run harbor publish OUTPUT_DIR/harbor/dataset.toml
+uv run harbor publish OUTPUT_DIR/harbor/tasks
 ```
 
 8. Build and push the Harbor Docker image with the snapshot
