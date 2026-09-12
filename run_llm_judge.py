@@ -1,20 +1,35 @@
 #!/usr/bin/env python3
-r"""Run LLM-as-a-judge evaluation on Harbor Hub trials.
+r"""Run LLM-as-a-judge evaluation on Harbor trials.
 
-Scores every trial of one or more Hub jobs, reading both halves of each judge
-input straight from the Hub (see ``harbor_utils.hub_source``): the agent's
-``report.md`` from the trial archive, and ``expected.json`` +
-``tests/rubrics/`` from the task package. Per-trial results are written under
-OUTPUT_DIR.
+Scores trials from either of two sources, selected by exactly one of ``--job``
+or ``--jobs-dir``:
+
+* ``--job <uuid>`` -- Hub jobs. Both halves of the judge input come from the Hub
+  (``harbor_utils.hub_source``): the agent's ``report.md`` from the trial
+  archive, and the ground truth from the task package.
+* ``--jobs-dir <path>`` -- a local Harbor jobs tree
+  (``harbor_utils.local_source``). Reports are read from
+  ``<job>/<trial>/verifier/report.md`` and trials are identified by their
+  directory name, the same key ``utils.load_trials`` and
+  ``backfill_verifier_outputs`` use.
+
+Only the reports differ between the modes. Ground truth always comes from the
+task package, resolved by the ``task.name`` each trial records -- a trial
+directory carries no rubric -- so both modes need Hub credentials.
+
+Per-trial results are written under OUTPUT_DIR.
 
 Usage::
 
-    # Score every trial of a job
+    # Score every trial of a Hub job
     uv run python run_llm_judge.py -od out-0224 --job <job-uuid>
 
-    # Score batch 2 of size 50, across two jobs
+    # Score batch 2 of size 50, across two Hub jobs
     uv run python run_llm_judge.py -od out-0224 \\
         --job <uuid-a> --job <uuid-b> --batch-size 50 --batch-number 2
+
+    # Score a local jobs tree
+    uv run python run_llm_judge.py -od out-0224 --jobs-dir path/to/jobs
 
 Trials of the answer-free ``-hidden`` split are scored against their oracle
 twin's ground truth, which is what makes this script the scoring path for
@@ -29,7 +44,7 @@ Requires HARBOR_API_KEY (or a ``harbor auth login`` session) with read access to
 the oracle tasks, plus OPENAI_API_KEY for the judge itself. Access is checked
 before any trial is downloaded.
 
-Trials already scored under OUTPUT_DIR/scores are skipped *before* their archive
+Trials already scored under OUTPUT_DIR/scores are skipped *before* their report
 is fetched, so a re-run costs neither API calls nor downloads. Pass --force to
 re-score.
 
@@ -44,6 +59,7 @@ import math
 import os
 import sys
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +79,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from harbor_utils import hub_source
+from harbor_utils import hub_source, local_source
 from utils import get_base_parser, setup_logging
 
 # Add the directory containing check_prediction.py to sys.path so we can
@@ -251,6 +267,7 @@ async def process_trial(
     work_dir: Path,
     force: bool,
     max_retries: int,
+    fetch_report: Callable[[str, Path], Awaitable[str]],
 ) -> tuple[str, dict[str, Any] | None]:
     """Score a single trial and write its result to a per-trial JSON file.
 
@@ -290,13 +307,14 @@ async def process_trial(
             "rubric_used": bool(rubric_data),
         }
 
-    # Bounded separately from the judge: a download is disk- and
-    # bandwidth-bound and pulls a whole trial archive for one markdown file.
+    # Bounded separately from the judge: in Hub mode a fetch is disk- and
+    # bandwidth-bound and pulls a whole trial archive for one markdown file. In
+    # jobs-dir mode it is a local read and the bound costs nothing.
     async with download_sem:
         try:
-            predictions = await hub_source.fetch_report(trial_id, work_dir)
+            predictions = await fetch_report(trial_id, work_dir)
         except Exception as exc:
-            logger.error(f"Trial {trial_id} ({task_name}) download failed: {exc}")
+            logger.error(f"Trial {trial_id} ({task_name}) report read failed: {exc}")
             payload = _error_payload("hub_fetch_error", exc)
             _atomic_write_json(out_path, payload)
             return trial_id, payload
@@ -374,6 +392,7 @@ async def process_batch(
     reasoning_effort: str | None,
     bs: int,
     max_retries: int,
+    fetch_report: Callable[[str, Path], Awaitable[str]],
 ) -> None:
     """Process all trials in a batch concurrently; write per-trial JSONs."""
     logger.info(f"=== Batch {batch_num}/{n_batches}: {len(batch)} trials ===")
@@ -394,6 +413,7 @@ async def process_batch(
             work_dir,
             force,
             max_retries,
+            fetch_report,
         )
         for row in batch
     ]
@@ -429,13 +449,20 @@ async def main() -> None:
     # Resolved here, not at import: load_dotenv() runs in __main__, after
     # this module is imported, and the default follows $OPENAI_BASE_URL.
     parser.set_defaults(model=default_model(), effort="high")
+    # The shared base parser defaults --jobs-dir to Path("jobs"), which would
+    # make local mode look requested on every run; blank it so passing the flag
+    # is what selects the mode.
+    parser.set_defaults(jobs_dir=None)
     parser.add_argument(
         "--job",
         "-j",
         action="append",
-        required=True,
+        default=None,
         metavar="UUID",
-        help="Harbor Hub job to score (link or bare UUID). Repeatable.",
+        help=(
+            "Harbor Hub job to score (link or bare UUID). Repeatable. "
+            "Mutually exclusive with --jobs-dir."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -485,17 +512,28 @@ async def main() -> None:
     args = parser.parse_args()
     setup_logging(args.log_level)
 
+    if bool(args.job) == bool(args.jobs_dir):
+        parser.error("pass exactly one of --job (Hub) or --jobs-dir (local tree)")
+
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Bare UUIDs or hub links; the trailing path segment is the id either way.
-    job_ids = [link.rstrip("/").split("/")[-1] for link in args.job]
+    # Only the listing and the report reader differ between the two modes;
+    # ground truth comes from the task packages either way.
+    if args.jobs_dir is not None:
+        rows = local_source.list_trials(args.jobs_dir)
+        fetch_report = local_source.report_reader(rows)
+        origin = str(args.jobs_dir)
+    else:
+        # Bare UUIDs or hub links; the trailing path segment is the id either way.
+        job_ids = [link.rstrip("/").split("/")[-1] for link in args.job]
+        await hub_source.check_hub_auth()
+        rows = await hub_source.list_job_trials(job_ids)
+        fetch_report = hub_source.fetch_report
+        origin = ", ".join(job_ids)
 
-    await hub_source.check_hub_auth()
-
-    rows = await hub_source.list_job_trials(job_ids)
     if not rows:
-        logger.error(f"No trials found for job(s) {', '.join(job_ids)}")
+        logger.error(f"No trials found for {origin}")
         sys.exit(1)
     rows.sort(key=lambda r: r["id"])
 
@@ -503,6 +541,10 @@ async def main() -> None:
     # cached by harbor, and a missing rubric should fail before any judging
     # spend rather than silently scoring a trial against nothing.
     task_names = [r["task_name"] for r in rows]
+    if args.jobs_dir is not None:
+        # A trial dir carries no rubric, so the task packages still come from
+        # the registry even when the reports are local.
+        await hub_source.check_hub_auth()
     await hub_source.check_task_access(hub_source.oracle_package(task_names[0]))
     truth = await hub_source.load_ground_truth(task_names)
     missing = sorted({n for n in task_names if not truth.get(n, {}).get("expected")})
@@ -571,6 +613,7 @@ async def main() -> None:
                 args.effort,
                 bs,
                 args.max_retries,
+                fetch_report,
             )
     logger.info("Done!")
 
