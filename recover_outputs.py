@@ -31,7 +31,7 @@ import sys
 import time
 from pathlib import Path
 
-from utils import get_base_parser, load_invalid_trial_ids, setup_logging
+from utils import get_base_parser, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -141,10 +141,6 @@ def main() -> None:
     out_dir = args.output_dir / "recovered_outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    invalid_ids: set[str] = (
-        load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
-    )
-
     t0 = time.time()
     n_trials = n_recovered = n_skipped = n_missing = 0
     n_outputs = 0
@@ -155,8 +151,6 @@ def main() -> None:
             if not trial_dir.is_dir():
                 continue
             trial_id = trial_dir.name
-            if trial_id in invalid_ids:
-                continue
             n_trials += 1
             agent_dir = trial_dir / "agent"
             out_path = out_dir / f"{trial_id}.json"

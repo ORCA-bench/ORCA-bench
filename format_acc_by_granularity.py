@@ -183,7 +183,7 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging(args.log_level)
 
-    df = load_data(args.jobs_dir, args.effort, args.filter_xlsx)
+    df = load_data(args.jobs_dir, args.effort)
 
     missing_mask = df["_granularity"].isna()
     if missing_mask.any():
