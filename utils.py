@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import sys
+import tomllib
 from argparse import ArgumentParser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -271,6 +272,16 @@ def load_agent_config(trial_dir: Path) -> dict:
         return {}
 
 
+def _parse_task_metadata(text: str) -> dict:
+    """Extract ``[metadata]`` from a task.toml.
+
+    ``build_harbor_tasks.py`` mirrors the task metadata into ``task.toml``'s
+    ``[metadata]`` table; it no longer writes the side-car ``task_meta.json``
+    this used to read.
+    """
+    return tomllib.loads(text).get("metadata", {})
+
+
 def load_task_metadata(trial_dirs: list[Path]) -> dict[str, dict]:
     """Fetch ``task.toml`` ``[metadata]`` from the registry for each trial.
 
@@ -286,7 +297,6 @@ def load_task_metadata(trial_dirs: list[Path]) -> dict[str, dict]:
 
     from harbor.models.task.id import PackageTaskId
     from harbor.tasks.client import TaskClient
-    from harbor_utils.export_predictions import _parse_task_metadata
 
     # trial name -> (org/name, ref); dedupe the task ids we actually fetch.
     per_trial: dict[str, tuple[str, str]] = {}
