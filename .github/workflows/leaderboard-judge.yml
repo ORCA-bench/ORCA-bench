@@ -135,23 +135,18 @@ jobs:
             ${{ steps.jobs.outputs.args }} \
             ${{ steps.jobs.outputs.limit }}
 
-      # Counts and aggregates only.
-      #
-      # scores/ is safe to publish: run_llm_judge saves the flat rollups, with
-      # every field that names the answer (flag, nested, judge_prompt,
-      # judge_response_raw, reasoning_summary, per_rubric) left out.
-      # judge_prompts/ is NOT -- it embeds the rubric verbatim -- so it must
-      # never be uploaded as an artifact, and no per-trial detail is quoted
-      # below. Artifacts are downloadable by anyone with read access to this
-      # repo, and the held-out split exists so those answers do not circulate.
       # One file per submission, mirroring leaderboard/submissions/<name>.json,
       # keyed by trial id. Committed to the bot branch so the maintainer reviews
       # the scores on the same PR and merging carries them to main.
       #
-      # Safe to publish only because run_llm_judge saves the flat rollups: no
-      # flag, nested, judge_prompt, judge_response_raw, reasoning_summary or
-      # per_rubric. Anything that reintroduces those to the payload also
-      # reintroduces them here.
+      # Safe to publish because the payload is exactly what the in-container
+      # verifier persists to reward.json -- run_llm_judge builds it with
+      # check_prediction.build_rewards, so it is the reward plus whichever of
+      # rca_accuracy / hallucinate_any is defined, and nothing else. Every field
+      # that names the answer is absent by construction: flag, nested,
+      # judge_prompt, judge_response_raw, reasoning_summary, per_rubric. The
+      # guard below re-checks for them anyway, so a change that puts one back in
+      # the payload fails here instead of publishing the held-out answers.
       #
       # A GITHUB_TOKEN push does not re-trigger workflows, which is the same
       # property the promote job relies on.
@@ -207,6 +202,15 @@ jobs:
           echo "dest=$dest" >> "$GITHUB_OUTPUT"
           echo "Committed $dest to $BOT_BRANCH"
 
+      # Counts and aggregates only -- no per-trial detail is quoted, since the
+      # comment is readable by anyone who can see the PR.
+      #
+      # judge_prompts/ is the one judge output that does embed the rubric
+      # verbatim, so it must never be uploaded as an artifact: artifacts are
+      # downloadable by anyone with read access to this repo, and the held-out
+      # split exists so those answers do not circulate. scores/ is safe -- see
+      # the save step above.
+      #
       # always(), so a failed run still reports what it managed to score
       # rather than leaving the PR with only a red check.
       - name: Summarize
