@@ -25,6 +25,7 @@ uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
 ```bash
 uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
   --templates-dir harbor-template --force --split \
+  --allowlist-csv tasks.csv \
   --verified-json sampled_tasks.json \
   --dataset-author "Albert Gong <ag2435@cornell.edu>"
 
@@ -36,6 +37,16 @@ uv run harbor publish out-0804/harbor/datasets/private-oracle --private
 uv run harbor publish out-0804/harbor/datasets/private --private
 uv run harbor publish out-0804/harbor/datasets/verified --private
 ```
+
+> [!IMPORTANT]
+> `--allowlist-csv` freezes the task set the split is drawn from. The spec
+> generator is not deterministic, so a rebuild can render incidents the
+> published split never saw; letting them into the shuffle would re-cut the
+> partition. The published split used the 2026-05-13 `tasks.csv` (1449 tasks,
+> a copy of `out-0513/harbor/tasks.csv`). That file is **not committed** — its
+> `flag` / `root_causes` columns are the answer key for the held-out private
+> tasks — so keep it out of git (`.gitignore` covers `/tasks.csv`) and pass it
+> locally. With it, the build reproduces `split.json` exactly.
 
 > [!IMPORTANT]
 > `orca-bench/orca-bench-private` is the split to hand to submitters. Its tasks

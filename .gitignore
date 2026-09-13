@@ -9,6 +9,10 @@
 # Harbor job output (jobs_dir in job-config.yaml; uploaded to the hub instead)
 /jobs/
 
+# Split allowlist for build_harbor_tasks.py --split. Holds the root causes for
+# the held-out private tasks, so it stays local (see PUBLISH.md).
+/tasks.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
