@@ -13,6 +13,15 @@ and the two verifier files follow with no LLM call. The scoring itself is
 imported from ``check_prediction`` rather than reimplemented, so this script
 cannot drift from the verifier.
 
+.. note::
+   This consumes the **legacy** score schema. ``run_llm_judge`` now saves the
+   flat ``aggregate_judge_response`` rollups instead of the raw judge output, so
+   that its score files can be published alongside a submission without carrying
+   the root cause -- ``nested`` is exactly one of the fields that named it. New
+   score files therefore raise "has no 'nested' judge output" here. This script
+   remains usable against score files written before that change, which is the
+   archived data it was written for.
+
 Trials are paired with score files by name: ``--scores-dir`` is searched
 recursively for ``judge-<model>-<effort>-<trial_dir_name>.json``. A trial with
 no score file is skipped (reported, not an error); a trial matching more than
