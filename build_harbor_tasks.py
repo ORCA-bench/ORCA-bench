@@ -25,11 +25,14 @@ public split can never claim the same name)::
     harbor/datasets/private/           <org>/<org>-private
     harbor/datasets/verified/          <org>/<org>-verified   # --verified-json only
 
-Only tasks listed in ``--allowlist-csv`` (default: ``tasks.csv`` next to this
-script, the frozen 2026-05-13 task set) enter the split; built tasks missing
-from it are recorded under ``excluded_task_ids`` and belong to no dataset. The
-spec generator is not deterministic across runs, so without the allowlist a
-rebuild would shuffle a different incident set and change the partition.
+Only tasks listed in ``--allowlist-csv`` (required with ``--split``) enter the
+split; built tasks missing from it are recorded under ``excluded_task_ids`` and
+belong to no dataset. The spec generator is not deterministic across runs, so
+without the allowlist a rebuild would shuffle a different incident set and
+change the partition. The published split was drawn from the frozen 2026-05-13
+``tasks.csv`` (1449 tasks). That file is deliberately **not** committed: its
+``flag`` / ``root_causes`` columns are the answer key for the held-out private
+tasks, so it is kept out of this public repo and supplied locally.
 
 ``--split`` also renders an answer-free duplicate of every private-split task
 at ``harbor/tasks/<task_id>-hidden/``, published as ``<hash>-hidden``. The
@@ -83,6 +86,7 @@ Examples::
     # Build and split into public / private / verified dataset manifests
     uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
       --templates-dir harbor-template --force --split \
+      --allowlist-csv tasks.csv \
       --verified-json human-eval-sample/output/sampled_tasks.json \
       --dataset-author "Albert Gong <ag2435@cornell.edu>"
 
@@ -1333,11 +1337,13 @@ def main() -> None:
     parser.add_argument(
         "--allowlist-csv",
         type=Path,
-        default=Path(__file__).resolve().parent / "tasks.csv",
+        default=None,
         help=(
-            "--split: tasks.csv whose task_id column lists the tasks eligible "
-            "for the split; built tasks not listed are excluded before the "
-            "incident shuffle (default: tasks.csv next to this script)."
+            "--split (required): tasks.csv whose task_id column lists the tasks "
+            "eligible for the split; built tasks not listed are excluded before "
+            "the incident shuffle. The published split used the frozen "
+            "2026-05-13 tasks.csv, which holds private-task answers and is "
+            "not committed."
         ),
     )
     parser.add_argument(
@@ -1361,6 +1367,8 @@ def main() -> None:
 
     if args.split and not 0.0 < args.frac < 1.0:
         parser.error(f"--frac must be in (0, 1), got {args.frac}")
+    if args.split and args.allowlist_csv is None:
+        parser.error("--split requires --allowlist-csv")
 
     output_dir: Path = args.output_dir
     specs_dir = output_dir / "task_specs"
