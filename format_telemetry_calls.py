@@ -37,7 +37,6 @@ from utils import (
     MODEL_ALIASES,
     format_group_label,
     get_base_parser,
-    load_invalid_trial_ids,
     setup_logging,
 )
 
@@ -232,7 +231,6 @@ class TelemetryAggregation:
 def aggregate_telemetry_classifications(
     classifications_dir: Path,
     trial_to_group: dict[str, str],
-    invalid_ids: set[str],
 ) -> TelemetryAggregation:
     """Walk ``classifications_dir`` and aggregate success/empty/error label counts per group.
 
@@ -246,8 +244,6 @@ def aggregate_telemetry_classifications(
         if not trial_dir.is_dir():
             continue
         trial_id = trial_dir.name
-        if trial_id in invalid_ids:
-            continue
         group = trial_to_group.get(trial_id)
         if group is None:
             agg.n_unmapped += 1
@@ -329,12 +325,8 @@ def main() -> None:
         sys.exit(1)
 
     trial_to_group = build_trial_to_group(args.jobs_dir)
-    invalid_ids: set[str] = (
-        load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
-    )
-
     agg = aggregate_telemetry_classifications(
-        classifications_dir, trial_to_group, invalid_ids
+        classifications_dir, trial_to_group
     )
     counts_by_group = agg.counts_by_group
     counts_by_group_type = agg.counts_by_group_type

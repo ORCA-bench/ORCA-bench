@@ -77,12 +77,6 @@ def get_base_parser() -> ArgumentParser:
         help="Set the logging level (default: INFO)",
     )
     parser.add_argument(
-        "--filter-xlsx",
-        type=Path,
-        default=None,
-        help="Excel file with is_valid_issue column to filter invalid trials.",
-    )
-    parser.add_argument(
         "--effort",
         "-e",
         type=str,
@@ -367,20 +361,9 @@ def fmt_mean_score_pct(scores: list[float]) -> str:
     return f"{np.mean(arr):.1f} ± {sem(arr):.1f}%"
 
 
-def load_invalid_trial_ids(xlsx_path: Path) -> set[str]:
-    """Load trial IDs marked as invalid from an Excel file.
-
-    Reads the ``all-predictions`` sheet and returns the set of ``trial_id``
-    values where ``is_valid_issue == "n"``.
-    """
-    df = pd.read_excel(xlsx_path, sheet_name="all-predictions")
-    return set(df.loc[df["is_valid_issue"] == "n", "trial_id"])
-
-
 def load_data(
     jobs_dir: Path,
     reasoning_effort: str | None = None,
-    filter_xlsx: Path | None = None,
 ) -> pd.DataFrame:
     """Load judge trials from a Harbor jobs directory.
 
@@ -406,9 +389,6 @@ def load_data(
         sys.exit(1)
 
     trials = load_trials(jobs_dir, reasoning_effort)
-    if filter_xlsx is not None:
-        invalid_ids = load_invalid_trial_ids(filter_xlsx)
-        trials = [t for t in trials if t["_trial_id"] not in invalid_ids]
     if not trials:
         logger.error(f"No scored trials found under {jobs_dir}.")
         sys.exit(1)
