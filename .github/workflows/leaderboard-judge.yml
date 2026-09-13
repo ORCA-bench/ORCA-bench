@@ -230,7 +230,7 @@ jobs:
           ERRORS = ("llm_judge_error", "hub_fetch_error")
 
           paths = sorted(Path("/tmp/judge/scores").glob("*.json"))
-          modes, depths, acc, hall = Counter(), [], [], []
+          modes, rewards, acc, hall = Counter(), [], [], []
           n_control = n_retried = 0
           for p in paths:
               d = json.loads(p.read_text())
@@ -245,9 +245,10 @@ jobs:
               if mode == CONTROL:
                   n_control += 1
                   continue
-              depths.append(d.get("rca_depth") or 0.0)
-              # run_llm_judge stores the aggregate_judge_response rollups flat on
-              # the payload, so there is nothing to re-derive here.
+              rewards.append(d.get("reward") or 0.0)
+              # The payload is what the verifier persists to reward.json: the
+              # reward, plus whichever rollups are defined. An undefined one is
+              # absent rather than null, so .get() covering both is the check.
               for key, sink in (("rca_accuracy", acc), ("hallucinate_any", hall)):
                   if d.get(key) is not None:
                       sink.append(bool(d[key]))
@@ -270,8 +271,8 @@ jobs:
           out.append("")
           out.append("| Metric | Value |\n| --- | --- |")
           out.append(
-              f"| Mean RCA depth (incident) | {sum(depths)/len(depths):.2f}/3 |"
-              if depths else "| Mean RCA depth (incident) | — |"
+              f"| Mean reward (incident) | {sum(rewards)/len(rewards):.3f} |"
+              if rewards else "| Mean reward (incident) | — |"
           )
           out.append(f"| RCA accuracy (incident) | {pct(acc)} |")
           out.append(f"| Hallucination rate (incident) | {pct(hall)} |")
