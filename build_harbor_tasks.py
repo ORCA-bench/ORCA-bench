@@ -25,6 +25,12 @@ public split can never claim the same name)::
     harbor/datasets/private/           <org>/<org>-private
     harbor/datasets/verified/          <org>/<org>-verified   # --verified-json only
 
+Only tasks listed in ``--allowlist-csv`` (default: ``tasks.csv`` next to this
+script, the frozen 2026-05-13 task set) enter the split; built tasks missing
+from it are recorded under ``excluded_task_ids`` and belong to no dataset. The
+spec generator is not deterministic across runs, so without the allowlist a
+rebuild would shuffle a different incident set and change the partition.
+
 ``--split`` also renders an answer-free duplicate of every private-split task
 at ``harbor/tasks/<task_id>-hidden/``, published as ``<hash>-hidden``. The
 duplicate drops ``tests/expected.json``, ``tests/rubrics/``,
@@ -635,38 +641,43 @@ GRANULARITY_DISPLAY = {"easy": "easy", "hard": "medium", "universal": "hard"}
 
 DEFAULT_AUTHORS = ("Albert Gong <ag2435@cornell.edu>",)
 
+PAPER_URL = "https://arxiv.org/abs/2607.28545"
+
 README_TEMPLATE = """\
 # {name}
 
-An agent benchmark for root cause analysis — {blurb}
+ORCA-bench is an agent benchmark for root cause analysis.
+
+This dataset contains the {blurb} {results_note}
 
 ## Quick Start
 
-> [!NOTE]
-> These instructions use GradientAI serverless inference from DigitalOcean, for both the agent
-> LLM (`gradient_ai/...`) and the LLM judge in the task verifier. To run against another
-> provider, swap the `-m` model name and export that provider's credentials instead.
+Harbor needs a one-time patch before the first run, and GradientAI needs a LiteLLM patch for `reasoning_effort` passthrough.
+Please follow the steps at [Additional setup instructions for Harbor](https://github.com/ORCA-bench/ORCA-bench#additional-setup-instructions-for-harbor).
 
-> [!IMPORTANT]
-> Harbor needs a one-time patch before the first run, and GradientAI needs a LiteLLM patch for
-> `reasoning_effort` passthrough — see
-> [Additional setup instructions for Harbor](https://github.com/ORCA-bench/ORCA-bench#additional-setup-instructions-for-harbor).
-
+Export the OpenAI-specific environment variables, plus any for additional model providers:
 ```bash
-# Point the agent LLM and the verifier's judge at GradientAI serverless inference.
-# Model access key: https://cloud.digitalocean.com/gen-ai/model-access-keys
-export GRADIENT_AI_API_KEY=$MODEL_ACCESS_KEY
-export OPENAI_API_KEY=$MODEL_ACCESS_KEY
-export OPENAI_BASE_URL=https://inference.do-ai.run/v1
+# Required: used by the oracle solution and the verifier's LLM judge
+export OPENAI_API_KEY=xxx
+export OPENAI_BASE_URL=xxx
+# Optional: environment variables to support additional model providers for the agent
+export GRADIENT_AI_API_KEY=xxx
+```
 
+Pull the snapshot image to a local cache directory (only needs to be done once):
+```bash
 # Stage the snapshot's /app/ to a host-side cache keyed by image id.
-SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2
 docker pull "$SNAPSHOT_IMAGE"
 CACHE_DIR="$HOME/.cache/sre-snapshot-cache/$(docker image inspect "$SNAPSHOT_IMAGE" -f '{{{{.Id}}}}' | cut -d: -f2 | cut -c1-12)"
-[ -z "$(ls -A "$CACHE_DIR" 2>/dev/null)" ] && {{ mkdir -p "$CACHE_DIR"; CID=$(docker create "$SNAPSHOT_IMAGE"); docker cp "$CID:/app/." "$CACHE_DIR/"; docker rm "$CID"; }}
+if [ -z "$(ls -A "$CACHE_DIR" 2>/dev/null)" ]; then
+    mkdir -p "$CACHE_DIR"; CID=$(docker create "$SNAPSHOT_IMAGE"); docker cp "$CID:/app/." "$CACHE_DIR/"; docker rm "$CID"
+fi
+```
 
-# Run the Harbor trials with the cache (read-only) bind-mounted
-SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" harbor run \\
+Run the Harbor trials with the cache directory bind-mounted:
+```bash
+SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" uv run harbor run \\
     --mounts-json "[{{\\"type\\":\\"bind\\",\\"source\\":\\"$CACHE_DIR\\",\\"target\\":\\"$CACHE_DIR\\",\\"read_only\\":true}}]" \\
     -d {name} \\
     -a terminus-2 \\
@@ -676,14 +687,10 @@ SNAPSHOT_CACHE_HOST_DIR="$CACHE_DIR" harbor run \\
     --ak 'llm_kwargs={{"max_tokens": 16384}}'
 ```
 
-Pass `-a` / `-m` explicitly — without them `harbor run` falls back to the built-in oracle agent.
-`--ak` values are parsed as JSON, so nested settings like `llm_kwargs` can be given inline (mind
-the single quotes). To sweep several models in one job, list them under `agents:` in a YAML job
-config and use `-c` instead.
+For our experiments in [ORCA-bench]({paper_url}), we used GradientAI's serverless inference from DigitalOcean. If you use that provider, please see [Additional setup instructions for Harbor](https://github.com/ORCA-bench/ORCA-bench#additional-setup-instructions-for-harbor) -> "Using GradientAI's serverless inference from DigitalOcean".
 
-The bind mount uses `target` = `source` so the path is identical inside and outside the container,
-letting the task entrypoint `cp -al` from the cache without translating paths.
-`SNAPSHOT_CACHE_HOST_DIR` must be set — the entrypoint fails fast without it.
+This benchmark has been tested with the following operating system, Docker, Python, and Harbor combination:
+* Ubuntu 22.04.5 LTS, Docker 29.1.5, Python 3.13.11, Harbor 0.20.0
 
 ## License
 
@@ -745,13 +752,28 @@ def load_pinned_qids(verified_json: Path, tasks: list[Task]) -> set[str]:
     missing = sorted(wanted - qid_by_task.keys())
     if missing:
         raise KeyError(
-            f"{len(missing)} verified task(s) have no built task directory: "
+            f"{len(missing)} verified task(s) are not among the tasks being split: "
             f"{missing[:3]}{'...' if len(missing) > 3 else ''}"
         )
 
     pinned = {qid_by_task[t] for t in wanted}
     logger.info(f"Pinned {len(pinned)} incident(s) from {len(wanted)} verified task(s)")
     return pinned
+
+
+def load_allowlist(allowlist_csv: Path) -> set[str]:
+    """Read the ``task_id`` column of a ``tasks.csv``-shaped allowlist."""
+    if not allowlist_csv.is_file():
+        raise FileNotFoundError(
+            f"allowlist missing: {allowlist_csv} -- pass --allowlist-csv pointing "
+            "at a tasks.csv whose task_id column lists the tasks to split"
+        )
+    with allowlist_csv.open(newline="") as f:
+        allowed = {row["task_id"] for row in csv.DictReader(f)}
+    if not allowed:
+        raise ValueError(f"allowlist has no task_id rows: {allowlist_csv}")
+    logger.info(f"Read {len(allowed)} allowlisted task id(s) from {allowlist_csv}")
+    return allowed
 
 
 # ───────────────────────────── Splitting ─────────────────────────────
@@ -861,15 +883,25 @@ def log_counts(public: Side, private: Side) -> list[dict[str, object]]:
 def write_dataset_dir(
     dataset_dir: Path,
     name: str,
-    description: str,
     blurb: str,
     authors: list[Author],
     side: Side,
     *,
     org: str,
+    n_total: int,
 ) -> None:
-    """Write a publishable dataset directory (dataset.toml + README.md)."""
+    """Write a publishable dataset directory (dataset.toml + README.md).
+
+    ``n_total`` is the benchmark-wide task count (public + private), which both
+    the manifest description and the README cite regardless of which side they
+    describe.
+    """
     dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    results_note = (
+        f"For the results on all {n_total:,} tasks, please see {PAPER_URL}."
+    )
+    description = f"An agent benchmark for root cause analysis — {blurb} {results_note}"
 
     manifest = DatasetManifest(
         dataset=DatasetInfo(name=name, description=description, authors=authors),
@@ -886,7 +918,9 @@ def write_dataset_dir(
     )
     (dataset_dir / "dataset.toml").write_text(manifest.to_toml())
     (dataset_dir / "README.md").write_text(
-        README_TEMPLATE.format(name=name, blurb=blurb)
+        README_TEMPLATE.format(
+            name=name, blurb=blurb, results_note=results_note, paper_url=PAPER_URL
+        )
     )
     logger.info(f"Wrote {len(manifest.tasks)} task ref(s) -> {dataset_dir}")
 
@@ -1112,6 +1146,7 @@ def write_splits(
     org: str,
     frac: float,
     seed: int,
+    allowlist_csv: Path,
     verified_json: Path | None,
     authors: list[Author],
 ) -> None:
@@ -1124,6 +1159,25 @@ def write_splits(
     keeps the slug lowercase (the registry validates package selectors against
     a lowercase-only pattern).
     """
+    # The allowlist freezes the task set the split is drawn from. The spec
+    # generator is not deterministic run to run, so a rebuild can render
+    # incidents the published split never saw; letting those into the shuffle
+    # would move every incident after them and silently re-cut the partition.
+    allowed = load_allowlist(allowlist_csv)
+    unlisted = [t for t in tasks if t.task_id not in allowed]
+    tasks = [t for t in tasks if t.task_id in allowed]
+    if unlisted:
+        by_gran = Counter(t.granularity for t in unlisted)
+        logger.warning(
+            f"Excluding {len(unlisted)} built task(s) not in {allowlist_csv}: "
+            f"{dict(sorted(by_gran.items()))}"
+        )
+    if missing := allowed - {t.task_id for t in tasks}:
+        logger.warning(
+            f"{len(missing)} allowlisted task id(s) were not built: "
+            f"{sorted(missing)[:3]}{'...' if len(missing) > 3 else ''}"
+        )
+
     # Only the published strata are split. A build can legitimately contain
     # other granularities -- `medium` tasks are rendered but deliberately never
     # published -- and they belong to no dataset. Dropping them here (loudly)
@@ -1131,16 +1185,17 @@ def write_splits(
     # assertion meaningful over the tasks that ARE being split. This guard
     # replaces the granularity validation that used to live in the standalone
     # splitter's load_tasks.
-    skipped = [t for t in tasks if t.granularity not in GRANULARITIES]
+    unpublished = [t for t in tasks if t.granularity not in GRANULARITIES]
     tasks = [t for t in tasks if t.granularity in GRANULARITIES]
-    if skipped:
-        by_gran = Counter(t.granularity for t in skipped)
+    if unpublished:
+        by_gran = Counter(t.granularity for t in unpublished)
         logger.warning(
-            f"Excluding {len(skipped)} task(s) from the split -- granularity not "
+            f"Excluding {len(unpublished)} task(s) from the split -- granularity not "
             f"in {GRANULARITIES}: {dict(sorted(by_gran.items()))}"
         )
     if not tasks:
         raise ValueError(f"no tasks left to split (granularities: {GRANULARITIES})")
+    skipped = unlisted + unpublished
 
     pinned_qids = load_pinned_qids(verified_json, tasks) if verified_json else set()
     public, private = split_by_incident(tasks, pinned_qids, frac, seed)
@@ -1171,11 +1226,11 @@ def write_splits(
         write_dataset_dir(
             datasets_dir / key,
             names[key],
-            f"An agent benchmark for root cause analysis - {blurb}",
             blurb,
             authors,
             side,
             org=org,
+            n_total=len(tasks),
         )
 
     split_path = task_root / "split.json"
@@ -1185,7 +1240,10 @@ def write_splits(
                 "harbor_dir": str(task_root),
                 "frac": frac,
                 "seed": seed,
+                "allowlist_csv": str(allowlist_csv),
                 "counts": table,
+                # Built tasks that belong to no dataset: not allowlisted, or
+                # in an unpublished granularity.
                 "excluded_task_ids": sorted(t.task_id for t in skipped),
                 # `splits` is the disjoint cover, and only that -- convert_job.py
                 # iterates it assuming each task_id appears once.
@@ -1271,6 +1329,16 @@ def main() -> None:
         type=int,
         default=0,
         help="--split: RNG seed for incident shuffling (default: 0).",
+    )
+    parser.add_argument(
+        "--allowlist-csv",
+        type=Path,
+        default=Path(__file__).resolve().parent / "tasks.csv",
+        help=(
+            "--split: tasks.csv whose task_id column lists the tasks eligible "
+            "for the split; built tasks not listed are excluded before the "
+            "incident shuffle (default: tasks.csv next to this script)."
+        ),
     )
     parser.add_argument(
         "--verified-json",
@@ -1370,6 +1438,7 @@ def main() -> None:
             org=args.org,
             frac=args.frac,
             seed=args.seed,
+            allowlist_csv=args.allowlist_csv,
             verified_json=args.verified_json,
             authors=_parse_authors(args.dataset_author or list(DEFAULT_AUTHORS)),
         )
