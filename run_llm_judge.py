@@ -86,8 +86,9 @@ from utils import get_base_parser, setup_logging
 # import the judge helpers.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_prediction import (
-    default_model,
     aggregate_judge_response,
+    build_rewards,
+    default_model,
     judge,
 )
 
@@ -274,9 +275,8 @@ async def process_trial(
     Also writes the judge prompt to a sibling ``.md`` under ``prompts_dir``.
 
     The already-scored check runs *before* the report is fetched, so a re-run
-    neither downloads archives nor calls the judge. Returns ``(trial_id, None)``
-    when the trial is skipped that way; the prompt markdown is backfilled from
-    the existing JSON if missing.
+    neither downloads archives nor calls the judge; it returns
+    ``(trial_id, None)`` when the trial is skipped that way.
     """
     trial_id = row["id"]
     task_name = row.get("task_name", "")
@@ -292,19 +292,21 @@ async def process_trial(
     expected = truth.get("expected", {})
 
     def _error_payload(mode: str, exc: Exception) -> dict[str, Any]:
+        # Same keys as a scored payload so every score file has one shape, plus
+        # the diagnosis. reward 0.0 without rca_accuracy / hallucinate_any is
+        # what build_rewards emits when the rollups are undefined, which is the
+        # case here -- there is no verdict to roll up.
         return {
             "trial_id": trial_id,
             "task_name": task_name,
-            "error": f"{type(exc).__name__}: {exc}",
-            "raw_response": getattr(exc, "raw_response", None),
-            "reward": 0.0,
-            "mode": mode,
             "model": model,
             "reasoning_effort": reasoning_effort,
             "batch_size": bs,
             "batch_number": batch_num,
-            "rca_depth": 0,
-            "rubric_used": bool(rubric_data),
+            "mode": mode,
+            "reward": 0.0,
+            "error": f"{type(exc).__name__}: {exc}",
+            "raw_response": getattr(exc, "raw_response", None),
         }
 
     # Bounded separately from the judge: in Hub mode a fetch is disk- and
@@ -337,17 +339,19 @@ async def process_trial(
             _atomic_write_json(out_path, payload)
             return trial_id, payload
 
-    # The saved payload is the flat rollup, not the judge's raw output. Every
-    # field of ``result`` that names the answer stays out: ``nested`` and
-    # ``judge_response_raw`` key their verdicts by feature_flag, ``judge_prompt``
-    # embeds the rubric, and ``reasoning_summary`` is the judge explaining which
-    # root cause it matched. ``per_rubric`` is dropped from the aggregate for
-    # the same reason -- its entries carry ``feature_flag`` -- while
-    # ``per_rubric_scores`` keeps the per-rubric integers.
+    # The scores are exactly what the in-container verifier persists to
+    # reward.json, produced by the same function, so the two cannot drift: the
+    # reward plus whichever of rca_accuracy / hallucinate_any is defined. A
+    # rollup that is None is omitted rather than written as null, and the
+    # booleans are cast to int -- both are build_rewards' doing, and both are
+    # what makes these comparable with a Hub trial's own metrics.
     #
-    # This is what makes a score file publishable next to a submission. The
-    # judge prompt is still written to prompts_dir for local debugging; that
-    # directory is not.
+    # Everything in ``result`` that names the answer stays out by construction:
+    # ``nested`` and ``judge_response_raw`` key their verdicts by feature_flag,
+    # ``judge_prompt`` embeds the rubric, and ``reasoning_summary`` is the judge
+    # explaining which root cause it matched. That is what makes a score file
+    # publishable next to a submission. The judge prompt is still written to
+    # prompts_dir for local debugging; that directory is not.
     agg = aggregate_judge_response(result["nested"], mode=result.get("mode"))
     rca_depth = agg["rca_depth"] if agg["rca_depth"] is not None else 0
     payload = {
@@ -360,9 +364,7 @@ async def process_trial(
         # Kept from ``result``: the skip check above and the CI summary both
         # branch on mode, and control tasks are identified by it.
         "mode": result.get("mode"),
-        **{k: v for k, v in agg.items() if k != "per_rubric"},
-        "rca_depth": rca_depth,
-        "reward": rca_depth / 3.0,
+        **build_rewards(agg, rca_depth / 3.0),
     }
     # Recorded only when it took more than one draw, so a clean run's schema is
     # unchanged and a flaky one is visible after the fact -- CI logs are
@@ -426,7 +428,8 @@ async def process_batch(
             continue
         logger.info(
             f"  [{i + 1}/{len(batch)}] {result.get('task_name', '')}: "
-            f"rca_depth={result.get('rca_depth', 'N/A')}/3 "
+            f"reward={result.get('reward', 0.0):.2f} "
+            f"rca_accuracy={result.get('rca_accuracy', '-')} "
             f"(mode={result.get('mode', '?')})"
         )
     logger.info(f"Batch {batch_num}/{n_batches}: scored={n_scored} skipped={n_skipped}")
