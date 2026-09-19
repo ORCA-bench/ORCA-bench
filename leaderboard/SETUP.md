@@ -108,15 +108,31 @@ The two definitions differ only in `package`, `name`, `title` and
 `description`; the schemas, columns and `rank_by` are identical, so a row is
 shaped the same on either board and the comment renderers are shared.
 
+Each was created from its checked-in definition; the same files drive `update`
+(the account must be allowed to manage the `orca-bench` org's leaderboards):
+
+```bash
+uv run harbor hub leaderboard create --config leaderboard.json --json
+uv run harbor hub leaderboard create --config leaderboard-private.json --json
+
+uv run harbor hub leaderboard list
+uv run harbor hub leaderboard show orca-bench/orca-bench/orca-bench
+uv run harbor hub leaderboard show orca-bench/orca-bench-private/orca-bench-private
+uv run harbor hub leaderboard update --config leaderboard.json
+uv run harbor hub leaderboard update --config leaderboard-private.json
+```
+
+`show` takes the `org/package/name` slug or the id. A private board is hidden
+rather than refused to an anonymous reader (`404 leaderboard not found`), so
+check visibility by reading it with no credentials, not by trusting the field.
+
 The board on the retired uppercase package (`orca-bench/ORCA-bench`, id
 `1b72818f-bd2e-4051-a3d1-634fe44808d7`) is superseded and should be deleted; it
 holds no rows.
 
 Visibility must not run ahead of the dataset's: a public leaderboard over a
 private dataset shows scores nobody can reproduce or submit against. Both are
-public now. A private board is hidden rather than refused — an anonymous read
-returns `404 leaderboard not found`, not a permission error — so test visibility
-by reading it with no credentials rather than by trusting the field.
+public now.
 
 ### The private leaderboard: what remains
 
@@ -167,12 +183,9 @@ gone now that the package is `orca-bench/orca-bench`: `ci/submit.py` sends
 `package` + `name` directly, and `tests/test_submit.py` guards the slug against
 regressing to something the hub would reject.
 
-The definition is checked in as [`leaderboard.json`](leaderboard.json) and can
-be passed to `create` / `update` as-is:
-
-```bash
-uv run harbor hub leaderboard create --config leaderboard.json --json
-```
+The definitions are checked in as [`leaderboard.json`](leaderboard.json) and
+[`leaderboard-private.json`](leaderboard-private.json) and are passed to
+`create` / `update` as-is (commands above).
 
 The `metadata_schema` / `metrics_schema` are the contract merged submissions
 must satisfy. `metadata` = the display fields, plus the `pr` markdown link cell
@@ -216,18 +229,16 @@ there by construction and `hallucinate_any` is not emitted at all.
 > rejects a row carrying an unknown key — and that happens at merge time, after
 > the PR is already merged. `tests/test_metrics_schema.py` keeps the checked-in
 > schema and the computed metrics in step, but it cannot see the live hub:
-> run `harbor hub leaderboard update --config leaderboard.json` first.
+> run `harbor hub leaderboard update --config <definition>` for **both**
+> definitions first — the schemas are shared, so a change to one is a change to
+> both.
 
-Verify it, or export the live definition if you need to amend it:
+To amend a definition, export the live one rather than editing blind:
 
 ```bash
-uv run harbor hub leaderboard list
 uv run harbor hub leaderboard export orca-bench/orca-bench/orca-bench
-uv run harbor hub leaderboard update --config leaderboard.json
+uv run harbor hub leaderboard export orca-bench/orca-bench-private/orca-bench-private
 ```
-
-The account you are logged in as must be allowed to manage the `orca-bench`
-org's leaderboards.
 
 The token / cost columns are totals over every trial in the submission
 (disqualified trials included — they still consumed resources). The `pr` cell
