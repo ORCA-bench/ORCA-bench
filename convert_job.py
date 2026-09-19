@@ -6,6 +6,13 @@ Does three things in one pass:
    name, then checks that package is actually published on the Harbor hub.
    Trials whose task is in no split, or whose package is not published, are
    excluded. Nothing unmappable reaches the destination.
+
+   The private side can be routed to either published form of the held-out
+   tasks: ``--private hidden`` (default) uses ``views["private-hidden"]``, the
+   answer-free ``<hash>-hidden`` packages in the public ``-private`` dataset;
+   ``--private internal`` uses ``splits["private-internal"]`` instead, the
+   answer-bearing ``<hash>`` packages. Both carry the same task ids, so
+   exactly one of them is ever in the routing.
 2. **Copy** — rsyncs only the selected trial dirs to the destination.
 3. **Convert** — rewrites ``config.json``/``result.json`` to point at the
    published package task and synthesizes the per-trial ``lock.json`` that
@@ -20,18 +27,23 @@ convert step rewrites them, so the result does not depend on prior runs.
 Examples::
 
     # one job, public split only
-    uvx --from harbor python convert_job.py \
+    uv run python convert_job.py \
         --src .../jobs-sub/2026-05-05__04-10-26 \
         --dst .../jobs-leaderboard/2026-05-05__04-10-26 \
         --split .../split.json --splits public
 
     # every job under a root, both splits, dropping stale dirs at the dst
-    uvx --from harbor python convert_job.py \
+    uv run python convert_job.py \
         --src .../jobs-sub --dst .../jobs-sub-backfilled-scores \
         --split .../split.json --prune
 
+    # both splits, private trials pointed at the answer-bearing packages
+    uv run python convert_job.py \
+        --src .../jobs-sub --dst .../jobs-internal \
+        --split .../split.json --private internal
+
     # convert an already-copied tree in place
-    uvx --from harbor python convert_job.py \
+    uv run python convert_job.py \
         --src .../jobs-sub --dst .../jobs-copy --split .../split.json --no-copy
 """
 
@@ -63,6 +75,14 @@ def parse_args() -> argparse.Namespace:
         "--splits",
         default=None,
         help="Comma-separated split names to include (default: every split in split.json).",
+    )
+    p.add_argument(
+        "--private",
+        choices=("hidden", "internal"),
+        default="hidden",
+        help="Which published form of the private split to route to: 'hidden' "
+        "(view private-hidden, the answer-free -hidden packages) or 'internal' "
+        "(split private-internal, answers included). Default: hidden.",
     )
     p.add_argument(
         "--no-copy", action="store_true", help="Skip the copy step; convert in place."
@@ -115,15 +135,43 @@ async def load_published(datasets: list[str]) -> dict[str, dict[str, str]]:
     return out
 
 
+def routing_sides(
+    split: dict[str, Any], private: str, wanted: list[str] | None
+) -> dict[str, dict[str, Any]]:
+    """Return {side_name: split record} for the sides to route over.
+
+    Starts from ``splits`` (the disjoint cover). With ``private="hidden"``
+    (the default) the ``private-internal`` split is replaced by the
+    ``private-hidden`` view: same task ids, different package names and
+    dataset, so swapping rather than adding keeps every task id in the
+    routing exactly once.
+    """
+    sides = dict(split["splits"])
+    if private == "hidden":
+        try:
+            hidden = split["views"]["private-hidden"]
+        except KeyError:
+            raise SystemExit(
+                "--private hidden needs views['private-hidden'] in split.json"
+            ) from None
+        sides.pop("private-internal", None)
+        sides["private-hidden"] = hidden
+    if wanted is not None:
+        unknown = sorted(set(wanted) - sides.keys())
+        if unknown:
+            raise SystemExit(
+                f"--splits names not available: {unknown} (have {sorted(sides)})"
+            )
+        sides = {k: v for k, v in sides.items() if k in wanted}
+    return sides
+
+
 def build_routing(
-    split_path: Path, wanted: list[str] | None, published: dict[str, dict[str, str]]
+    sides: dict[str, dict[str, Any]], published: dict[str, dict[str, str]]
 ) -> dict[str, tuple[str, str, str]]:
     """Map old task id -> (package_name, dataset, digest), keeping only published tasks."""
-    split = json.loads(split_path.read_text())
     routing: dict[str, tuple[str, str, str]] = {}
-    for name, spec in split["splits"].items():
-        if wanted is not None and name not in wanted:
-            continue
+    for spec in sides.values():
         ds = spec["dataset_name"]
         for t in spec["tasks"]:
             digest = published.get(ds, {}).get(t["package_name"])
@@ -281,16 +329,12 @@ async def main() -> None:
     wanted = args.splits.split(",") if args.splits else None
 
     split = json.loads(args.split.read_text())
-    datasets = sorted(
-        {
-            spec["dataset_name"]
-            for name, spec in split["splits"].items()
-            if wanted is None or name in wanted
-        }
-    )
+    sides = routing_sides(split, args.private, wanted)
+    datasets = sorted({spec["dataset_name"] for spec in sides.values()})
+    print(f"Routing over sides: {sorted(sides)}")
     print("Checking published datasets on the hub:")
     published = await load_published(datasets)
-    routing = build_routing(args.split, wanted, published)
+    routing = build_routing(sides, published)
     print(f"{len(routing)} tasks routable to a published hub task\n")
 
     grand: Counter = Counter()

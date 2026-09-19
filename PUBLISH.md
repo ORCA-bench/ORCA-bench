@@ -150,7 +150,10 @@ on their own, with `--private`.
 > is a subset of public; `private-hidden` repackages private-internal under new
 > package names). `convert_job.py` assigns `routing[task_id]` while looping over
 > `splits`, so an entry sharing a task_id there would silently reroute those
-> trials to whichever dataset iterated last.
+> trials to whichever dataset iterated last. That is why `convert_job.py`
+> *replaces* `private-internal` with the `private-hidden` view (its default,
+> `--private hidden`) rather than adding it: each task id is routed exactly
+> once either way.
 
 - Leaderboards: one per published board, `orca-bench` on the public dataset
   and `orca-bench-private` on the private one. Both exist already; creating,
@@ -175,11 +178,17 @@ Hub**, rsyncs only the surviving trial dirs to `--dst`, then rewrites
 `lock.json` that `harbor upload` requires (harbor 0.6.3 never wrote one).
 
 ```bash
-uvx --from harbor python convert_job.py \
+uv run python convert_job.py \
   --src /root/benchmark/src/sre-agent/examples/otel-demo/jobs-sub \
   --dst /mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-2 \
   --split /root/benchmark/src/ORCA-bench/out-0919/harbor/split.json
 ```
+
+By default private-split trials are pointed at `orca-bench/orca-bench-private`
+(the answer-free `<hash>-hidden` packages), the form a submitter's own run of the
+held-out split would reference. Pass `--private internal` to point them at
+`orca-bench/orca-bench-private-internal` (the answer-bearing `<hash>` packages)
+instead.
 
 > [!NOTE]
 > Trials whose task is in no split — the `-02-medium` tasks — have no published
