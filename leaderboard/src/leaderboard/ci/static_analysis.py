@@ -46,6 +46,7 @@ from leaderboard.core.metrics import (
     format_resource_cells,
     format_metrics_table,
     submission_by_task,
+    submission_coverage,
     metric_counts,
 )
 from leaderboard.core.task_groups import task_labels
@@ -286,25 +287,6 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
         Check(f"Valid dataset reference ({board.dataset})", not ref_bad, ref_bad)
     )
 
-    # Private-split submissions stop here for now. Their trials carry an empty
-    # rewards map by construction (the -hidden tasks have no in-container
-    # verifier), so the coverage check below would drop every one of them as
-    # unscored, and the metrics have to come from the /judge scores committed
-    # to leaderboard/scores/ rather than from trial rewards. Neither is wired
-    # up yet -- see leaderboard/SETUP.md, "The private leaderboard: what
-    # remains". Failing an explicit check keeps a private submission from being
-    # promoted with a nonsense row, and says why, instead of a traceback.
-    if board is PRIVATE:
-        res.checks.append(
-            Check(
-                "Private-split scoring",
-                False,
-                "not yet supported: coverage and metrics for the private board "
-                "are pending (leaderboard/SETUP.md)",
-            )
-        )
-        return res
-
     # The canonical task list for the board's dataset@ref. Fetched once and
     # used twice: its length is the expected task count (no hardcoded constant
     # to go stale on a republish), and the per-trial check below compares each
@@ -324,11 +306,15 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
         if t.get("error_type") is not None:
             res.errors[t["error_type"]] += 1
 
+    # A task is covered by a scored or overridden trial -- and, on the private
+    # board only, by a trial that finished without a verdict, which is every
+    # private trial by construction (see metrics.submission_coverage).
+    covered = submission_coverage(trials, submission, board)
     count_msg = ""
-    if len(by_task) != expected_task_count:
-        count_msg = f"{len(by_task)} tasks (expected {expected_task_count})"
-    elif any(len(rs) < MIN_TRIALS_PER_TASK for rs in by_task.values()):
-        short = sum(len(rs) < MIN_TRIALS_PER_TASK for rs in by_task.values())
+    if len(covered) != expected_task_count:
+        count_msg = f"{len(covered)} tasks (expected {expected_task_count})"
+    elif any(n < MIN_TRIALS_PER_TASK for n in covered.values()):
+        short = sum(n < MIN_TRIALS_PER_TASK for n in covered.values())
         count_msg = f"{short} task(s) below {MIN_TRIALS_PER_TASK} trials"
     res.checks.append(
         Check(
@@ -340,11 +326,27 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     res.n_trials = len(trials)
     res.n_scored = sum(len(rs) for rs in by_task.values())
     res.resources = compute_resource_metrics(trials)
-    # The same breakdown compute_submission_metrics publishes, so the PR comment
-    # and the stored row can't disagree.
-    labels = task_labels(board)
-    res.metrics = compute_subset_metrics(trials, submission, labels)
-    res.metric_counts = metric_counts(trials, labels)
+
+    if board is PRIVATE:
+        # Private-split metrics have to come from the /judge scores committed
+        # to leaderboard/scores/, not from trial rewards (there are none), and
+        # that is not wired up yet -- see leaderboard/SETUP.md, "The private
+        # leaderboard: what remains". Failing an explicit check keeps a private
+        # submission from being promoted with a nonsense row, and says why.
+        res.checks.append(
+            Check(
+                "Private-split scoring",
+                False,
+                "not yet supported: metrics for the private board come from "
+                "/judge scores, pending (leaderboard/SETUP.md)",
+            )
+        )
+    else:
+        # The same breakdown compute_submission_metrics publishes, so the PR
+        # comment and the stored row can't disagree.
+        labels = task_labels(board)
+        res.metrics = compute_subset_metrics(trials, submission, labels)
+        res.metric_counts = metric_counts(trials, labels)
 
     if per_trial:
         # Fetch each trial's own config + task digest in-process -- the

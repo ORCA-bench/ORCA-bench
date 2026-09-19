@@ -24,7 +24,10 @@ from dataclasses import dataclass
 
 from leaderboard.core.hub import (
     HALLUCINATE_METRIC,
+    PRIVATE,
     RCA_ACCURACY_METRIC,
+    Board,
+    private_trial_finished,
     submission_board,
     submission_trials,
     trial_metric,
@@ -135,8 +138,7 @@ def submission_by_task(
     judgement and must not be silently discarded. The number excluded is
     `len(trials)` minus the trials in `by_task`.
     """
-    disq = {d["trial_id"] for d in (submission.get("disqualified_trials") or [])}
-    credited = {d["trial_id"] for d in (submission.get("credited_trials") or [])}
+    disq, credited = _overrides(submission)
     by_task: dict[str, list] = defaultdict(list)
     n_disq = 0
     n_credited = 0
@@ -160,6 +162,40 @@ def submission_by_task(
                 continue
             by_task[t.get("task_name")].append(reward)
     return by_task, n_disq, n_credited
+
+
+def _overrides(submission: dict) -> tuple[set[str], set[str]]:
+    """(disqualified, credited) trial ids from the submission's override lists."""
+    disq = {d["trial_id"] for d in (submission.get("disqualified_trials") or [])}
+    credited = {d["trial_id"] for d in (submission.get("credited_trials") or [])}
+    return disq, credited
+
+
+def submission_coverage(
+    trials: list[dict], submission: dict, board: Board
+) -> dict[str, int]:
+    """Per-task count of the trials that cover it, for the coverage check.
+
+    On the public board that is exactly what `submission_by_task` keeps: a
+    trial with a verdict, or one a maintainer overrode. On the private board
+    no trial has a verdict on the Hub by construction -- the `-hidden` tasks
+    are scored out-of-band by /judge -- so a trial that reached its verifier
+    (core.hub.private_trial_finished: no error, or one harbor verifies after,
+    such as an agent timeout) covers its task as well. A private trial that
+    failed before that still does not: there is no report for /judge to score.
+    Overridden trials are already counted by `submission_by_task`, so they are
+    not counted again here.
+    """
+    by_task, _, _ = submission_by_task(trials, submission)
+    covered = {task: len(rs) for task, rs in by_task.items()}
+    if board is PRIVATE:
+        disq, credited = _overrides(submission)
+        for t in trials:
+            if t.get("id") in disq or t.get("id") in credited:
+                continue
+            if private_trial_finished(t):
+                covered[t.get("task_name")] = covered.get(t.get("task_name"), 0) + 1
+    return covered
 
 
 @dataclass(frozen=True)

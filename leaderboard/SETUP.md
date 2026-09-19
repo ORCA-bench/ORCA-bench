@@ -145,16 +145,28 @@ it against the private dataset's pin; `ci/submit.py` would post its row to the
 private board; and `leaderboard-judge.yml` scores it. What is **not**: static
 analysis stops every private submission at a failing **Private-split scoring**
 check (and `--write-metrics` refuses it), so none can be promoted until the
-two items below land. Remove that guard when they do.
+item below lands. Remove that guard when it does.
 
-1. **Coverage must count unscored private trials.** Private trials carry an
-   empty rewards map by construction, and `trial_metric` returns `None` on an
-   empty `evals`, which the coverage check treats as "errored, excluded" — so
-   every private trial would be dropped and coverage would fail. Count a
-   finished private trial as covering its task. Also confirm on the first real
-   job how the hub stores `{}`: `trial_metric` raises
-   `MissingRewardMetricError` if the row materializes a reward scalar with no
-   `evals` block (the case [`PUBLISH.md`](../PUBLISH.md) flags).
+1. ~~**Coverage must count unscored private trials.**~~ Done. Confirmed on
+   the first uploaded private job (`6b469112-157f-5d55-a7c2-25417c2a226d`,
+   2026-09-19): the Hub stores a `{}` rewards map as `evals: {}` with
+   `reward: null` on all 324 rows, so `trial_metric` returns `None` and
+   `MissingRewardMetricError` does not fire. That shape is identical to a
+   trial that errored before its verifier ran — `status` (`completed`) and
+   `is_scored` (`true`) do not separate them either — and only `error_type`
+   does (`None` vs the exception class name). `core.hub.private_trial_finished`
+   keys on exactly that (empty `evals`, private dataset, and no `error_type`
+   or one in `JUDGEABLE_ERRORS`), and `metrics.submission_coverage` counts
+   such a trial as covering its task on the private board only; the **Valid
+   trial count** check now passes on all five uploaded jobs (324 tasks × 1).
+   `JUDGEABLE_ERRORS` mirrors harbor's `SingleStepTrial._run_agent`, which
+   catches exactly `AgentTimeoutError` and `NonZeroAgentExitCodeError`,
+   records them, and still runs the verifier — so the public board *scores*
+   such a trial (mostly 0, from an empty report; job `2026-05-05__05-48-18`
+   has 462 of them public and 204 private), and the two boards must agree on
+   what finished means. Any other error propagates before the verifier, so a
+   trial with it (a setup `RuntimeError`) still does not cover: there is no
+   report for `/judge` to score.
 2. **Metrics from `leaderboard/scores/`.** For a private submission the merge
    job must compute the three published metrics from
    `leaderboard/scores/<submission>.json` (written by `/judge`) rather than

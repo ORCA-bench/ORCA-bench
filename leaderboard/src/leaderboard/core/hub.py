@@ -260,6 +260,48 @@ def trial_reward(trial: dict) -> float | None:
     return trial_metric(trial, REWARD_METRIC)
 
 
+# Errors after which harbor still runs the verifier, so the trial's report --
+# whatever the agent managed to write -- is judged like any other. This is the
+# `except (AgentTimeoutError, NonZeroAgentExitCodeError)` in harbor's
+# SingleStepTrial._run_agent (harbor/trial/single_step.py): those two are
+# recorded and the trial proceeds to _run_verifier; any other exception
+# propagates and the verifier never runs. On the public board a trial with one
+# of these is scored (job 2026-05-05__05-48-18: all 462 timed-out trials carry
+# a reward, mostly 0 from an empty report), and the private board must count it
+# the same way or the two boards disagree on what "finished" means. Any other
+# error_type (a setup failure, e.g. RuntimeError from tmux) means there is no
+# report for /judge to score.
+JUDGEABLE_ERRORS = frozenset({"AgentTimeoutError", "NonZeroAgentExitCodeError"})
+
+
+def private_trial_finished(trial: dict) -> bool:
+    """True for a private-board trial that reached its verifier without a verdict.
+
+    A `-hidden` task has no in-container verifier: its test.sh writes an empty
+    rewards map (build_harbor_tasks.HIDDEN_TEST_SH), and the score arrives
+    out-of-band from /judge. The Hub stores that map as `evals: {}` with
+    `reward: null` -- confirmed on the first uploaded private job
+    (6b469112-157f-5d55-a7c2-25417c2a226d, 2026-09-19): 324/324 rows had that
+    exact shape. It is also the shape of a trial that errored before its
+    verifier ran, and `status` ("completed") and `is_scored` (true) do not
+    separate the two; `error_type` does -- None (or a JUDGEABLE_ERRORS entry)
+    here, the exception class name ("RuntimeError") on the errored one. The
+    dataset guard keeps a public trial with the same shape (a run whose
+    verifier produced nothing) from being counted as finished: on the public
+    board no verdict means excluded.
+    """
+    if trial.get("source") != PRIVATE.dataset:
+        return False
+    evals = trial.get("evals")
+    error = trial.get("error_type")
+    return (
+        isinstance(evals, dict)
+        and not evals
+        and trial.get("reward") is None
+        and (error is None or error in JUDGEABLE_ERRORS)
+    )
+
+
 def submission_trials(submission: dict) -> list[dict]:
     """Bulk trial metadata for a submission: every latest-attempt trial of its
     source_jobs on the submission's board dataset matching its source_filter
