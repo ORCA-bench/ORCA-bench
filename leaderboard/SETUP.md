@@ -71,8 +71,8 @@ Two, one per board, pinned in [`core/hub.py`](src/leaderboard/core/hub.py):
 | `PRIVATE` | `orca-bench/orca-bench-private` | 324 | `sha256:ab44e871420e7c32540c36c8c2af5f8cb75bf48e371e3f19791540339dfdac81` |
 
 The private dataset is the held-out split's answer-free `-hidden` tasks
-(published 2026-09-19 from `out-0913-2/harbor/datasets/private/`, see
-[`PUBLISH.md`](../PUBLISH.md)); its oracle twins live in
+(published 2026-09-19; `out-0919/harbor/datasets/private/` rebuilds it
+byte-for-byte, see [`PUBLISH.md`](../PUBLISH.md)); its oracle twins live in
 `orca-bench/orca-bench-private-internal`, which stays private on the hub and is
 what `/judge` scores against.
 
