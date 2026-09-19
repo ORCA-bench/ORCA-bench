@@ -429,11 +429,12 @@ uv run harbor hub leaderboard row list orca-bench/orca-bench/orca-bench
 
 > [!WARNING]
 > Attaching the board to a new revision is display only — it does not re-pin the
-> benchmark. `DATASET_REF` in
-> [`core/hub.py`](leaderboard/src/leaderboard/core/hub.py) still points at
-> whichever revision it did before, so existing rows were scored against that one
-> and new submissions are still validated against it. If the new revision is
-> meant to be canonical, re-pin `DATASET_REF` as well — but that invalidates
+> benchmark. The board's `ref` in
+> [`core/hub.py`](leaderboard/src/leaderboard/core/hub.py) (`PUBLIC.ref` or
+> `PRIVATE.ref`) still points at whichever revision it did before, so existing
+> rows were scored against that one and new submissions are still validated
+> against it. If the new revision is meant to be canonical, re-pin that `ref`
+> as well — but that invalidates
 > every uploaded trial, since the per-trial digest check compares each trial's
 > task ref against the pinned version's. Only worth doing when the task content
 > actually changed; a metadata-only republish leaves scores comparable.
