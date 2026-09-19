@@ -152,14 +152,20 @@ on their own, with `--private`.
 > `splits`, so an entry sharing a task_id there would silently reroute those
 > trials to whichever dataset iterated last.
 
-- Create a leaderboard for each dataset by running the following command:
-
-```bash
-```
+- Leaderboards: one per published board, `orca-bench` on the public dataset
+  and `orca-bench-private` on the private one. Both exist already; creating,
+  inspecting and updating them is covered in
+  [`leaderboard/SETUP.md`](leaderboard/SETUP.md#the-leaderboards-on-the-hub),
+  with the definitions checked in as `leaderboard/leaderboard.json` and
+  `leaderboard/leaderboard-private.json`.
 
 > [!NOTE]
-> The leaderboard code is pinned to a specific dataset revision at INSERT.
-> Updating the dataset superficially (e.g., modifying the description) moves the revision number but doesn't affect the leaderboard.
+> The leaderboard code pins each board to a specific dataset version
+> (`PUBLIC.ref` / `PRIVATE.ref` in
+> [`core/hub.py`](leaderboard/src/leaderboard/core/hub.py)). Republishing a
+> dataset moves its `latest` but does not move the pin — see
+> [Re-pinning a board](leaderboard/SETUP.md#re-pinning-a-board) for when that is
+> and isn't wanted.
 
 2. Update `config.json` and `result.json` inside a jobs directory to the latest Harbor tasks and dataset.
 
