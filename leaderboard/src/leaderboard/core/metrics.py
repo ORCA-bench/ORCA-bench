@@ -18,14 +18,17 @@ ORCA-bench rewards are graded in [0, 1], not pass/fail -- see compute_metrics.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from leaderboard.core.hub import (
     HALLUCINATE_METRIC,
     PRIVATE,
     RCA_ACCURACY_METRIC,
+    REWARD_METRIC,
     Board,
     private_trial_finished,
     submission_board,
@@ -33,7 +36,12 @@ from leaderboard.core.hub import (
     trial_metric,
     trial_reward,
 )
-from leaderboard.core.task_groups import TaskLabel, label_for, task_labels
+from leaderboard.core.task_groups import (
+    TaskLabel,
+    TaskLabelError,
+    label_for,
+    task_labels,
+)
 
 
 class RewardRangeError(ValueError):
@@ -412,8 +420,127 @@ def compute_resource_metrics(trials: list[dict]) -> dict:
     return out
 
 
-def compute_submission_metrics(submission: dict) -> dict:
-    """The metrics record written into the submission JSON at promote.
+# ---------------------------------------------------------------------------
+# The private board: verdicts come from /judge, not from the trials.
+#
+# A -hidden task has no in-container verifier, so its Hub row carries no
+# metrics (`evals: {}`). /judge scores the agent's report against the held-back
+# ground truth and commits one record per trial to leaderboard/scores/<name>
+# .json (see .github/workflows/leaderboard-judge.yml). Each record is exactly
+# what the public verifier would have written to reward.json -- run_llm_judge
+# builds it with check_prediction.build_rewards -- plus the judge's `mode`.
+
+# The judge's mode on a control task. task_groups cannot tell a private control
+# task from an incident one: the -hidden task.toml keeps no `events`, because
+# whether an incident happened *is* the answer. Only the judge knows.
+JUDGE_CONTROL_MODE = "no_incident_llm_judge"
+# Modes recorded when the judge could not score a trial. The record carries a
+# reward of 0 so every score file has one shape, but there is no verdict in it:
+# such a trial is unscored, not a 0.
+JUDGE_ERROR_MODES = frozenset({"llm_judge_error", "hub_fetch_error"})
+# The record fields that are verifier metrics (build_rewards' keys).
+JUDGE_METRIC_KEYS = (REWARD_METRIC, RCA_ACCURACY_METRIC, HALLUCINATE_METRIC)
+
+
+def load_scores(path: Path) -> dict[str, dict]:
+    """The /judge scores file for a submission: `{trial_id: record}`."""
+    scores = json.loads(path.read_text())
+    if not isinstance(scores, dict) or not all(
+        isinstance(v, dict) and v.get("trial_id") == k for k, v in scores.items()
+    ):
+        raise ValueError(f"{path} is not a /judge scores file ({{trial_id: record}})")
+    return scores
+
+
+def scores_coverage_failure(trials: list[dict], scores: dict[str, dict]) -> str:
+    """Why `scores` does not give every trial a verdict, or "" if it does.
+
+    A private submission must not be merged on a partial judge run: a trial
+    with no record, or one the judge could not score, would silently drop out
+    of the mean. The maintainer re-runs /judge instead.
+    """
+    missing = [t["id"] for t in trials if t.get("id") not in scores]
+    errored = [
+        t["id"]
+        for t in trials
+        if t.get("id") in scores and scores[t["id"]].get("mode") in JUDGE_ERROR_MODES
+    ]
+    if not missing and not errored:
+        return ""
+    parts = []
+    if missing:
+        parts.append(f"{len(missing)} trial(s) have no judge score")
+    if errored:
+        parts.append(f"{len(errored)} the judge could not score")
+    return ", ".join(parts) + f" (of {len(trials)}); re-run /judge"
+
+
+def judged_trials(trials: list[dict], scores: dict[str, dict]) -> list[dict]:
+    """Bulk rows with the judge's verdict where the verifier's would have been.
+
+    A judge record is what the in-container verifier writes to reward.json, so
+    it goes where the Hub puts that: the row's `evals`, in the nested shape
+    bulk rows carry. Every other field of the row (id, task_name, tokens, cost,
+    error_type) is kept, so `compute_subset_metrics`, `metric_counts` and
+    `compute_resource_metrics` read a judged private trial exactly as they read
+    a verified public one. A trial with no record, or an errored one, keeps
+    `evals: {}` and stays unscored -- excluded by the metric, and named by
+    `scores_coverage_failure`. The judge's mode rides along as `judge_mode` for
+    `private_task_labels`.
+    """
+    out: list[dict] = []
+    for t in trials:
+        row = dict(t)
+        rec = scores.get(t.get("id"))
+        if rec is not None and rec.get("mode") not in JUDGE_ERROR_MODES:
+            row["evals"] = {
+                k: {"metrics": [{k: rec[k]}]} for k in JUDGE_METRIC_KEYS if k in rec
+            }
+            row["judge_mode"] = rec.get("mode")
+        out.append(row)
+    return out
+
+
+def private_task_labels(board: Board, judged: list[dict]) -> dict[str, TaskLabel]:
+    """Labels for the private board: difficulty from the task, control from the judge.
+
+    The -hidden task.toml keeps `difficulty`, so that half comes from
+    `task_labels` as usual; its `events` are stripped, so `is_control` there
+    is True for every task and is replaced by the judge's verdict on the task's
+    trials (`JUDGE_CONTROL_MODE`). Control-ness is a property of the task, so
+    every judged trial of a task must agree; a task none of whose trials was
+    judged cannot be labelled and raises, which `scores_coverage_failure` will
+    already have reported.
+    """
+    labels = dict(task_labels(board))
+    control_by_task: dict[str, set[bool]] = defaultdict(set)
+    for t in judged:
+        if "judge_mode" in t:
+            control_by_task[t.get("task_name")].add(t["judge_mode"] == JUDGE_CONTROL_MODE)
+    disagree = sorted(task for task, kinds in control_by_task.items() if len(kinds) > 1)
+    if disagree:
+        raise TaskLabelError(
+            f"{len(disagree)} task(s) judged as both control and incident, e.g. "
+            f"{disagree[:3]}; a task's trials cannot disagree on whether an "
+            "incident happened."
+        )
+    unjudged = sorted(set(t.get("task_name") for t in judged) - control_by_task.keys())
+    if unjudged:
+        raise TaskLabelError(
+            f"{len(unjudged)} task(s) have no judged trial, e.g. {unjudged[:3]}; "
+            "control/incident is known only from the judge, so they cannot be "
+            "placed in a subset."
+        )
+    for task, kinds in control_by_task.items():
+        base = label_for(labels, task)
+        labels[task] = TaskLabel(difficulty=base.difficulty, is_control=kinds.pop())
+    return labels
+
+
+def compute_submission_metrics(
+    submission: dict, scores: dict[str, dict] | None = None
+) -> dict:
+    """The metrics record written into the submission JSON.
 
     Fields match the leaderboard metrics_schema: three fields per METRICS entry
     (mean, stderr, display -- see compute_subset_metrics), plus the
@@ -421,10 +548,30 @@ def compute_submission_metrics(submission: dict) -> dict:
     that ran including the unscored ones, since an errored trial still burned
     tokens.
 
+    Public board: written at promote, from the trials' own verdicts. Private
+    board: written by /judge on the bot PR, from its `scores` -- required
+    there, and they must cover every trial (`scores_coverage_failure`), since
+    a partial mean would be published as the whole.
+
     The disqualified / credited lists no longer affect anything published: they
     force a trial's *reward*, and no published metric is reward-derived.
     """
+    board = submission_board(submission)
     trials = submission_trials(submission)
+    if board is PRIVATE:
+        if scores is None:
+            raise ValueError(
+                "private-board metrics come from the /judge scores file; none given"
+            )
+        bad = scores_coverage_failure(trials, scores)
+        if bad:
+            raise ValueError(f"judge scores do not cover the submission: {bad}")
+        judged = judged_trials(trials, scores)
+        labels = private_task_labels(board, judged)
+        return {
+            **compute_subset_metrics(judged, submission, labels),
+            **compute_resource_metrics(trials),
+        }
     return {
         **compute_subset_metrics(trials, submission),
         **compute_resource_metrics(trials),

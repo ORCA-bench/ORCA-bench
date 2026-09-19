@@ -88,6 +88,19 @@ jobs:
           gh api "repos/${{ github.repository }}/contents/$path?ref=$HEAD_SHA" \
             --jq '.content' | base64 -d > /tmp/sub/submission.json
           echo "Checking $path"
+          # A private-board bot PR carries its /judge scores next to the
+          # submission (leaderboard/scores/<name>.json). Fetch them if present
+          # so the re-check reports the metrics; absent means "pending /judge".
+          scores="leaderboard/scores/$(basename "$path")"
+          if gh api "repos/${{ github.repository }}/contents/$scores?ref=$HEAD_SHA" \
+               --jq '.content' 2>/dev/null | base64 -d > /tmp/sub/scores.json \
+             && [ -s /tmp/sub/scores.json ]; then
+            echo "scores=--scores /tmp/sub/scores.json" >> "$GITHUB_OUTPUT"
+            echo "Found $scores"
+          else
+            rm -f /tmp/sub/scores.json
+            echo "scores=" >> "$GITHUB_OUTPUT"
+          fi
 
       # Normalize the intake PR title to match the submission file (the promote
       # job titles the bot PR the same way with [Promoted]).
@@ -121,7 +134,7 @@ jobs:
           HARBOR_API_KEY: ${{ secrets.HARBOR_API_KEY }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          uv run --project leaderboard python -m leaderboard.ci.static_analysis /tmp/sub/submission.json > /tmp/comment.md
+          uv run --project leaderboard python -m leaderboard.ci.static_analysis /tmp/sub/submission.json ${{ steps.fetch.outputs.scores }} > /tmp/comment.md
           echo "status=$?" >> "$GITHUB_OUTPUT"
 
       - name: Post result comment

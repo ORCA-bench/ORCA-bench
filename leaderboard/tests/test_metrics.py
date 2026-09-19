@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 from leaderboard.core.metrics import (
     DISPLAY_SUFFIX,
@@ -12,11 +13,15 @@ from leaderboard.core.metrics import (
     compute_metrics,
     compute_subset_metrics,
     format_measurement,
+    JUDGE_CONTROL_MODE,
+    judged_trials,
+    private_task_labels,
+    scores_coverage_failure,
     submission_by_task,
     submission_coverage,
 )
-from leaderboard.core.hub import PRIVATE, PUBLIC, private_trial_finished
-from leaderboard.core.task_groups import TaskLabel
+from leaderboard.core.hub import PRIVATE, PUBLIC, private_trial_finished, trial_metric
+from leaderboard.core.task_groups import TaskLabel, TaskLabelError
 
 
 _UNSET = object()
@@ -318,6 +323,107 @@ class SubmissionCoverageTests(unittest.TestCase):
         is not coverage even when the board is private."""
         trials = [_hidden_trial("t1", "org/a", source=PUBLIC.dataset)]
         self.assertEqual(submission_coverage(trials, {}, PRIVATE), {})
+
+
+def _score(tid: str, task: str, mode: str, **metrics) -> dict:
+    """One /judge record as leaderboard-judge.yml commits it: build_rewards'
+    keys (reward always; rca_accuracy / hallucinate_any when defined) plus the
+    judge's mode. Nothing that names the answer."""
+    return {"trial_id": tid, "task_name": task, "mode": mode, **metrics}
+
+
+class JudgeScoresTests(unittest.TestCase):
+    def setUp(self):
+        self.trials = [
+            _hidden_trial("t-inc", "org/a-hidden"),
+            _hidden_trial("t-ctl", "org/b-hidden"),
+            _hidden_trial("t-empty", "org/c-hidden", error_type="AgentTimeoutError"),
+        ]
+        self.scores = {
+            "t-inc": _score("t-inc", "org/a-hidden", "llm_judge",
+                            reward=0.67, rca_accuracy=1, hallucinate_any=0),
+            # A control task: no root cause, so hallucinate_any is undefined
+            # and absent -- exactly what build_rewards emits.
+            "t-ctl": _score("t-ctl", "org/b-hidden", JUDGE_CONTROL_MODE,
+                            reward=1.0, rca_accuracy=1),
+            # An incident task whose agent wrote nothing: scored, not control.
+            "t-empty": _score("t-empty", "org/c-hidden", "empty_report",
+                              reward=0.0, rca_accuracy=0, hallucinate_any=0),
+        }
+
+    def test_full_coverage_passes(self):
+        self.assertEqual(scores_coverage_failure(self.trials, self.scores), "")
+
+    def test_missing_and_errored_records_are_named(self):
+        scores = dict(self.scores)
+        del scores["t-ctl"]
+        scores["t-inc"] = _score("t-inc", "org/a-hidden", "llm_judge_error", reward=0.0)
+        msg = scores_coverage_failure(self.trials, scores)
+        self.assertIn("1 trial(s) have no judge score", msg)
+        self.assertIn("1 the judge could not score", msg)
+        self.assertIn("re-run /judge", msg)
+
+    def test_judged_rows_read_like_verified_rows(self):
+        """The judge record lands in `evals`, so trial_metric reads it by name
+        exactly as it reads a public trial's verifier output."""
+        judged = judged_trials(self.trials, self.scores)
+        inc = next(t for t in judged if t["id"] == "t-inc")
+        self.assertEqual(trial_metric(inc, "reward"), 0.67)
+        self.assertEqual(trial_metric(inc, "rca_accuracy"), 1.0)
+        self.assertEqual(trial_metric(inc, "hallucinate_any"), 0.0)
+        self.assertEqual(inc["judge_mode"], "llm_judge")
+        # Untouched row fields survive.
+        self.assertEqual(inc["source"], PRIVATE.dataset)
+        # Absent metric stays absent: a control row has no hallucinate_any.
+        ctl = next(t for t in judged if t["id"] == "t-ctl")
+        with self.assertRaises(Exception):
+            trial_metric(ctl, "hallucinate_any")
+
+    def test_errored_or_missing_record_leaves_the_row_unscored(self):
+        scores = dict(self.scores)
+        scores["t-inc"] = _score("t-inc", "org/a-hidden", "hub_fetch_error", reward=0.0)
+        del scores["t-ctl"]
+        judged = judged_trials(self.trials, scores)
+        for tid in ("t-inc", "t-ctl"):
+            row = next(t for t in judged if t["id"] == tid)
+            self.assertEqual(row["evals"], {})
+            self.assertNotIn("judge_mode", row)
+            self.assertIsNone(trial_metric(row, "reward"))
+
+    def test_inputs_are_not_mutated(self):
+        judged_trials(self.trials, self.scores)
+        self.assertEqual(self.trials[0]["evals"], {})
+
+    def test_control_comes_from_the_judge_and_difficulty_from_the_task(self):
+        base = {
+            "org/a-hidden": TaskLabel(difficulty="hard", is_control=True),
+            "org/b-hidden": TaskLabel(difficulty="easy", is_control=True),
+            "org/c-hidden": TaskLabel(difficulty="medium", is_control=True),
+        }
+        with unittest.mock.patch("leaderboard.core.metrics.task_labels", return_value=base):
+            labels = private_task_labels(PRIVATE, judged_trials(self.trials, self.scores))
+        self.assertEqual(labels["org/a-hidden"], TaskLabel("hard", is_control=False))
+        self.assertEqual(labels["org/b-hidden"], TaskLabel("easy", is_control=True))
+        # empty_report is an incident trial that scored 0, not a control.
+        self.assertEqual(labels["org/c-hidden"], TaskLabel("medium", is_control=False))
+
+    def test_task_trials_disagreeing_on_control_raise(self):
+        trials = [_hidden_trial("t1", "org/a-hidden"), _hidden_trial("t2", "org/a-hidden")]
+        scores = {
+            "t1": _score("t1", "org/a-hidden", "llm_judge", reward=1.0, rca_accuracy=1, hallucinate_any=0),
+            "t2": _score("t2", "org/a-hidden", JUDGE_CONTROL_MODE, reward=1.0, rca_accuracy=1),
+        }
+        base = {"org/a-hidden": TaskLabel(difficulty="hard", is_control=True)}
+        with unittest.mock.patch("leaderboard.core.metrics.task_labels", return_value=base):
+            with self.assertRaises(TaskLabelError):
+                private_task_labels(PRIVATE, judged_trials(trials, scores))
+
+    def test_task_with_no_judged_trial_raises(self):
+        trials = [_hidden_trial("t1", "org/a-hidden")]
+        base = {"org/a-hidden": TaskLabel(difficulty="hard", is_control=True)}
+        with unittest.mock.patch("leaderboard.core.metrics.task_labels", return_value=base):
+            with self.assertRaises(TaskLabelError):
+                private_task_labels(PRIVATE, judged_trials(trials, {}))
 
 
 class FormatMeasurementTests(unittest.TestCase):

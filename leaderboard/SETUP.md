@@ -134,18 +134,26 @@ Visibility must not run ahead of the dataset's: a public leaderboard over a
 private dataset shows scores nobody can reproduce or submit against. Both are
 public now.
 
-### The private leaderboard: what remains
+### The private leaderboard: how it differs
 
 [SUBMIT.md](SUBMIT.md#submitting-to-the-private-leaderboard) documents the
 flow for the held-out split — same `lb submit`, then `/judge` on the bot PR,
-then a row on the `orca-bench-private` board. What is in place: the dataset
-and the board exist (above); `lb filter` routes a private-split job to a
-`…-private.json` submission with `"board": "private"`; static analysis checks
-it against the private dataset's pin; `ci/submit.py` would post its row to the
-private board; and `leaderboard-judge.yml` scores it. What is **not**: static
-analysis stops every private submission at a failing **Private-split scoring**
-check (and `--write-metrics` refuses it), so none can be promoted until the
-item below lands. Remove that guard when it does.
+then a row on the `orca-bench-private` board. Everything below is in place;
+the two items record what had to change from the public flow and why, since
+each rests on something observed on the Hub rather than on the code alone.
+
+Where a private submission's number comes from, end to end: the intake PR's
+static analysis passes with **Private-split scoring** reading "pending
+`/judge`" (there is nothing to compute yet), promote's `--write-metrics`
+writes nothing for it, and the bot PR opens without metrics. `/judge` then
+commits `leaderboard/scores/<name>.json` and, in the same run, calls
+`static_analysis --scores … --write-metrics`, which refuses unless the scores
+cover every trial and otherwise writes the metrics into the submission on the
+bot branch. On merge, `ci/submit.py` re-checks the merged scores file against
+the submission's trials before posting the row, so a submission merged without
+a judge run, or on a partial one, gets no row. A push to the bot PR re-runs
+static analysis with the scores file if the PR head has one, so its sticky
+comment shows the metrics.
 
 1. ~~**Coverage must count unscored private trials.**~~ Done. Confirmed on
    the first uploaded private job (`6b469112-157f-5d55-a7c2-25417c2a226d`,
@@ -167,17 +175,25 @@ item below lands. Remove that guard when it does.
    what finished means. Any other error propagates before the verifier, so a
    trial with it (a setup `RuntimeError`) still does not cover: there is no
    report for `/judge` to score.
-2. **Metrics from `leaderboard/scores/`.** For a private submission the merge
-   job must compute the three published metrics from
-   `leaderboard/scores/<submission>.json` (written by `/judge`) rather than
-   from trial rewards, and refuse to merge a private submission that has no
-   scores file or whose scores do not cover every trial in `source_jobs`.
-   Note that `core/task_groups.py` cannot label private tasks as control or
-   incident: the `-hidden` `task.toml` keeps no `events` (whether an incident
-   happened *is* the answer), so every private task reads as control there.
-   The judge knows — its per-trial `mode` is `no_incident_llm_judge` for a
-   control task — so the incident/control split for the private board has to
-   come from the scores file, with only `difficulty` read from the task.
+2. ~~**Metrics from `leaderboard/scores/`.**~~ Done. A private submission's
+   three metrics are computed from `leaderboard/scores/<submission>.json`
+   (written by `/judge`) rather than from trial rewards, by the same
+   `compute_subset_metrics` the public board uses: `metrics.judged_trials`
+   puts each judge record where the Hub would have put the verifier's
+   `reward.json` — the row's `evals` — so a judged private trial reads
+   exactly like a verified public one. A record is required for every trial
+   and must not be an error mode (`llm_judge_error`, `hub_fetch_error`);
+   `metrics.scores_coverage_failure` refuses otherwise, in static analysis,
+   in `--write-metrics`, and again in `ci/submit.py` at merge.
+   `core/task_groups.py` cannot label private tasks as control or incident:
+   the `-hidden` `task.toml` keeps no `events` (whether an incident happened
+   *is* the answer), so every private task reads as control there. The judge
+   knows — its per-trial `mode` is `no_incident_llm_judge` for a control task
+   — so `metrics.private_task_labels` takes control/incident from the scores
+   file and only `difficulty` from the task (`empty_report` is an incident
+   trial that scored 0, not a control). Checked against the first uploaded
+   private job with a scores file rebuilt from the archived judge outputs:
+   324 records, 57 control / 267 incident, all three metrics computed.
 
 ### The package slug must stay lowercase
 

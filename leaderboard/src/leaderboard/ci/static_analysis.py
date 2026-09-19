@@ -45,6 +45,10 @@ from leaderboard.core.metrics import (
     compute_subset_metrics,
     format_resource_cells,
     format_metrics_table,
+    judged_trials,
+    load_scores,
+    private_task_labels,
+    scores_coverage_failure,
     submission_by_task,
     submission_coverage,
     metric_counts,
@@ -101,6 +105,9 @@ class Result:
     n_disqualified: int = 0
     n_credited: int = 0
     errors: Counter = field(default_factory=Counter)
+    # Private board, no scores yet: the metrics are computed by /judge on the
+    # bot PR, so the comment says so instead of showing an empty table.
+    metrics_pending: bool = False
 
     @property
     def passed(self) -> bool:
@@ -222,7 +229,9 @@ def _agent_override_msg(agent: dict) -> str:
     return ", ".join(_section_overrides(agent, _AGENT_OVERRIDES))
 
 
-def run(submission: dict, *, per_trial: bool = True) -> Result:
+def run(
+    submission: dict, *, per_trial: bool = True, scores: dict[str, dict] | None = None
+) -> Result:
     sf = submission["source_filter"]
     md = submission.get("metadata", {})
     board = submission_board(submission)
@@ -327,20 +336,27 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     res.n_scored = sum(len(rs) for rs in by_task.values())
     res.resources = compute_resource_metrics(trials)
 
-    if board is PRIVATE:
-        # Private-split metrics have to come from the /judge scores committed
-        # to leaderboard/scores/, not from trial rewards (there are none), and
-        # that is not wired up yet -- see leaderboard/SETUP.md, "The private
-        # leaderboard: what remains". Failing an explicit check keeps a private
-        # submission from being promoted with a nonsense row, and says why.
+    if board is PRIVATE and scores is None:
+        # Private-split metrics come from the /judge scores committed to
+        # leaderboard/scores/ on the bot PR, not from trial rewards (there are
+        # none). Before /judge has run there is nothing to compute; passing
+        # here is what lets the intake PR be promoted, and the merge step
+        # refuses a private submission whose scores never arrived.
         res.checks.append(
-            Check(
-                "Private-split scoring",
-                False,
-                "not yet supported: metrics for the private board come from "
-                "/judge scores, pending (leaderboard/SETUP.md)",
-            )
+            Check("Private-split scoring", True, "pending /judge on the bot PR")
         )
+        res.metrics_pending = True
+    elif board is PRIVATE:
+        # /judge has run: every trial needs a verdict before a mean over them
+        # can be published as the submission's number.
+        cov_bad = scores_coverage_failure(trials, scores)
+        res.checks.append(Check("Judge scores cover every trial", not cov_bad, cov_bad))
+        if not cov_bad:
+            judged = judged_trials(trials, scores)
+            labels = private_task_labels(board, judged)
+            res.n_scored = sum("judge_mode" in t for t in judged)
+            res.metrics = compute_subset_metrics(judged, submission, labels)
+            res.metric_counts = metric_counts(judged, labels)
     else:
         # The same breakdown compute_submission_metrics publishes, so the PR
         # comment and the stored row can't disagree.
@@ -403,7 +419,7 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
         out.append(f"| **Total** | **{result.n_trials}** |\n")
         # Without this the reader sees a Total that the accuracy below is not a
         # mean over. Unscored trials are dropped from the metric, so say so.
-        if result.n_scored != result.n_trials:
+        if result.n_scored != result.n_trials and not result.metrics_pending:
             out.append(
                 f"{result.n_trials - result.n_scored} trial(s) produced no verdict "
                 f"and are excluded from the metrics below, which are computed over "
@@ -416,9 +432,17 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
             f"{md.get('model_display')} [{md.get('model_org')}] · {effort} · "
             f"{md.get('agent_display')} [{md.get('agent_org')}] · {md.get('date')}\n"
         )
-        out.append(
-            "\n".join(format_metrics_table(result.metrics, result.metric_counts)) + "\n"
-        )
+        if result.metrics_pending:
+            out.append(
+                "Private-split trials carry no verdict on the Hub. The metrics are "
+                "computed once a maintainer runs `/judge` on the promoted PR, from "
+                "the scores it commits to `leaderboard/scores/`.\n"
+            )
+        else:
+            out.append(
+                "\n".join(format_metrics_table(result.metrics, result.metric_counts))
+                + "\n"
+            )
         # The blank line above matters: without it markdown folds the resource
         # rows into the metrics table.
         out.append(
@@ -453,28 +477,43 @@ def main() -> None:
         "--write-metrics",
         action="store_true",
         help="Compute metrics (honoring disqualified/credited trials), write them into the "
-        "submission JSON in place, print them, and exit -- used by promote.",
+        "submission JSON in place, print them, and exit -- used by promote, and by "
+        "/judge (with --scores) for the private board.",
+    )
+    ap.add_argument(
+        "--scores",
+        type=Path,
+        default=None,
+        help="The /judge scores file for a private-board submission "
+        "(leaderboard/scores/<name>.json). Required to compute its metrics; "
+        "without it a private submission checks as 'pending /judge'.",
     )
     args = ap.parse_args()
 
     submission = json.loads(args.path.read_text())
+    scores = load_scores(args.scores) if args.scores is not None else None
     if args.write_metrics:
-        if submission_board(submission) is PRIVATE:
-            # Unreachable from CI (promote only runs on green, and `run` fails
-            # every private submission above), but a maintainer can call this
-            # by hand: refuse rather than write metrics computed from trial
-            # rewards the -hidden tasks never produce.
-            sys.exit(
-                "private-split metrics must come from the /judge scores in "
-                "leaderboard/scores/, which is not wired up yet "
-                "(leaderboard/SETUP.md); refusing to write metrics."
+        if submission_board(submission) is PRIVATE and scores is None:
+            # Promote runs --write-metrics on every green submission, before
+            # /judge can have run. There is nothing to compute yet, and metrics
+            # from trial rewards would be nonsense (the -hidden tasks never
+            # produce any), so leave the file alone; /judge writes them later.
+            print(
+                "private-board submission: metrics are computed by /judge from "
+                "leaderboard/scores/<name>.json (pass --scores); nothing written."
             )
-        submission["metrics"] = compute_submission_metrics(submission)
+            return
+        try:
+            submission["metrics"] = compute_submission_metrics(submission, scores=scores)
+        except ValueError as exc:
+            # A partial judge run: the submission keeps no metrics, so the
+            # merge step will not post it. The message says what to do.
+            sys.exit(f"metrics not written: {exc}")
         args.path.write_text(json.dumps(submission, indent=2) + "\n")
         print(json.dumps(submission["metrics"]))
         return
 
-    result = run(submission, per_trial=not args.no_per_trial)
+    result = run(submission, per_trial=not args.no_per_trial, scores=scores)
     ctx = {
         "repo": os.environ.get("GITHUB_REPOSITORY", "ORCA-bench/ORCA-bench"),
         "run_id": os.environ.get("GITHUB_RUN_ID", "0"),

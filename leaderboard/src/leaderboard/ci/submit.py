@@ -25,11 +25,13 @@ from pathlib import Path
 
 from harbor.auth.constants import SUPABASE_URL
 
-from leaderboard.core.hub import Board, submission_board
+from leaderboard.core.hub import PRIVATE, Board, submission_board, submission_trials
 from leaderboard.core.metrics import (
     RESOURCE_HEADERS,
     format_metrics_table,
     format_resource_cells,
+    load_scores,
+    scores_coverage_failure,
 )
 
 # Hub metadata_schema allows only these keys (additionalProperties: false).
@@ -163,16 +165,41 @@ def render_comment(row: dict, board: Board) -> str:
     )
 
 
+def scores_path(submission_path: Path) -> Path:
+    """Where /judge commits a submission's scores: `leaderboard/scores/<name>`,
+    next to `leaderboard/submissions/<name>` (leaderboard-judge.yml)."""
+    return submission_path.parent.parent / "scores" / submission_path.name
+
+
+def private_scores_failure(submission: dict, submission_path: Path) -> str:
+    """Why a private submission must not be posted, or "" if it may be.
+
+    Its metrics were written by /judge from leaderboard/scores/<name>.json; the
+    merge carried both files to main. Re-check here that the file is present
+    and still covers every trial, so a submission merged without a judge run,
+    or on a partial one, gets no row rather than a number over a subset.
+    """
+    path = scores_path(submission_path)
+    if not path.is_file():
+        return f"no judge scores at {path}; run /judge on the bot PR before merging"
+    return scores_coverage_failure(submission_trials(submission), load_scores(path))
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         sys.exit("usage: submit.py <submission.json>")
-    submission = json.loads(Path(sys.argv[1]).read_text())
+    submission_path = Path(sys.argv[1])
+    submission = json.loads(submission_path.read_text())
     if not submission.get("metrics"):
         sys.exit("submission has no computed metrics; refusing to submit")
     if not submission.get("trials"):
         sys.exit(
             "submission has no materialized trials (promote/clone did not run?); refusing to submit"
         )
+    if submission_board(submission) is PRIVATE:
+        bad = private_scores_failure(submission, submission_path)
+        if bad:
+            sys.exit(f"private-board submission: {bad}; refusing to submit")
     row = submit_row(submission, os.environ["HARBOR_API_KEY"])
     print(render_comment(row, submission_board(submission)))
 

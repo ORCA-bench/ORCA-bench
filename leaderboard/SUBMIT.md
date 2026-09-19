@@ -214,14 +214,6 @@ they are what the leaderboard record points at.
 
 ## Submitting to the private leaderboard
 
-> [!NOTE]
-> The private board is still being brought up. The dataset and the board exist,
-> and `lb submit` accepts a private-split job and routes it to the private
-> board, but CI does not yet score one: static analysis stops every private
-> submission at a failing **Private-split scoring** check, so it cannot be
-> promoted. [SETUP.md](SETUP.md#the-private-leaderboard-what-remains) tracks
-> what has to land before it opens. This note goes away when it does.
-
 The public split's answers travel with the tasks: `harbor run` puts every
 `tests/expected.json` and `tests/rubrics/` on the machine that runs them, so
 anyone who has run the public board holds the root cause for all 755 tasks.
@@ -288,7 +280,10 @@ files; do not hand-merge them, they are different boards.
 dataset-ref, execution-settings and per-trial digest checks, with coverage
 measured against the 324 private tasks. Because private trials carry no
 verdict by construction, the "unscored trials are excluded" rule does not
-apply to them — coverage counts every trial that finished. On green, CI clones
+apply to them — coverage counts every trial that reached its verifier (a
+trial that errored during setup still does not; one whose agent timed out
+does, as on the public board). The comment's **Private-split scoring** check
+reads "pending `/judge`" and no metrics are shown yet. On green, CI clones
 your trials into leaderboard-owned copies and opens the bot PR, as above.
 
 **Judging** is the extra step. A maintainer comments `/judge` on the bot PR.
@@ -305,17 +300,22 @@ When it finishes:
   `rca_accuracy` / `hallucinate_any` where defined — and never the flag, the
   rubric or the judge's reasoning, so publishing it leaks nothing about the
   held-out answers;
+- the three leaderboard metrics are computed from those scores and written
+  into the submission on the bot branch — `/judge` refuses to write them
+  unless every trial has a verdict;
 - a sticky **LLM Judge** comment summarizes the run: trial counts by judge
-  mode, errored trials, and the incident-only RCA accuracy and hallucination
-  rate.
+  mode, errored trials, the incident-only RCA accuracy and hallucination
+  rate, and the leaderboard metrics as written.
 
 A trial the judge could not score (`llm_judge_error`, `hub_fetch_error`)
 shows up in that summary as errored; the maintainer re-runs `/judge` before
 merging rather than merge a partially judged submission.
 
 **Review + merge** then proceeds as for the public board, with the metrics
-computed from the committed scores instead of the trials' own rewards. The
-published columns are the same three — RCA Accuracy (Medium), RCA Accuracy
+already computed from the committed scores instead of the trials' own rewards.
+The published columns are the same three — RCA Accuracy (Medium), RCA Accuracy
 (Hard), Hallucination Rate — over incident tasks only, ranked by RCA Accuracy
 (Medium), and the row lands on the `orca-bench-private` leaderboard on the hub
-rather than the public one.
+rather than the public one. Merging a private submission that was never judged,
+or judged only partially, posts no row: the merge step re-checks the scores
+file against the submission's trials first.
