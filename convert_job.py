@@ -18,6 +18,15 @@ Does three things in one pass:
    published package task and synthesizes the per-trial ``lock.json`` that
    harbor 0.6.3 never wrote, then writes the job-level files upload requires.
 
+   A trial routed to a ``-hidden`` package is also made to look like a run of
+   that package rather than of its oracle twin: ``verifier/`` is cut down to
+   ``report.md`` plus an empty ``reward.json`` (what ``HIDDEN_TEST_SH``
+   writes), and ``result.json`` publishes an empty rewards map. The oracle
+   run's ``reward.txt``/``details.json`` and its verifier transcript are
+   dropped because they say whether an incident happened and how the report
+   scored -- the very things the hidden split withholds. Scoring of these
+   trials happens out-of-band (``/judge``), never from the uploaded files.
+
 ``--src``/``--dst`` accept either a single job dir or a root containing job
 dirs; the layout is detected automatically and mirrored.
 
@@ -59,6 +68,12 @@ from typing import Any
 
 DATASET_ORG = "orca-bench"
 PKG_PREFIX = f"{DATASET_ORG}/"
+
+# Mirrors build_harbor_tasks.HIDDEN_SUFFIX: the answer-free twin of a private
+# task is published as ``<hash>-hidden``.
+HIDDEN_SUFFIX = "-hidden"
+# The one verifier/ file a hidden task's test.sh preserves from the container.
+HIDDEN_VERIFIER_KEEP = {"report.md"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -198,10 +213,30 @@ def package_task_config(pkg: str, digest: str, dataset: str) -> dict[str, Any]:
     }
 
 
+def scrub_hidden_verifier(trial_dir: Path) -> None:
+    """Reduce an oracle run's ``verifier/`` to what a ``-hidden`` run leaves.
+
+    Keeps ``report.md`` and writes ``reward.json`` as ``{}``; everything else
+    (``reward.txt``, ``details.json``, ``log.txt``, ``test-stdout.txt``, ...)
+    is the answer-bearing verifier's output and goes.
+    """
+    vdir = trial_dir / "verifier"
+    vdir.mkdir(exist_ok=True)
+    for child in vdir.iterdir():
+        if child.name in HIDDEN_VERIFIER_KEEP:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    (vdir / "reward.json").write_text("{}")
+
+
 def convert_trial(trial_dir: Path, pkg: str, digest: str, dataset: str) -> None:
     """Rewrite one trial's config/result and write the lock.json upload requires."""
     new_name = f"{PKG_PREFIX}{pkg}"
     task_cfg = package_task_config(pkg, digest, dataset)
+    hidden = pkg.endswith(HIDDEN_SUFFIX)
 
     cfg = json.loads((trial_dir / "config.json").read_text())
     cfg["task"] = task_cfg
@@ -212,6 +247,11 @@ def convert_trial(trial_dir: Path, pkg: str, digest: str, dataset: str) -> None:
     res["task_checksum"] = digest.removeprefix("sha256:")
     res["source"] = dataset
     res["config"]["task"] = task_cfg
+    if hidden:
+        # `harbor upload` publishes result.json's rewards, not reward.json's,
+        # so the two must agree on "no score".
+        scrub_hidden_verifier(trial_dir)
+        res["verifier_result"] = {"rewards": {}}
 
     lock = {
         "schema_version": 1,

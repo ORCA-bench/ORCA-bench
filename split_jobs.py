@@ -10,13 +10,18 @@ differ per split (scoped dataset list, trial count) — while every trial dir is
 Trial membership comes from each trial's ``lock.json`` ``task.source``, which the
 conversion step set to the published dataset name.
 
+``--out`` names are looked up in ``split.json``'s ``splits`` and then ``views``:
+a tree converted with ``convert_job.py --private hidden`` (the default) carries
+its private trials under the ``private-hidden`` view's dataset, not the
+``private-internal`` split's.
+
 Examples::
 
     uv run python split_jobs.py \
         --src .../jobs-sub-backfilled-scores-2 \
         --split .../out-0804/harbor-split/split.json \
         --out public=.../jobs-sub-backfilled-scores-public-2 \
-        --out private=.../jobs-sub-backfilled-scores-private-2
+        --out private-hidden=.../jobs-sub-backfilled-scores-private-2
 """
 
 import argparse
@@ -80,15 +85,16 @@ def main() -> None:
     args = parse_args()
     split = json.loads(args.split.read_text())
 
-    # split name -> output root, resolved through split.json's dataset_name
+    # split/view name -> output root, resolved through split.json's dataset_name
+    sides = {**split.get("views", {}), **split["splits"]}
     targets: dict[str, Path] = {}
     for item in args.out:
         name, _, path = item.partition("=")
-        if name not in split["splits"]:
+        if name not in sides:
             raise SystemExit(
-                f"split {name!r} not in {args.split} ({list(split['splits'])})"
+                f"split {name!r} not in {args.split} ({sorted(sides)})"
             )
-        targets[split["splits"][name]["dataset_name"]] = Path(path)
+        targets[sides[name]["dataset_name"]] = Path(path)
     for ds, root in targets.items():
         print(f"{ds} -> {root}")
 

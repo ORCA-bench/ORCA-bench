@@ -25,7 +25,10 @@ cannot drift from the verifier.
 Trials are paired with score files by name: ``--scores-dir`` is searched
 recursively for ``judge-<model>-<effort>-<trial_dir_name>.json``. A trial with
 no score file is skipped (reported, not an error); a trial matching more than
-one is skipped as ambiguous.
+one is skipped as ambiguous. Trials converted to a ``-hidden`` package
+(``convert_job.py --private hidden``) are skipped outright even when a score
+file exists: they must upload unscored, and ``reward-details.json`` would
+carry the root cause the hidden split withholds.
 
 For each paired trial this writes ``reward.json`` + ``reward-details.json``,
 repoints ``result.json``'s ``verifier_result.rewards`` at the same scores, and
@@ -84,10 +87,26 @@ _WRAPPER_KEYS = frozenset(
 
 STALE_FILES = ("reward.txt", "details.json")
 
+# Mirrors build_harbor_tasks.HIDDEN_SUFFIX.
+HIDDEN_SUFFIX = "-hidden"
+
 # The trial-level result file harbor writes next to ``verifier/``. ``harbor
 # upload`` parses it into a ``TrialResult`` and publishes its
 # ``verifier_result.rewards`` as the Hub trial's reward.
 RESULT_FILE = "result.json"
+
+
+def is_hidden_trial(trial_dir: Path) -> bool:
+    """True if ``result.json`` names a ``-hidden`` package task.
+
+    A trial with no ``result.json`` is not hidden; it fails later, in
+    :func:`backfill_trial`, with the same error it always did.
+    """
+    result_path = trial_dir / RESULT_FILE
+    if not result_path.exists():
+        return False
+    task_name = json.loads(result_path.read_text()).get("task_name", "")
+    return task_name.endswith(HIDDEN_SUFFIX)
 
 
 def build_score_index(
@@ -270,8 +289,11 @@ def main() -> None:
     )
 
     modes: Counter[str] = Counter()
-    skipped, failed, converted = [], [], []
+    skipped, hidden, failed, converted = [], [], [], []
     for trial_dir in trial_dirs:
+        if is_hidden_trial(trial_dir):
+            hidden.append(trial_dir.name)
+            continue
         if trial_dir.name in ambiguous:
             names_ = [p.name for p in ambiguous[trial_dir.name]]
             logger.warning(f"{trial_dir.name}: ambiguous, {len(names_)} score files")
@@ -292,6 +314,8 @@ def main() -> None:
     logger.info(f"{verb}: {sum(modes.values())}  by mode: {dict(modes)}")
     if skipped:
         logger.info(f"skipped (no score file): {len(skipped)} e.g. {skipped[:3]}")
+    if hidden:
+        logger.info(f"skipped (-hidden, uploads unscored): {len(hidden)}")
     if failed:
         logger.warning(f"failed: {len(failed)} e.g. {failed[:3]}")
 

@@ -186,9 +186,14 @@ uv run python convert_job.py \
 
 By default private-split trials are pointed at `orca-bench/orca-bench-private`
 (the answer-free `<hash>-hidden` packages), the form a submitter's own run of the
-held-out split would reference. Pass `--private internal` to point them at
+held-out split would reference. Those trials are also made to look like a run of
+the hidden task rather than of its oracle twin: `verifier/` is cut down to
+`report.md` plus an empty `reward.json`, and `result.json` publishes an empty
+rewards map — the oracle run's `reward.txt`/`details.json` and verifier transcript
+say whether an incident happened and how the report scored, which is exactly
+what the hidden split withholds. Pass `--private internal` to point them at
 `orca-bench/orca-bench-private-internal` (the answer-bearing `<hash>` packages)
-instead.
+instead, with the oracle output left in place.
 
 > [!NOTE]
 > Trials whose task is in no split are excluded before the copy. That is the
@@ -203,7 +208,11 @@ instead.
 `verifier/reward.txt` plus a `verifier/details.json` summary with no rubric
 detail. Rewrite each `verifier/` dir into the current format by recovering
 the judge result from the `judge-*.json` that `run_llm_judge.py` wrote for that
-trial, so the verdicts are reused as-is and no LLM calls are made.
+trial, so the verdicts are reused as-is and no LLM calls are made. This only
+touches the public trials: a trial converted to a `-hidden` package is skipped
+even when a score file exists for it, since it must upload unscored and
+`reward-details.json` would carry the root cause. Private-split scores reach
+the board through `/judge` instead.
 
 ```bash
 uv run python backfill_verifier_outputs.py \
