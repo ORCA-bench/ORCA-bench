@@ -2,51 +2,109 @@
 
 1. Create new dataset:
 
-- Tasks: update the Harbor tasks and follow the provided hint to publish them to Harbor hub
+The published datasets are built from `out-0919`. Its `task_specs/` is a
+**pruned copy** of the 2026-06-19 spec run, not a fresh one: `generate_task_specs.py`
+is not deterministic, so a fresh run renders incident phrasings the published
+split never saw, and letting them into the shuffle would re-cut the partition.
+`out-0919/task_specs` is `out-0619-3/task_specs` restricted to the 2026-05-13
+task set (`tasks.csv`, a copy of `out-0513/harbor/tasks.csv`) with the `medium`
+tier dropped — 1,079 specs (353 easy / 381 hard / 345 universal), exactly the
+tasks the four manifests pin. `answers/` and `json/` are symlinked; the build
+looks them up per spec, so a superset is fine.
 
 ```bash
-uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
+mkdir out-0919 out-0919/task_specs
+OTEL=/root/benchmark/src/sre-agent/examples/otel-demo
+ln -s $OTEL/out-0619-3/answers out-0919/answers
+ln -s $OTEL/share-2w/json     out-0919/json
+uv run python - <<'EOF'
+import csv, shutil
+from pathlib import Path
+keep = {r["task_id"] for r in csv.DictReader(open("tasks.csv")) if r["granularity"] != "medium"}
+src = Path("/root/benchmark/src/sre-agent/examples/otel-demo/out-0619-3/task_specs")
+for p in sorted(src.glob("*.json")):
+    if p.stem in keep:
+        shutil.copy2(p, Path("out-0919/task_specs") / p.name)
+EOF
+```
+
+Specs carry the answer key (`flag`, `incident_dt`, `snapshot_name`), as does
+`tasks.csv` (`flag`, `root_causes`), so both stay local: `out-*/` and
+`/tasks.csv` are gitignored. Back them up — they are what makes the split
+reproducible.
+
+- Tasks only: build the Harbor task tree. Without `--split` no dataset manifest
+  is written; the tasks are first-class registry packages and can be published
+  standalone.
+
+```bash
+uv run python build_harbor_tasks.py -od out-0919 -dd data-0418 \
   --templates-dir harbor-template --force
 ```
 
-- Dataset(s): re-run the build with `--split` to write `split.json` plus four
-  dataset manifests, then publish each one. Names derive from `--org`, so the
-  full build and the public split can never claim the same name — a collision
-  that would otherwise republish the public dataset with the private tasks
-  included.
+- Dataset(s): build with `--split` to also write `split.json` plus four dataset
+  manifests. Names derive from `--org`, so the full build and the public split
+  can never claim the same name — a collision that would otherwise republish
+  the public dataset with the private tasks included.
 
-| Dataset | Tasks | Contents |
-|---|---|---|
-| `orca-bench/orca-bench` | 755 | public split |
-| `orca-bench/orca-bench-private-oracle` | 324 | held-out split, answers included |
-| `orca-bench/orca-bench-private` | 324 | the same tasks with the answers removed |
-| `orca-bench/orca-bench-verified` | 40 | verified subset of the public split |
+| Dataset | Tasks | Contents | Visibility |
+|---|---|---|---|
+| `orca-bench/orca-bench` | 755 | public split | public |
+| `orca-bench/orca-bench-private-internal` | 324 | held-out split, answers included | **private** |
+| `orca-bench/orca-bench-private` | 324 | the same tasks with the answers removed (`-hidden`) | public |
+| `orca-bench/orca-bench-verified` | 40 | verified subset of the public split | public |
 
 ```bash
-uv run python build_harbor_tasks.py -od out-0804 -dd data-0418 \
+uv run python build_harbor_tasks.py -od out-0919 -dd data-0418 \
   --templates-dir harbor-template --force --split \
-  --allowlist-csv tasks.csv \
   --verified-json sampled_tasks.json \
   --dataset-author "Albert Gong <ag2435@cornell.edu>"
 
-# Writes out-0804/harbor/split.json, the answer-free tasks/<task_id>-hidden/
-# dirs, and out-0804/harbor/datasets/{public,private-oracle,private,verified}/
-uv run harbor add out-0804/harbor/tasks --scan
-uv run harbor publish out-0804/harbor/datasets/public --private
-uv run harbor publish out-0804/harbor/datasets/private-oracle --private
-uv run harbor publish out-0804/harbor/datasets/private --private
-uv run harbor publish out-0804/harbor/datasets/verified --private
+# Writes out-0919/harbor/split.json, the answer-free tasks/<task_id>-hidden/
+# dirs, and out-0919/harbor/datasets/{public,private-internal,private,verified}/.
+# With the pruned specs, harbor/tasks/ holds exactly the 1,403 task dirs the
+# manifests pin (755 + 324 + 324 hidden) and split.json's excluded_task_ids is
+# empty. The build reproduces the published split.json exactly.
 ```
 
-> [!IMPORTANT]
-> `--allowlist-csv` freezes the task set the split is drawn from. The spec
-> generator is not deterministic, so a rebuild can render incidents the
-> published split never saw; letting them into the shuffle would re-cut the
-> partition. The published split used the 2026-05-13 `tasks.csv` (1449 tasks,
-> a copy of `out-0513/harbor/tasks.csv`). That file is **not committed** — its
-> `flag` / `root_causes` columns are the answer key for the held-out private
-> tasks — so keep it out of git (`.gitignore` covers `/tasks.csv`) and pass it
-> locally. With it, the build reproduces `split.json` exactly.
+Publish each dataset's **tasks first, then its manifest**. `harbor publish
+<dataset dir>` uploads only task subdirectories *inside* that directory, and
+there are none — the tasks live in `harbor/tasks/`. They cannot all go up at
+one visibility either: the 324 private-split oracle tasks (the
+`private-internal` dataset) must stay **private**, while the public split and
+the `-hidden` twins are public. `split.json` lists the task ids per split, so
+select from it, then publish each manifest with `--no-tasks`.
+`harbor publish <dataset dir> --public` asks for confirmation (`y`).
+
+```bash
+SPLIT=out-0919/harbor/split.json
+dirs() { jq -r "$1" "$SPLIT" | sed 's#^#out-0919/harbor/tasks/#'; }
+
+uv run harbor publish $(dirs '.splits["private-internal"].tasks[].task_id') --private
+uv run harbor publish $(dirs '.splits.public.tasks[].task_id, (.views["private-hidden"].tasks[].task_id + "-hidden")') --public
+# verified is a subset of public, so its tasks are already up
+
+uv run harbor publish out-0919/harbor/datasets/private-internal --private --no-tasks
+uv run harbor publish out-0919/harbor/datasets/public --public --no-tasks
+uv run harbor publish out-0919/harbor/datasets/private --public --no-tasks
+uv run harbor publish out-0919/harbor/datasets/verified --public --no-tasks
+```
+
+Publishing is idempotent on content: a task or dataset version whose hash is
+already in the registry is skipped. The manifest's pinned digests are uploaded
+as-is — `harbor publish` recomputes digests only for task directories *inside*
+the dataset directory, and there are none — so the dataset points at exactly
+the task versions `build_harbor_tasks.py` pinned. Note that a skip does **not**
+change visibility: a task first published `--private` stays private until
+toggled, and vice versa — which is why the private-internal tasks go up first,
+on their own, with `--private`.
+
+> [!CAUTION]
+> Never `harbor publish out-0919/harbor/tasks --public`. That tree holds the
+> 324 private-split oracle tasks, whose `tests/expected.json` and
+> `tests/rubrics/` are the held-out answers; publishing it wholesale as public
+> hands them out. The 755 public-split oracle tasks are public by design —
+> their answers are released — which is exactly why the private split exists.
 
 > [!IMPORTANT]
 > `orca-bench/orca-bench-private` is the split to hand to submitters. Its tasks
@@ -57,7 +115,7 @@ uv run harbor publish out-0804/harbor/datasets/verified --private
 > `incident_time`, `flag` and `events` included, names or dates the root
 > cause. (`reported_styled` is the phrasing the prompt already shows; the ISO
 > `reported` field is `incident_time + offset_minutes`, so it is not kept.) `harbor run` puts the task directory on the machine that
-> runs it, so publishing `-private-oracle` to submitters would hand over the
+> runs it, so publishing `-private-internal` to submitters would hand over the
 > answers for all 324 tasks.
 >
 > The hidden tasks are not scored in-container. Harbor requires every task to
@@ -69,7 +127,7 @@ uv run harbor publish out-0804/harbor/datasets/verified --private
 > Hub:
 >
 > ```bash
-> uv run python run_llm_judge.py -od out-0804 --job <hidden-job-uuid>
+> uv run python run_llm_judge.py -od out-0919 --job <hidden-job-uuid>
 > ```
 >
 > One thing to confirm on the first real run: how the Hub stores an empty
@@ -88,8 +146,8 @@ uv run harbor publish out-0804/harbor/datasets/verified --private
 
 > [!NOTE]
 > `split.json` records the disjoint partition under `splits` (`public`,
-> `private-oracle`) and the overlapping selections under `views` (`verified` is
-> a subset of public; `private-hidden` repackages private-oracle under new
+> `private-internal`) and the overlapping selections under `views` (`verified`
+> is a subset of public; `private-hidden` repackages private-internal under new
 > package names). `convert_job.py` assigns `routing[task_id]` while looping over
 > `splits`, so an entry sharing a task_id there would silently reroute those
 > trials to whichever dataset iterated last.
@@ -114,7 +172,7 @@ Hub**, rsyncs only the surviving trial dirs to `--dst`, then rewrites
 uvx --from harbor python convert_job.py \
   --src /root/benchmark/src/sre-agent/examples/otel-demo/jobs-sub \
   --dst /mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-2 \
-  --split /root/benchmark/src/ORCA-bench/out-0804/harbor/split.json
+  --split /root/benchmark/src/ORCA-bench/out-0919/harbor/split.json
 ```
 
 > [!NOTE]
@@ -175,7 +233,7 @@ so no trial payload is duplicated.
 ```bash
 uv run python split_jobs.py \
   --src /mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-2 \
-  --split out-0804/harbor/split.json \
+  --split out-0919/harbor/split.json \
   --out public=/mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-public-2 \
   --out private=/mnt/volume_nyc2_1777578495585/data/sre-agent/examples/otel-demo/jobs-sub-backfilled-scores-private-2
 ```
