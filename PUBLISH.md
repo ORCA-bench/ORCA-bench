@@ -191,9 +191,13 @@ held-out split would reference. Pass `--private internal` to point them at
 instead.
 
 > [!NOTE]
-> Trials whose task is in no split — the `-02-medium` tasks — have no published
-> Hub task to point at and are excluded before the copy. Of 1,449 trials per job,
-> 1,079 convert (755 public + 324 private) and 370 are dropped.
+> Trials whose task is in no split are excluded before the copy. That is the
+> `medium` tier (`…-NN-medium_…` task ids): those tasks are in no dataset, and
+> `out-0919` does not even build them, so `split.json` never names them. This
+> only bites jobs run against the older 1,449-task builds — the paper's runs in
+> `jobs-sub`, one trial per task: 1,079 convert (755 public + 324 private) and
+> 370 drop. A job run against the published dataset has no medium trials and
+> loses nothing.
 
 3. Trials scored before the verifier emitted `reward.json` carry a bare-float
 `verifier/reward.txt` plus a `verifier/details.json` summary with no rubric
