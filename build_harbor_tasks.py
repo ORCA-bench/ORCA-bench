@@ -25,14 +25,15 @@ public split can never claim the same name)::
     harbor/datasets/private/           <org>/<org>-private
     harbor/datasets/verified/          <org>/<org>-verified   # --verified-json only
 
-Only tasks listed in ``--allowlist-csv`` (required with ``--split``) enter the
-split; built tasks missing from it are recorded under ``excluded_task_ids`` and
-belong to no dataset. The spec generator is not deterministic across runs, so
-without the allowlist a rebuild would shuffle a different incident set and
-change the partition. The published split was drawn from the frozen 2026-05-13
-``tasks.csv`` (1449 tasks). That file is deliberately **not** committed: its
-``flag`` / ``root_causes`` columns are the answer key for the held-out private
-tasks, so it is kept out of this public repo and supplied locally.
+The split is drawn from whatever ``task_specs/`` holds, so the spec set is
+what freezes it. ``generate_task_specs.py`` is not deterministic across runs --
+a fresh run renders incident phrasings the published split never saw, and
+letting them into the shuffle would move every incident drawn after them and
+re-cut the partition. The published split is therefore rebuilt from a pruned
+spec directory (``out-0919/task_specs``: the 2026-06-19 specs restricted to the
+2026-05-13 task set, ``medium`` dropped), not from a fresh spec run -- see
+PUBLISH.md. Specs carry the answer key (``flag``, ``incident_dt``,
+``snapshot_name``), so that directory stays local like the rest of ``out-*/``.
 
 ``--split`` also renders an answer-free duplicate of every private-split task
 at ``harbor/tasks/<task_id>-hidden/``, published as ``<hash>-hidden``. The
@@ -86,7 +87,6 @@ Examples::
     # Build and split into public / private / verified dataset manifests
     uv run python build_harbor_tasks.py -od OUTPUT_DIR -dd DATA_DIR \
       --templates-dir harbor-template --force --split \
-      --allowlist-csv tasks.csv \
       --verified-json human-eval-sample/output/sampled_tasks.json \
       --dataset-author "Albert Gong <ag2435@cornell.edu>"
 
@@ -765,21 +765,6 @@ def load_pinned_qids(verified_json: Path, tasks: list[Task]) -> set[str]:
     return pinned
 
 
-def load_allowlist(allowlist_csv: Path) -> set[str]:
-    """Read the ``task_id`` column of a ``tasks.csv``-shaped allowlist."""
-    if not allowlist_csv.is_file():
-        raise FileNotFoundError(
-            f"allowlist missing: {allowlist_csv} -- pass --allowlist-csv pointing "
-            "at a tasks.csv whose task_id column lists the tasks to split"
-        )
-    with allowlist_csv.open(newline="") as f:
-        allowed = {row["task_id"] for row in csv.DictReader(f)}
-    if not allowed:
-        raise ValueError(f"allowlist has no task_id rows: {allowlist_csv}")
-    logger.info(f"Read {len(allowed)} allowlisted task id(s) from {allowlist_csv}")
-    return allowed
-
-
 # ───────────────────────────── Splitting ─────────────────────────────
 def split_by_incident(
     tasks: list[Task], pinned_qids: set[str], frac: float, seed: int
@@ -1150,7 +1135,6 @@ def write_splits(
     org: str,
     frac: float,
     seed: int,
-    allowlist_csv: Path,
     verified_json: Path | None,
     authors: list[Author],
 ) -> None:
@@ -1163,25 +1147,6 @@ def write_splits(
     keeps the slug lowercase (the registry validates package selectors against
     a lowercase-only pattern).
     """
-    # The allowlist freezes the task set the split is drawn from. The spec
-    # generator is not deterministic run to run, so a rebuild can render
-    # incidents the published split never saw; letting those into the shuffle
-    # would move every incident after them and silently re-cut the partition.
-    allowed = load_allowlist(allowlist_csv)
-    unlisted = [t for t in tasks if t.task_id not in allowed]
-    tasks = [t for t in tasks if t.task_id in allowed]
-    if unlisted:
-        by_gran = Counter(t.granularity for t in unlisted)
-        logger.warning(
-            f"Excluding {len(unlisted)} built task(s) not in {allowlist_csv}: "
-            f"{dict(sorted(by_gran.items()))}"
-        )
-    if missing := allowed - {t.task_id for t in tasks}:
-        logger.warning(
-            f"{len(missing)} allowlisted task id(s) were not built: "
-            f"{sorted(missing)[:3]}{'...' if len(missing) > 3 else ''}"
-        )
-
     # Only the published strata are split. A build can legitimately contain
     # other granularities -- `medium` tasks are rendered but deliberately never
     # published -- and they belong to no dataset. Dropping them here (loudly)
@@ -1189,17 +1154,16 @@ def write_splits(
     # assertion meaningful over the tasks that ARE being split. This guard
     # replaces the granularity validation that used to live in the standalone
     # splitter's load_tasks.
-    unpublished = [t for t in tasks if t.granularity not in GRANULARITIES]
+    skipped = [t for t in tasks if t.granularity not in GRANULARITIES]
     tasks = [t for t in tasks if t.granularity in GRANULARITIES]
-    if unpublished:
-        by_gran = Counter(t.granularity for t in unpublished)
+    if skipped:
+        by_gran = Counter(t.granularity for t in skipped)
         logger.warning(
-            f"Excluding {len(unpublished)} task(s) from the split -- granularity not "
+            f"Excluding {len(skipped)} task(s) from the split -- granularity not "
             f"in {GRANULARITIES}: {dict(sorted(by_gran.items()))}"
         )
     if not tasks:
         raise ValueError(f"no tasks left to split (granularities: {GRANULARITIES})")
-    skipped = unlisted + unpublished
 
     pinned_qids = load_pinned_qids(verified_json, tasks) if verified_json else set()
     public, private = split_by_incident(tasks, pinned_qids, frac, seed)
@@ -1244,10 +1208,9 @@ def write_splits(
                 "harbor_dir": str(task_root),
                 "frac": frac,
                 "seed": seed,
-                "allowlist_csv": str(allowlist_csv),
                 "counts": table,
-                # Built tasks that belong to no dataset: not allowlisted, or
-                # in an unpublished granularity.
+                # Built tasks in an unpublished granularity; they belong to no
+                # dataset.
                 "excluded_task_ids": sorted(t.task_id for t in skipped),
                 # `splits` is the disjoint cover, and only that -- convert_job.py
                 # iterates it assuming each task_id appears once.
@@ -1335,18 +1298,6 @@ def main() -> None:
         help="--split: RNG seed for incident shuffling (default: 0).",
     )
     parser.add_argument(
-        "--allowlist-csv",
-        type=Path,
-        default=None,
-        help=(
-            "--split (required): tasks.csv whose task_id column lists the tasks "
-            "eligible for the split; built tasks not listed are excluded before "
-            "the incident shuffle. The published split used the frozen "
-            "2026-05-13 tasks.csv, which holds private-task answers and is "
-            "not committed."
-        ),
-    )
-    parser.add_argument(
         "--verified-json",
         type=Path,
         default=None,
@@ -1367,8 +1318,6 @@ def main() -> None:
 
     if args.split and not 0.0 < args.frac < 1.0:
         parser.error(f"--frac must be in (0, 1), got {args.frac}")
-    if args.split and args.allowlist_csv is None:
-        parser.error("--split requires --allowlist-csv")
 
     output_dir: Path = args.output_dir
     specs_dir = output_dir / "task_specs"
@@ -1446,7 +1395,6 @@ def main() -> None:
             org=args.org,
             frac=args.frac,
             seed=args.seed,
-            allowlist_csv=args.allowlist_csv,
             verified_json=args.verified_json,
             authors=_parse_authors(args.dataset_author or list(DEFAULT_AUTHORS)),
         )
