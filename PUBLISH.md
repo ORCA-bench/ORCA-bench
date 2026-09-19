@@ -387,6 +387,16 @@ cd leaderboard
 uv run lb submit https://hub.harborframework.com/jobs/<job_id> [<job_id> ...]
 ```
 
+A job converted with the default `--private hidden` routes to the private
+board on its own: its trials' `source` is `orca-bench/orca-bench-private`, so
+`lb filter` writes a `…-private.json` submission with `"board": "private"`
+(the five jobs above yield five such files, one per model). The PR flow is the
+same, plus one maintainer step — `/judge` on the promoted bot PR — before the
+row can be merged; [`leaderboard/SUBMIT.md`](leaderboard/SUBMIT.md#submitting-to-the-private-leaderboard)
+walks through it, and
+[`leaderboard/SETUP.md`](leaderboard/SETUP.md#the-private-leaderboard-how-it-differs)
+explains where a private row's number comes from.
+
 Each PR is checked, then promoted to a bot PR carrying the computed metrics;
 merging the bot PR posts the row. See [SUBMIT.md](leaderboard/SUBMIT.md) for the
 review pipeline and what the checks enforce.
