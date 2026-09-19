@@ -5,6 +5,14 @@ leaderboard rows: filter your jobs into submissions, fill in display metadata,
 open one PR per submission, and follow the review pipeline until your row lands
 on the leaderboard.
 
+There are two boards. The **public** leaderboard runs the 755 released tasks
+(`orca-bench/orca-bench`), scored in-container by each task's own verifier.
+The **private** leaderboard runs the 324 held-out tasks
+(`orca-bench/orca-bench-private`), which ship without answers and are scored
+out-of-band by a maintainer-run judge. Sections 1–4 cover the public board;
+[Submitting to the private leaderboard](#submitting-to-the-private-leaderboard)
+covers what changes for the private one.
+
 ```mermaid
 flowchart TD
     subgraph you [You]
@@ -13,7 +21,7 @@ flowchart TD
     end
     subgraph pipeline [CI + maintainers]
         direction LR
-        E[static analysis] --> F[promotion] --> G[merge]
+        E[static analysis] --> F[promotion] --> H["/judge (private only)"] --> G[merge]
     end
     you --> pipeline
 ```
@@ -33,8 +41,8 @@ time so you can inspect the files between steps.
 
 - **Run the leaderboard dataset, unmodified.** Your jobs must run the exact
   dataset version pinned in [`core/hub.py`](src/leaderboard/core/hub.py)
-  (`DATASET@DATASET_REF`) — the ORCA-bench dataset **as published on the Harbor
-  Hub**. The HuggingFace-registry config in
+  (`PUBLIC.dataset@PUBLIC.ref`, or the `PRIVATE` pair for the private board) —
+  the ORCA-bench dataset **as published on the Harbor Hub**. The HuggingFace-registry config in
   [`configs/harbor_job_orca_bench.yaml`](../configs/harbor_job_orca_bench.yaml)
   is for local development; its trials carry a different source and are
   filtered out. Use [`job-config.yaml`](../job-config.yaml) at the repo root,
@@ -203,3 +211,111 @@ leaderboard entry on the merged PR.
 A bot PR closed **without** merging is cleaned up instead: its branch and the
 leaderboard-owned trial clones are deleted. Merged PRs keep their clones —
 they are what the leaderboard record points at.
+
+## Submitting to the private leaderboard
+
+> [!NOTE]
+> The private board is still being brought up. The dataset and the board exist,
+> and `lb submit` accepts a private-split job and routes it to the private
+> board, but CI does not yet score one: static analysis stops every private
+> submission at a failing **Private-split scoring** check, so it cannot be
+> promoted. [SETUP.md](SETUP.md#the-private-leaderboard-what-remains) tracks
+> what has to land before it opens. This note goes away when it does.
+
+The public split's answers travel with the tasks: `harbor run` puts every
+`tests/expected.json` and `tests/rubrics/` on the machine that runs them, so
+anyone who has run the public board holds the root cause for all 755 tasks.
+The private board exists so there is also a number that cannot have been
+trained or tuned against. Its 324 tasks (31 incidents; 108 easy, 117 medium,
+99 hard) are disjoint from the public set **at the incident level** — no
+incident appears on both sides — and are published as
+`orca-bench/orca-bench-private` with everything that names or dates the root
+cause stripped out: no `tests/expected.json`, `tests/rubrics/`,
+`tests/check_prediction.py` or `solution/`, and a `task.toml` `[metadata]`
+reduced to `category`, `tags`, `user_facing_issue`, `current`,
+`reported_styled` and `difficulty`.
+
+The flow is the same as above with three differences: which dataset you run,
+what a finished trial looks like, and one extra step in the pipeline — a
+maintainer scores your trials with the LLM judge before the row is merged.
+
+### Run the private split
+
+Everything under [Before you start](#before-you-start) still applies — default
+execution settings, full coverage (all 324 tasks, `MIN_TRIALS_PER_TASK` each),
+the staged snapshot image, public upload. Pass the private dataset on the
+command line; `-d` replaces the `datasets:` entry in `job-config.yaml`, so the
+rest of the config (agents, `timeout_multiplier`, concurrency) carries over
+unchanged:
+
+```bash
+SNAPSHOT_IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2 \
+    ./run_harbor_cached.sh -c job-config.yaml \
+      -d orca-bench/orca-bench-private \
+      -a <agent> -m <provider/model> \
+      --upload --public
+```
+
+Two things differ from a public run:
+
+- **No verifier key is needed.** The private tasks have no in-container judge
+  to call, so `--ve OPENAI_API_KEY` does nothing here. Your agent's own
+  provider credentials are still required.
+- **Every trial finishes unscored — that is expected.** The private tasks'
+  `tests/test.sh` copies the agent's `report.md` into the verifier output and
+  writes an empty rewards map (`{}`), so the hub shows no reward for any trial.
+  Do not treat that as a failed run or try to score it yourself; the report is
+  the only output the judge needs, and the rubric it is scored against is not
+  public.
+
+### Open the PR
+
+Exactly as for the public board, from `leaderboard/`:
+
+```sh
+uv run lb submit https://hub.harborframework.com/jobs/<uuid> [more...]
+```
+
+One submission file and one PR per (agent, agent version, model, reasoning
+effort), as before, except that the file is named `…-private.json` and carries
+`"board": "private"` — that field is what routes it to the private board. The
+board is part of the filter key, so a job that ran both datasets yields two
+files; do not hand-merge them, they are different boards.
+
+### What to expect after opening a PR
+
+**Static analysis and promotion** run as for the public board: the same
+dataset-ref, execution-settings and per-trial digest checks, with coverage
+measured against the 324 private tasks. Because private trials carry no
+verdict by construction, the "unscored trials are excluded" rule does not
+apply to them — coverage counts every trial that finished. On green, CI clones
+your trials into leaderboard-owned copies and opens the bot PR, as above.
+
+**Judging** is the extra step. A maintainer comments `/judge` on the bot PR.
+That runs `run_llm_judge.py` over every trial of your submission, scoring each
+agent report against its task's held-back ground truth with the **same judge
+model and reasoning effort the public split's in-container verifier uses**, so
+private and public scores are comparable. It is a maintainer action because
+the judge holds the answers and the API key; there is nothing for you to run.
+When it finishes:
+
+- per-trial scores are committed to `leaderboard/scores/<submission>.json` on
+  the bot branch, keyed by trial id. Each record carries only what the public
+  verifier would have written to `reward.json` — the reward plus
+  `rca_accuracy` / `hallucinate_any` where defined — and never the flag, the
+  rubric or the judge's reasoning, so publishing it leaks nothing about the
+  held-out answers;
+- a sticky **LLM Judge** comment summarizes the run: trial counts by judge
+  mode, errored trials, and the incident-only RCA accuracy and hallucination
+  rate.
+
+A trial the judge could not score (`llm_judge_error`, `hub_fetch_error`)
+shows up in that summary as errored; the maintainer re-runs `/judge` before
+merging rather than merge a partially judged submission.
+
+**Review + merge** then proceeds as for the public board, with the metrics
+computed from the committed scores instead of the trials' own rewards. The
+published columns are the same three — RCA Accuracy (Medium), RCA Accuracy
+(Hard), Hallucination Rate — over incident tasks only, ranked by RCA Accuracy
+(Medium), and the row lands on the `orca-bench-private` leaderboard on the hub
+rather than the public one.
