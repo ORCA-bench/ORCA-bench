@@ -77,8 +77,11 @@ agents:
       llm_kwargs:
         max_tokens: 16384
 
-# REQUIRED: the dataset this leaderboard tracks, as published on the Harbor
-# Hub. Keep in lockstep with DATASET in leaderboard/src/leaderboard/core/hub.py.
+# REQUIRED: the dataset the public leaderboard tracks, as published on the
+# Harbor Hub. Keep in lockstep with PUBLIC.dataset in
+# leaderboard/src/leaderboard/core/hub.py. For the private board pass
+# `-d orca-bench/orca-bench-private` on the command line, which replaces this
+# entry (see leaderboard/SUBMIT.md).
 datasets:
   - name: orca-bench/orca-bench
     version: latest

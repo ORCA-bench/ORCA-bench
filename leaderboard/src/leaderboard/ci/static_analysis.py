@@ -29,11 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from leaderboard.core.hub import (
-    DATASET,
-    DATASET_REF,
+    PRIVATE,
+    Board,
     dataset_task_digests,
     hub_json,
     job_uuid,
+    submission_board,
     submission_trials,
 )
 from leaderboard.core.metrics import (
@@ -54,8 +55,8 @@ TRIAL_CONCURRENCY = 24
 
 # A submission must cover every task in the dataset, with at least this many
 # trials each. The expected task count is NOT hardcoded: it is derived from the
-# canonical DATASET@DATASET_REF task list the digest check already fetches, so
-# republishing the dataset can never leave a stale constant behind.
+# canonical task list of the board's dataset@ref the digest check already
+# fetches, so republishing the dataset can never leave a stale constant behind.
 MIN_TRIALS_PER_TASK = 1
 
 REQUIRED_METADATA = ("agent_display", "agent_org", "model_display", "model_org", "date")
@@ -134,21 +135,22 @@ def timeout_multiplier_ok(config: dict) -> bool:
     return tm is None or tm == 1.0
 
 
-def dataset_entry_failure(config: dict) -> str:
-    """'' when the job ran DATASET at the pinned version, else why not.
+def dataset_entry_failure(config: dict, board: Board) -> str:
+    """'' when the job ran the board's dataset at the pinned version, else why
+    not.
 
     The job config always names its datasets, but does not always record a
     resolved `ref` (harbor 0.15.0 writes only `name` + `task_names`). When the
     ref is absent the version is pinned by the per-trial task-digest check
     instead, which compares every trial's task sha256 against the canonical
-    DATASET@DATASET_REF task list -- a stronger guarantee than one dataset-level
-    label, since it verifies content per task.
+    task list of the board's dataset@ref -- a stronger guarantee than one
+    dataset-level label, since it verifies content per task.
     """
-    entries = [d for d in config.get("datasets", []) if d.get("name") == DATASET]
+    entries = [d for d in config.get("datasets", []) if d.get("name") == board.dataset]
     if not entries:
-        return f"did not run {DATASET}"
+        return f"did not run {board.dataset}"
     refs = [d.get("ref") for d in entries if d.get("ref") is not None]
-    if refs and DATASET_REF not in refs:
+    if refs and board.ref not in refs:
         return "ref mismatch"
     return ""
 
@@ -222,6 +224,7 @@ def _agent_override_msg(agent: dict) -> str:
 def run(submission: dict, *, per_trial: bool = True) -> Result:
     sf = submission["source_filter"]
     md = submission.get("metadata", {})
+    board = submission_board(submission)
     configs = {
         job_uuid(link): hub_json(["job", "show", job_uuid(link)]).get("config", {})
         for link in submission["source_jobs"]
@@ -230,8 +233,8 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
 
     res = Result()
 
-    # The dataset is a repo-level constant, not part of the filter key; the
-    # "Valid dataset reference" check below pins it per job.
+    # The dataset is fixed by the submission's board, not part of the filter
+    # key; the "Valid dataset reference" check below pins it per job.
     ok = all(agents.values())
     res.checks.append(
         Check("Valid source_filter", ok, "" if ok else "no matching agent in job config")
@@ -276,18 +279,39 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     res.checks.append(Check("No resource overrides", not r_bad, r_bad))
 
     ref_bad = next(
-        (m for c in configs.values() if (m := dataset_entry_failure(c))),
+        (m for c in configs.values() if (m := dataset_entry_failure(c, board))),
         "",
     )
-    res.checks.append(Check("Valid dataset reference", not ref_bad, ref_bad))
+    res.checks.append(
+        Check(f"Valid dataset reference ({board.dataset})", not ref_bad, ref_bad)
+    )
 
-    # The canonical task list for DATASET@DATASET_REF. Fetched once and used
-    # twice: its length is the expected task count (no hardcoded constant to go
-    # stale on a republish), and the per-trial check below compares each trial's
-    # task ref against it. Only the length is used for the count check -- the
-    # bulk rows' `task_name` and the registry's `org/name` keys are different
-    # namespaces, so comparing counts is the format-independent test.
-    expected_digests = dataset_task_digests()
+    # Private-split submissions stop here for now. Their trials carry an empty
+    # rewards map by construction (the -hidden tasks have no in-container
+    # verifier), so the coverage check below would drop every one of them as
+    # unscored, and the metrics have to come from the /judge scores committed
+    # to leaderboard/scores/ rather than from trial rewards. Neither is wired
+    # up yet -- see leaderboard/SETUP.md, "The private leaderboard: what
+    # remains". Failing an explicit check keeps a private submission from being
+    # promoted with a nonsense row, and says why, instead of a traceback.
+    if board is PRIVATE:
+        res.checks.append(
+            Check(
+                "Private-split scoring",
+                False,
+                "not yet supported: coverage and metrics for the private board "
+                "are pending (leaderboard/SETUP.md)",
+            )
+        )
+        return res
+
+    # The canonical task list for the board's dataset@ref. Fetched once and
+    # used twice: its length is the expected task count (no hardcoded constant
+    # to go stale on a republish), and the per-trial check below compares each
+    # trial's task ref against it. Only the length is used for the count check
+    # -- the bulk rows' `task_name` and the registry's `org/name` keys are
+    # different namespaces, so comparing counts is the format-independent test.
+    expected_digests = dataset_task_digests(board)
     expected_task_count = len(expected_digests)
 
     # Fetch the bulk trials once; metrics/errors/counts derive from it (one
@@ -318,7 +342,7 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     res.resources = compute_resource_metrics(trials)
     # The same breakdown compute_submission_metrics publishes, so the PR comment
     # and the stored row can't disagree.
-    labels = task_labels()
+    labels = task_labels(board)
     res.metrics = compute_subset_metrics(trials, submission, labels)
     res.metric_counts = metric_counts(trials, labels)
 
@@ -433,6 +457,16 @@ def main() -> None:
 
     submission = json.loads(args.path.read_text())
     if args.write_metrics:
+        if submission_board(submission) is PRIVATE:
+            # Unreachable from CI (promote only runs on green, and `run` fails
+            # every private submission above), but a maintainer can call this
+            # by hand: refuse rather than write metrics computed from trial
+            # rewards the -hidden tasks never produce.
+            sys.exit(
+                "private-split metrics must come from the /judge scores in "
+                "leaderboard/scores/, which is not wired up yet "
+                "(leaderboard/SETUP.md); refusing to write metrics."
+            )
         submission["metrics"] = compute_submission_metrics(submission)
         args.path.write_text(json.dumps(submission, indent=2) + "\n")
         print(json.dumps(submission["metrics"]))

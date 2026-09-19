@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from leaderboard.core.hub import DATASET, DATASET_REF
+from leaderboard.core.hub import PRIVATE, PUBLIC
 from leaderboard.ci.static_analysis import (
     dataset_entry_failure,
     timeout_multiplier_ok,
@@ -47,32 +47,54 @@ class DatasetEntryTests(unittest.TestCase):
     resolved ref; version pinning then falls to the task-digest check."""
 
     def test_name_only_passes(self):
-        cfg = {"datasets": [{"name": DATASET, "task_names": ["*"]}]}
-        self.assertEqual(dataset_entry_failure(cfg), "")
+        cfg = {"datasets": [{"name": PUBLIC.dataset, "task_names": ["*"]}]}
+        self.assertEqual(dataset_entry_failure(cfg, PUBLIC), "")
 
     def test_matching_ref_passes(self):
-        cfg = {"datasets": [{"name": DATASET, "ref": DATASET_REF}]}
-        self.assertEqual(dataset_entry_failure(cfg), "")
+        cfg = {"datasets": [{"name": PUBLIC.dataset, "ref": PUBLIC.ref}]}
+        self.assertEqual(dataset_entry_failure(cfg, PUBLIC), "")
 
     def test_wrong_ref_is_rejected(self):
-        cfg = {"datasets": [{"name": DATASET, "ref": "sha256:deadbeef"}]}
-        self.assertEqual(dataset_entry_failure(cfg), "ref mismatch")
+        cfg = {"datasets": [{"name": PUBLIC.dataset, "ref": "sha256:deadbeef"}]}
+        self.assertEqual(dataset_entry_failure(cfg, PUBLIC), "ref mismatch")
 
     def test_other_dataset_is_rejected(self):
-        cfg = {"datasets": [{"name": "someone-else/bench", "ref": DATASET_REF}]}
-        self.assertEqual(dataset_entry_failure(cfg), f"did not run {DATASET}")
+        cfg = {"datasets": [{"name": "someone-else/bench", "ref": PUBLIC.ref}]}
+        self.assertEqual(
+            dataset_entry_failure(cfg, PUBLIC), f"did not run {PUBLIC.dataset}"
+        )
 
     def test_no_datasets_is_rejected(self):
-        self.assertEqual(dataset_entry_failure({}), f"did not run {DATASET}")
+        self.assertEqual(
+            dataset_entry_failure({}, PUBLIC), f"did not run {PUBLIC.dataset}"
+        )
 
     def test_our_dataset_alongside_others_passes(self):
         cfg = {
             "datasets": [
                 {"name": "someone-else/bench"},
-                {"name": DATASET, "task_names": ["*"]},
+                {"name": PUBLIC.dataset, "task_names": ["*"]},
             ]
         }
-        self.assertEqual(dataset_entry_failure(cfg), "")
+        self.assertEqual(dataset_entry_failure(cfg, PUBLIC), "")
+
+    def test_boards_are_checked_against_their_own_dataset(self):
+        """A private-split job passes the private board's check and fails the
+        public board's, and vice versa -- the two datasets are disjoint by
+        construction, so a run on one can never be a submission to the other."""
+        private_cfg = {"datasets": [{"name": PRIVATE.dataset, "ref": PRIVATE.ref}]}
+        public_cfg = {"datasets": [{"name": PUBLIC.dataset, "ref": PUBLIC.ref}]}
+        self.assertEqual(dataset_entry_failure(private_cfg, PRIVATE), "")
+        self.assertEqual(
+            dataset_entry_failure(private_cfg, PUBLIC), f"did not run {PUBLIC.dataset}"
+        )
+        self.assertEqual(
+            dataset_entry_failure(public_cfg, PRIVATE), f"did not run {PRIVATE.dataset}"
+        )
+
+    def test_private_ref_is_pinned(self):
+        cfg = {"datasets": [{"name": PRIVATE.dataset, "ref": "sha256:deadbeef"}]}
+        self.assertEqual(dataset_entry_failure(cfg, PRIVATE), "ref mismatch")
 
 
 if __name__ == "__main__":

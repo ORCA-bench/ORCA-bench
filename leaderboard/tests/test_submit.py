@@ -8,11 +8,10 @@ import re
 
 from leaderboard.ci.submit import (
     format_date,
-    LEADERBOARD_NAME,
-    LEADERBOARD_PACKAGE,
     hub_metadata,
     row_create_payload,
 )
+from leaderboard.core.hub import BOARDS, PRIVATE, PUBLIC
 
 
 class HubMetadataTests(unittest.TestCase):
@@ -100,16 +99,36 @@ class RowCreatePayloadTests(unittest.TestCase):
             "trials": ["trial-a", "trial-b"],
         }
 
-    def test_display_slug_is_accepted_by_the_hub(self):
-        """The slug is the API selector, so renaming the package to anything
+    def test_display_slugs_are_accepted_by_the_hub(self):
+        """The slug is the API selector, so renaming a package to anything
         the hub's lowercase-only pattern rejects breaks every submission."""
-        self.assertIsNotNone(self.HUB_SLUG_RE.match(LEADERBOARD_PACKAGE))
+        for board in BOARDS.values():
+            with self.subTest(board=board.key):
+                self.assertIsNotNone(self.HUB_SLUG_RE.match(board.leaderboard_package))
 
     def test_payload_selects_by_package_slug(self):
         payload = row_create_payload(self._submission())
-        self.assertEqual(payload["package"], LEADERBOARD_PACKAGE)
-        self.assertEqual(payload["name"], LEADERBOARD_NAME)
+        self.assertEqual(payload["package"], PUBLIC.leaderboard_package)
+        self.assertEqual(payload["name"], PUBLIC.leaderboard_name)
         self.assertNotIn("package_id", payload)
+
+    def test_submission_without_board_goes_to_the_public_board(self):
+        """Files written before the private board existed carry no `board`;
+        every one of them was filtered against the public dataset."""
+        payload = row_create_payload(self._submission())
+        self.assertEqual(payload["package"], "orca-bench/orca-bench")
+        self.assertEqual(payload["name"], "orca-bench")
+
+    def test_private_submission_goes_to_the_private_board(self):
+        payload = row_create_payload({**self._submission(), "board": "private"})
+        self.assertEqual(payload["package"], PRIVATE.leaderboard_package)
+        self.assertEqual(payload["name"], PRIVATE.leaderboard_name)
+        self.assertEqual(payload["package"], "orca-bench/orca-bench-private")
+
+    def test_unknown_board_is_refused(self):
+        """A typo must not fall through to the public board."""
+        with self.assertRaises(SystemExit):
+            row_create_payload({**self._submission(), "board": "pubilc"})
 
     def test_payload_carries_row_metrics_and_trials(self):
         payload = row_create_payload(self._submission())

@@ -2,7 +2,8 @@
 
 Called by the merge workflow when a promoted bot PR (submission/pr-N) is merged.
 Reads the submission JSON, builds one leaderboard row (metadata + metrics +
-backing trial ids), and POSTs it to the `leaderboard-row-create` edge function.
+backing trial ids), and POSTs it to the `leaderboard-row-create` edge function
+of the board the submission targets (its `board` field; see core.hub.Board).
 
 The Supabase base URL comes from harbor's own resolution
 (`HARBOR_SUPABASE_URL` env -> dev, else the prod default), so no dev-specific URL
@@ -24,23 +25,11 @@ from pathlib import Path
 
 from harbor.auth.constants import SUPABASE_URL
 
-from leaderboard.core.hub import HUB_URL
+from leaderboard.core.hub import Board, submission_board
 from leaderboard.core.metrics import (
     RESOURCE_HEADERS,
     format_metrics_table,
     format_resource_cells,
-)
-
-# The leaderboard this repo submits to; the definition lives in SETUP.md.
-# The slug is lowercase, so it satisfies the hub's `package` pattern
-# (/^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_.-]*$/) and doubles as the API
-# selector -- no `package_id` indirection needed.
-LEADERBOARD_PACKAGE = "orca-bench/orca-bench"
-LEADERBOARD_NAME = "orca-bench"
-
-LEADERBOARD_URL = (
-    f"{HUB_URL}/datasets/{LEADERBOARD_PACKAGE}/latest"
-    f"?tab=leaderboard&leaderboard={LEADERBOARD_NAME}"
 )
 
 # Hub metadata_schema allows only these keys (additionalProperties: false).
@@ -91,7 +80,9 @@ def hub_metadata(submission: dict) -> dict:
 
 
 def row_create_payload(submission: dict) -> dict:
-    """The leaderboard-row-create request body for one submission."""
+    """The leaderboard-row-create request body for one submission, addressed
+    to the board it targets."""
+    board = submission_board(submission)
     row = {
         # Whitelist Hub-allowed keys and drop nulls: optional metadata (e.g.
         # reasoning_effort) is typed but not required, and a null fails its
@@ -106,8 +97,8 @@ def row_create_payload(submission: dict) -> dict:
         "trial_ids": submission["trials"],
     }
     return {
-        "package": LEADERBOARD_PACKAGE,
-        "name": LEADERBOARD_NAME,
+        "package": board.leaderboard_package,
+        "name": board.leaderboard_name,
         "rows": [row],
     }
 
@@ -146,13 +137,13 @@ def _footer_ran() -> str:
     return f"<sub>{run} on {commit}.</sub>"
 
 
-def render_comment(row: dict) -> str:
+def render_comment(row: dict, board: Board) -> str:
     md = row.get("metadata", {})
     me = row.get("metrics", {})
     resources = " | ".join(format_resource_cells(me))
     return "\n".join(
         [
-            f"✅ Entry submitted to the [leaderboard]({LEADERBOARD_URL})",
+            f"✅ Entry submitted to the [{board.leaderboard_name} leaderboard]({board.url})",
             "",
             f"{md.get('model_display')} [{md.get('model_org')}] · "
             f"{md.get('reasoning_effort') or '—'} · {md.get('agent_display')} "
@@ -183,7 +174,7 @@ def main() -> None:
             "submission has no materialized trials (promote/clone did not run?); refusing to submit"
         )
     row = submit_row(submission, os.environ["HARBOR_API_KEY"])
-    print(render_comment(row))
+    print(render_comment(row, submission_board(submission)))
 
 
 if __name__ == "__main__":

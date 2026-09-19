@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from leaderboard.core.hub import (
     HALLUCINATE_METRIC,
     RCA_ACCURACY_METRIC,
+    submission_board,
     submission_trials,
     trial_metric,
     trial_reward,
@@ -271,10 +272,11 @@ def compute_subset_metrics(
     `compute_metrics` so they inherit its contract (a value outside [0, 1] is
     rejected rather than silently skewing the result).
 
-    `submission` is accepted for signature stability but no longer read: the
-    disqualified / credited lists force a trial's *reward*, and none of the
-    published metrics is reward-derived any more. Overriding `rca_accuracy` or
-    `hallucinate_any` from them would invent a verdict no judge produced.
+    `submission` is read only for its board (to pick the pinned dataset's
+    labels). Its disqualified / credited lists are NOT applied: they force a
+    trial's *reward*, and none of the published metrics is reward-derived any
+    more. Overriding `rca_accuracy` or `hallucinate_any` from them would invent
+    a verdict no judge produced.
 
     Unscored trials are excluded rather than counted as 0, matching
     `submission_by_task` and utils.load_trials.
@@ -284,8 +286,9 @@ def compute_subset_metrics(
     an empty one means the labels and the trials disagree, or every trial in it
     went unscored. That raises rather than publishing a plausible-looking 0.00%.
     """
-    del submission  # see docstring: no published metric is reward-derived
-    labels = task_labels() if labels is None else labels
+    # See docstring: no published metric is reward-derived, so only the board
+    # is read off the submission.
+    labels = task_labels(submission_board(submission)) if labels is None else labels
     out: dict[str, float | str] = {}
     for spec in METRICS:
         by_task: dict[str, list] = defaultdict(list)

@@ -31,7 +31,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 
-from leaderboard.core.hub import DATASET, DATASET_REF, dataset_task_digests
+from leaderboard.core.hub import Board, dataset_task_digests
 
 # The metadata field the subsets key on, and the exact ladder it must contain.
 # `granularity` holds a rival ladder for the same tiers; the assertion below is
@@ -53,7 +53,7 @@ class TaskLabel:
     is_control: bool
 
 
-_CACHE: dict[str, TaskLabel] | None = None
+_CACHE: dict[str, dict[str, TaskLabel]] = {}
 
 
 def _label(metadata: dict) -> TaskLabel:
@@ -67,8 +67,8 @@ def _label(metadata: dict) -> TaskLabel:
     )
 
 
-def _fetch_labels() -> dict[str, TaskLabel]:
-    """Download the pinned dataset's tasks and read their `[metadata]`.
+def _fetch_labels(board: Board) -> dict[str, TaskLabel]:
+    """Download the board's pinned dataset and read each task's `[metadata]`.
 
     Mirrors utils.load_task_metadata: harbor caches task packages by digest
     under TASK_CACHE_DIR, so repeat runs in a warm environment hit no network.
@@ -80,7 +80,7 @@ def _fetch_labels() -> dict[str, TaskLabel]:
     from harbor.models.task.id import PackageTaskId
     from harbor.tasks.client import TaskClient
 
-    digests = dataset_task_digests()
+    digests = dataset_task_digests(board)
     task_ids = {
         name: PackageTaskId(org=name.split("/")[0], name=name.split("/")[1], ref=ref)
         for name, ref in digests.items()
@@ -97,28 +97,29 @@ def _fetch_labels() -> dict[str, TaskLabel]:
         metadata = tomllib.loads(toml_path.read_text()).get("metadata", {})
         labels[name] = _label(metadata)
 
+    where = f"{board.dataset}@{board.ref}"
     if missing:
         raise TaskLabelError(
-            f"no task.toml for {len(missing)} task(s) of {DATASET}@{DATASET_REF}, "
+            f"no task.toml for {len(missing)} task(s) of {where}, "
             f"e.g. {missing[:3]}; the subset metrics cannot be computed without "
             "every task's labels."
         )
-    check_difficulties(labels)
+    check_difficulties(labels, where)
     return labels
 
 
-def check_difficulties(labels: dict[str, TaskLabel]) -> None:
+def check_difficulties(labels: dict[str, TaskLabel], where: str = "the dataset") -> None:
     """Fail unless the difficulty ladder is exactly DIFFICULTIES.
 
     Guards against reading `granularity` instead of `difficulty`, and against a
     republished dataset that renames the ladder -- either would silently
     redefine an already-published column (the `hard` column would swap between
-    the hardest and the middle tier).
+    the hardest and the middle tier). `where` names the dataset in the message.
     """
     seen = {label.difficulty for label in labels.values()}
     if seen != set(DIFFICULTIES):
         raise TaskLabelError(
-            f"tasks of {DATASET}@{DATASET_REF} report difficulties "
+            f"tasks of {where} report difficulties "
             f"{sorted(map(str, seen))}, expected {list(DIFFICULTIES)}. If this "
             "is the `easy`/`hard`/`universal` ladder, the labels are being read "
             "from `granularity` instead of `difficulty`; if the dataset renamed "
@@ -127,16 +128,15 @@ def check_difficulties(labels: dict[str, TaskLabel]) -> None:
         )
 
 
-def task_labels() -> dict[str, TaskLabel]:
-    """`{hub task_name: TaskLabel}` for every task in the pinned dataset.
+def task_labels(board: Board) -> dict[str, TaskLabel]:
+    """`{hub task_name: TaskLabel}` for every task in the board's pinned dataset.
 
-    Memoized: static_analysis and the promote step both need the labels, and
-    fetching is the one expensive step in computing the metrics.
+    Memoized per board: static_analysis and the promote step both need the
+    labels, and fetching is the one expensive step in computing the metrics.
     """
-    global _CACHE
-    if _CACHE is None:
-        _CACHE = _fetch_labels()
-    return _CACHE
+    if board.key not in _CACHE:
+        _CACHE[board.key] = _fetch_labels(board)
+    return _CACHE[board.key]
 
 
 def label_for(labels: dict[str, TaskLabel], task_name: str) -> TaskLabel:
@@ -149,6 +149,6 @@ def label_for(labels: dict[str, TaskLabel], task_name: str) -> TaskLabel:
         return labels[task_name]
     except KeyError:
         sys.exit(
-            f"task {task_name!r} is not in {DATASET}@{DATASET_REF}; the pinned "
+            f"task {task_name!r} is not in the pinned dataset; the pinned "
             "dataset and the submitted trials have diverged."
         )
