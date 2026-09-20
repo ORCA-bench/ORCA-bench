@@ -1,0 +1,23 @@
+{
+  "board": "private",
+  "source_jobs": [
+    "https://hub.harborframework.com/jobs/6c8e627c-4f34-5bd1-bcbb-e825ec155a91"
+  ],
+  "source_filter": {
+    "agent": "terminus-2",
+    "agent_version": "2.0.0",
+    "model_name": "gradient_ai/deepseek-v4-pro",
+    "reasoning_effort": null
+  },
+  "metadata": {
+    "agent_display": "Terminus 2",
+    "agent_org": "Harbor",
+    "model_display": "DeepSeek V4 Pro",
+    "model_org": "DeepSeek",
+    "date": "2026-05-18",
+    "reasoning_effort": null
+  },
+  "metrics": null,
+  "disqualified_trials": [],
+  "credited_trials": []
+}
