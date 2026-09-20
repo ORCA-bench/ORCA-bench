@@ -1,0 +1,309 @@
+name: LLM Judge
+
+# Maintainer comments `/judge` (or `/judge N` to cap trials while testing) on a
+# promoted submission PR. Scores every trial of the submission's jobs with the
+# out-of-band LLM judge and posts a summary.
+#
+# This exists for the held-out split: `orca-bench/orca-bench-private` tasks ship
+# without expected.json or rubrics/ and cannot be scored in-container (see
+# build_harbor_tasks.py), so their reward has to be produced here, against the
+# oracle twin's ground truth. Public-split trials are already scored by their
+# own verifier; judging them here is a re-score, not the normal path.
+#
+# Gated to write-access commenters because this is the only workflow holding
+# OPENAI_API_KEY: `promote` runs on any fork PR that passes static analysis, so
+# an automatic trigger would hand contributor-controlled spend (one judge call
+# per trial, at effort=high) to whoever opens a valid submission.
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: judge-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write        # pushes the per-trial scores to the bot branch
+  pull-requests: write
+  issues: write
+
+jobs:
+  judge:
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/judge') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      # /judge runs only on the promoted, repo-owned submission PR (head
+      # submission/pr-N), which references the leaderboard-owned trial clones.
+      # Intake (fork) PRs are auto-promoted and closed, so judging one would
+      # score the submitter's un-cloned trials -- which they can still mutate or
+      # delete out from under the run.
+      - name: Only run on promoted (bot) PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          ref=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.ref')
+          if [[ "$ref" != submission/pr-* ]]; then
+            echo "::warning::/judge runs only on promoted bot PRs (head submission/pr-N); this PR head is '$ref'."
+            exit 1
+          fi
+
+      - name: Acknowledge (👀)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST \
+            repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -f content=eyes
+
+      # Base branch = trusted code. The submission JSON below is read as data.
+      - uses: actions/checkout@v7.0.0
+
+      - uses: astral-sh/setup-uv@v8.3.0
+        with:
+          python-version: "3.14"
+
+      # The root project, not leaderboard/: run_llm_judge imports utils and
+      # check_prediction, which pull harbor, openai, pandas and scipy.
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Fail early if the judge has no credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          HARBOR_API_KEY: ${{ secrets.HARBOR_API_KEY }}
+        run: |
+          [ -n "$OPENAI_API_KEY" ] || { echo "::error::OPENAI_API_KEY is not set"; exit 1; }
+          [ -n "$HARBOR_API_KEY" ] || { echo "::error::HARBOR_API_KEY is not set"; exit 1; }
+
+      - name: Resolve the submission's jobs
+        id: jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          BODY: ${{ github.event.comment.body }}   # via env, never inlined into the shell
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.sha')
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          path=$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" \
+            --jq '[.[] | select((.filename | test("^leaderboard/submissions/[A-Za-z0-9._-]+\\.json$")) and (.status != "removed")) | .filename] | first // empty')
+          if [ -z "$path" ]; then echo "::error::no submission JSON on this PR"; exit 1; fi
+          echo "sub_path=$path" >> "$GITHUB_OUTPUT"
+          gh api "repos/${{ github.repository }}/contents/$path?ref=$HEAD_SHA" \
+            --jq '.content' | base64 -d > /tmp/submission.json
+
+          # source_jobs are contributor-derived and go straight into a command
+          # line, so accept only bare UUIDs -- the same discipline the static
+          # analysis workflow applies to the submission path.
+          jq -r '.source_jobs[]' /tmp/submission.json \
+            | sed 's#.*/##' \
+            | grep -Ex '[0-9a-fA-F-]{36}' > /tmp/jobs.txt \
+            || { echo "::error::source_jobs contains a value that is not a bare UUID"; exit 1; }
+          n=$(wc -l < /tmp/jobs.txt)
+          [ "$n" -gt 0 ] || { echo "::error::submission lists no source_jobs"; exit 1; }
+          echo "Judging $n job(s) from $path"
+          { echo "args<<EOF"; sed 's/^/--job /' /tmp/jobs.txt; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+          # Optional cap while testing: "/judge N" scores the first N trials.
+          # run_llm_judge has no --limit; batch 1 of size N is the same thing.
+          N=$(printf '%s' "$BODY" | grep -oE '^/judge[[:space:]]+[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+          if [ -n "$N" ]; then
+            echo "limit=--batch-size $N --batch-number 1" >> "$GITHUB_OUTPUT"
+            echo "Capped to the first $N trial(s)"
+          else
+            echo "limit=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Model and effort are left at the script's defaults (openai-gpt-5.4,
+      # effort high) so these scores match what the public split's in-container
+      # verifier produced.
+      - name: Run the judge
+        id: judge
+        continue-on-error: true
+        env:
+          HARBOR_API_KEY: ${{ secrets.HARBOR_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        run: |
+          set -euo pipefail
+          uv run python run_llm_judge.py -od /tmp/judge \
+            ${{ steps.jobs.outputs.args }} \
+            ${{ steps.jobs.outputs.limit }}
+
+      # One file per submission, mirroring leaderboard/submissions/<name>.json,
+      # keyed by trial id. Committed to the bot branch so the maintainer reviews
+      # the scores on the same PR and merging carries them to main.
+      #
+      # Safe to publish because the payload is exactly what the in-container
+      # verifier persists to reward.json -- run_llm_judge builds it with
+      # check_prediction.build_rewards, so it is the reward plus whichever of
+      # rca_accuracy / hallucinate_any is defined, and nothing else. Every field
+      # that names the answer is absent by construction: flag, nested,
+      # judge_prompt, judge_response_raw, reasoning_summary, per_rubric. The
+      # guard below re-checks for them anyway, so a change that puts one back in
+      # the payload fails here instead of publishing the held-out answers.
+      #
+      # A GITHUB_TOKEN push does not re-trigger workflows, which is the same
+      # property the promote job relies on.
+      - name: Save per-trial scores to the repo
+        id: save
+        if: steps.judge.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          SUB_PATH: ${{ steps.jobs.outputs.sub_path }}
+        run: |
+          set -euo pipefail
+          uv run python - "$SUB_PATH" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          out = Path("/tmp/scores.json")
+          records = {}
+          for p in sorted(Path("/tmp/judge/scores").glob("*.json")):
+              d = json.loads(p.read_text())
+              tid = d.get("trial_id")
+              if not tid:
+                  sys.exit(f"{p.name} has no trial_id")
+              # Belt and braces: the payload is built redacted, but this file is
+              # about to be committed, so refuse rather than publish a field that
+              # names the answer.
+              banned = {"flag", "nested", "judge_prompt", "judge_response_raw",
+                        "reasoning_summary", "per_rubric"}
+              leaked = banned & d.keys()
+              if leaked:
+                  sys.exit(f"{p.name} carries {sorted(leaked)}; refusing to commit")
+              records[tid] = d
+          out.write_text(json.dumps(dict(sorted(records.items())), indent=2) + "\n")
+          print(f"{len(records)} trial score(s) -> {out}")
+          PY
+
+          BOT_BRANCH=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.ref')
+          dest="leaderboard/scores/$(basename "$SUB_PATH")"
+          git fetch --depth=1 origin "$BOT_BRANCH"
+          git checkout -B "$BOT_BRANCH" FETCH_HEAD
+          mkdir -p leaderboard/scores
+          cp /tmp/scores.json "$dest"
+          git add "$dest"
+          if git diff --cached --quiet; then
+            echo "scores unchanged; nothing to commit"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Judge scores for $(basename "$SUB_PATH" .json)" \
+                     -m "Written by /judge from run #${{ github.run_id }}."
+          git push origin "$BOT_BRANCH"
+          echo "dest=$dest" >> "$GITHUB_OUTPUT"
+          echo "Committed $dest to $BOT_BRANCH"
+
+      # Counts and aggregates only -- no per-trial detail is quoted, since the
+      # comment is readable by anyone who can see the PR.
+      #
+      # judge_prompts/ is the one judge output that does embed the rubric
+      # verbatim, so it must never be uploaded as an artifact: artifacts are
+      # downloadable by anyone with read access to this repo, and the held-out
+      # split exists so those answers do not circulate. scores/ is safe -- see
+      # the save step above.
+      #
+      # always(), so a failed run still reports what it managed to score
+      # rather than leaving the PR with only a red check.
+      - name: Summarize
+        if: always()
+        env:
+          JUDGE_OUTCOME: ${{ steps.judge.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SAVED_TO: ${{ steps.save.outputs.dest }}
+        run: |
+          uv run python - <<'PY' > /tmp/comment.md
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          # Control tasks (mode no_incident_llm_judge) have no root cause to find,
+          # so they are kept out of the incident metrics -- the same split the
+          # leaderboard's published subsets make. `empty_report` is NOT a control:
+          # it is an incident trial whose agent wrote nothing, and it scores 0.
+          CONTROL = "no_incident_llm_judge"
+          ERRORS = ("llm_judge_error", "hub_fetch_error")
+
+          paths = sorted(Path("/tmp/judge/scores").glob("*.json"))
+          modes, rewards, acc, hall = Counter(), [], [], []
+          n_control = n_retried = 0
+          for p in paths:
+              d = json.loads(p.read_text())
+              mode = d.get("mode", "?")
+              modes[mode] += 1
+              if mode in ERRORS:
+                  continue
+              # run_llm_judge records `attempts` only when a trial needed more
+              # than one draw, so this counts the flaky ones.
+              if d.get("attempts", 1) > 1:
+                  n_retried += 1
+              if mode == CONTROL:
+                  n_control += 1
+                  continue
+              rewards.append(d.get("reward") or 0.0)
+              # The payload is what the verifier persists to reward.json: the
+              # reward, plus whichever rollups are defined. An undefined one is
+              # absent rather than null, so .get() covering both is the check.
+              for key, sink in (("rca_accuracy", acc), ("hallucinate_any", hall)):
+                  if d.get(key) is not None:
+                      sink.append(bool(d[key]))
+
+          def pct(xs):
+              return f"{100 * sum(xs) / len(xs):.2f}% (n={len(xs)})" if xs else "—"
+
+          n_err = sum(v for k, v in modes.items() if k in ERRORS)
+          outcome = os.environ.get("JUDGE_OUTCOME", "")
+          out = []
+          if outcome != "success":
+              # Without this a failed run reads as "0 trials scored, all fine".
+              out.append(
+                  f"❌ **LLM Judge** — the run did not finish (`{outcome}`). See the "
+                  f"[log]({os.environ.get('RUN_URL', '')}). Partial results below.\n"
+              )
+          out.append(f"**LLM Judge** — {len(paths)} trial(s), {n_err} errored\n")
+          out.append("| Mode | Count |\n| --- | ---: |")
+          out += [f"| `{m}` | {c} |" for m, c in modes.most_common()]
+          out.append("")
+          out.append("| Metric | Value |\n| --- | --- |")
+          out.append(
+              f"| Mean reward (incident) | {sum(rewards)/len(rewards):.3f} |"
+              if rewards else "| Mean reward (incident) | — |"
+          )
+          out.append(f"| RCA accuracy (incident) | {pct(acc)} |")
+          out.append(f"| Hallucination rate (incident) | {pct(hall)} |")
+          out.append(f"| Control trials (excluded above) | {n_control} |")
+          out.append(f"| Trials that needed a retry | {n_retried} |")
+          out.append(
+              "\n<sub>Judged with the same model and reasoning effort as the "
+              "in-container verifier. Per-trial rollups carry no root cause and "
+              "no rubric; the judge prompts, which do, stay on the runner.</sub>"
+          )
+          saved = os.environ.get("SAVED_TO")
+          if saved:
+              out.insert(1, f"Per-trial scores committed to `{saved}` on this branch.\n")
+          print("\n".join(out))
+          PY
+          cat /tmp/comment.md
+
+      - name: Post the summary
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v3.0.5
+        with:
+          number: ${{ github.event.issue.number }}
+          header: llm-judge
+          path: /tmp/comment.md
+
+      # continue-on-error above kept the summary reachable; the job itself must
+      # still go red so the PR does not look judged when it is not.
+      - name: Fail if the judge failed
+        if: steps.judge.outcome != 'success'
+        run: exit 1
