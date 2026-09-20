@@ -264,12 +264,13 @@ jobs:
           print(f"{n_new} trial(s) judged in this run; {out} now holds {len(records)} "
                 f"record(s) (was {n_before})")
           with open("/tmp/scores-count.txt", "w") as fh:
-              fh.write(f"{n_new} {len(records)}")
+              fh.write(f"{n_new} {len(records)}\n")
           PY
 
           git add "$dest"
           echo "dest=$dest" >> "$GITHUB_OUTPUT"
-          read -r n_new n_total < /tmp/scores-count.txt
+          # `|| true`: read exits 1 at EOF even after filling the variables.
+          read -r n_new n_total < /tmp/scores-count.txt || true
           echo "n_new=$n_new" >> "$GITHUB_OUTPUT"
           echo "n_total=$n_total" >> "$GITHUB_OUTPUT"
           if git diff --cached --quiet; then
