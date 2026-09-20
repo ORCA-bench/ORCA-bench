@@ -1,8 +1,22 @@
 name: LLM Judge
 
-# Maintainer comments `/judge` (or `/judge N` to cap trials while testing) on a
-# promoted submission PR. Scores every trial of the submission's jobs with the
-# out-of-band LLM judge and posts a summary.
+# Maintainer comments on a promoted submission PR:
+#
+#   /judge                          score every trial that has no verdict yet
+#   /judge force                    regrade every trial
+#   /judge <size> <number>          one batch (trials sorted by id, 1-indexed;
+#                                   number defaults to 1), unscored trials only
+#   /judge <size> <number> force    regrade that batch
+#
+# The committed scores file (leaderboard/scores/<submission>.json on the bot
+# branch) is seeded into the judge's output dir first, so run_llm_judge's own
+# skip-if-scored rule applies in CI exactly as it does locally: a trial with a
+# non-error record is skipped unless `force`, and a trial whose record is an
+# error mode is always re-scored. Whatever this run judges is then MERGED back
+# into the committed file -- those trials' records are replaced, every other
+# trial's record is kept -- so a batch run regrades that batch and leaves the
+# rest as they were, and a plain `/judge` after a partial run judges only what
+# is missing.
 #
 # This exists for the held-out split: `orca-bench/orca-bench-private` tasks ship
 # without expected.json or rubrics/ and cannot be scored in-container (see
@@ -109,15 +123,65 @@ jobs:
           echo "Judging $n job(s) from $path"
           { echo "args<<EOF"; sed 's/^/--job /' /tmp/jobs.txt; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
-          # Optional cap while testing: "/judge N" scores the first N trials.
-          # run_llm_judge has no --limit; batch 1 of size N is the same thing.
-          N=$(printf '%s' "$BODY" | grep -oE '^/judge[[:space:]]+[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
-          if [ -n "$N" ]; then
-            echo "limit=--batch-size $N --batch-number 1" >> "$GITHUB_OUTPUT"
-            echo "Capped to the first $N trial(s)"
+          # Arguments: "/judge [<batch_size> [<batch_number>]] [force]", first
+          # line of the comment only. Each token must be a bare integer or the
+          # word `force`; anything else fails the run rather than silently
+          # judging everything. The body is read via env and split with
+          # `read` (no globbing), so nothing in it reaches the command line
+          # except validated integers. run_llm_judge rejects an out-of-range
+          # batch itself.
+          first=$(printf '%s' "$BODY" | head -1 | tr -d '\r' | sed -E 's#^/judge##')
+          read -ra TOK <<< "$first"
+          BS=""; BN=""; FORCE=""
+          for t in "${TOK[@]}"; do
+            case "$t" in
+              force) FORCE="--force" ;;
+              ''|*[!0-9]*)
+                echo "::error::unrecognised /judge argument '$t' (usage: /judge [<batch_size> [<batch_number>]] [force])"
+                exit 1 ;;
+              *)
+                if [ -z "$BS" ]; then BS=$t
+                elif [ -z "$BN" ]; then BN=$t
+                else echo "::error::too many numbers in '/judge$first'"; exit 1; fi ;;
+            esac
+          done
+          if [ -n "$BS" ]; then
+            BN="${BN:-1}"
+            echo "limit=--batch-size $BS --batch-number $BN" >> "$GITHUB_OUTPUT"
+            echo "batch=batch $BN of size $BS" >> "$GITHUB_OUTPUT"
           else
             echo "limit=" >> "$GITHUB_OUTPUT"
+            echo "batch=all trials" >> "$GITHUB_OUTPUT"
           fi
+          echo "force=$FORCE" >> "$GITHUB_OUTPUT"
+          echo "Scope: $( [ -n "$BS" ] && echo "batch $BN of size $BS" || echo "all trials" )$( [ -n "$FORCE" ] && echo ", regrading" )"
+
+          # Seed the judge's output dir with the committed scores so its
+          # skip-if-scored rule (and --force) work in CI as they do locally.
+          # A record is written under the file name run_llm_judge would use
+          # for that trial at the record's own model/effort; a record judged
+          # by a different model than the current default therefore does not
+          # match and is re-scored, which is the right outcome.
+          scores="leaderboard/scores/$(basename "$path")"
+          mkdir -p /tmp/judge/scores
+          if gh api "repos/${{ github.repository }}/contents/$scores?ref=$HEAD_SHA" \
+               --jq '.content' 2>/dev/null | base64 -d > /tmp/existing-scores.json \
+             && [ -s /tmp/existing-scores.json ]; then
+            uv run python - "$scores" <<'PY'
+          import json, sys
+          from pathlib import Path
+          records = json.loads(Path("/tmp/existing-scores.json").read_text())
+          for tid, rec in records.items():
+              name = f"judge-{rec.get('model')}-{rec.get('reasoning_effort') or 'none'}-{tid}.json"
+              (Path("/tmp/judge/scores") / name).write_text(json.dumps(rec, indent=2))
+          print(f"Seeded {len(records)} existing record(s) from {sys.argv[1]}")
+          PY
+          else
+            rm -f /tmp/existing-scores.json
+            echo "No committed scores yet; every trial is unscored"
+          fi
+          # Anything the judge writes from here on is newer than this marker.
+          touch /tmp/judge/.started
 
       # Model and effort are left at the script's defaults (openai-gpt-5.4,
       # effort high) so these scores match what the public split's in-container
@@ -133,7 +197,8 @@ jobs:
           set -euo pipefail
           uv run python run_llm_judge.py -od /tmp/judge \
             ${{ steps.jobs.outputs.args }} \
-            ${{ steps.jobs.outputs.limit }}
+            ${{ steps.jobs.outputs.limit }} \
+            ${{ steps.jobs.outputs.force }}
 
       # One file per submission, mirroring leaderboard/submissions/<name>.json,
       # keyed by trial id. Committed to the bot branch so the maintainer reviews
@@ -159,13 +224,28 @@ jobs:
           SUB_PATH: ${{ steps.jobs.outputs.sub_path }}
         run: |
           set -euo pipefail
-          uv run python - "$SUB_PATH" <<'PY'
+          BOT_BRANCH=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.ref')
+          dest="leaderboard/scores/$(basename "$SUB_PATH")"
+          git fetch --depth=1 origin "$BOT_BRANCH"
+          git checkout -B "$BOT_BRANCH" FETCH_HEAD
+          mkdir -p leaderboard/scores
+
+          # Merge what this run judged into the committed file: a trial judged
+          # in this run replaces its old record, every other trial keeps its
+          # record. Only files newer than the .started marker are this run's
+          # -- the rest were seeded from the committed file and are unchanged.
+          uv run python - "$dest" <<'PY'
           import json, sys
           from pathlib import Path
 
-          out = Path("/tmp/scores.json")
-          records = {}
+          out = Path(sys.argv[1])
+          records = json.loads(out.read_text()) if out.is_file() else {}
+          n_before = len(records)
+          n_new = 0
+          started = Path("/tmp/judge/.started").stat().st_mtime
           for p in sorted(Path("/tmp/judge/scores").glob("*.json")):
+              if p.stat().st_mtime <= started:
+                  continue
               d = json.loads(p.read_text())
               tid = d.get("trial_id")
               if not tid:
@@ -179,25 +259,26 @@ jobs:
               if leaked:
                   sys.exit(f"{p.name} carries {sorted(leaked)}; refusing to commit")
               records[tid] = d
+              n_new += 1
           out.write_text(json.dumps(dict(sorted(records.items())), indent=2) + "\n")
-          print(f"{len(records)} trial score(s) -> {out}")
+          print(f"{n_new} trial(s) judged in this run; {out} now holds {len(records)} "
+                f"record(s) (was {n_before})")
+          with open("/tmp/scores-count.txt", "w") as fh:
+              fh.write(f"{n_new} {len(records)}")
           PY
 
-          BOT_BRANCH=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.ref')
-          dest="leaderboard/scores/$(basename "$SUB_PATH")"
-          git fetch --depth=1 origin "$BOT_BRANCH"
-          git checkout -B "$BOT_BRANCH" FETCH_HEAD
-          mkdir -p leaderboard/scores
-          cp /tmp/scores.json "$dest"
           git add "$dest"
           echo "dest=$dest" >> "$GITHUB_OUTPUT"
+          read -r n_new n_total < /tmp/scores-count.txt
+          echo "n_new=$n_new" >> "$GITHUB_OUTPUT"
+          echo "n_total=$n_total" >> "$GITHUB_OUTPUT"
           if git diff --cached --quiet; then
             echo "scores unchanged; nothing to commit"
             exit 0
           fi
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -m "Judge scores for $(basename "$SUB_PATH" .json)" \
+              commit -m "Judge scores for $(basename "$SUB_PATH" .json) ($n_new trial(s) judged; $n_total on file)" \
                      -m "Written by /judge from run #${{ github.run_id }}."
           git push origin "$BOT_BRANCH"
           echo "Committed $dest to $BOT_BRANCH"
@@ -251,6 +332,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SAVED_TO: ${{ steps.save.outputs.dest }}
           SUB_PATH: ${{ steps.jobs.outputs.sub_path }}
+          BATCH: ${{ steps.jobs.outputs.batch }}
+          FORCE: ${{ steps.jobs.outputs.force }}
+          N_TOTAL: ${{ steps.save.outputs.n_total }}
         run: |
           uv run python - <<'PY' > /tmp/comment.md
           import json
@@ -265,7 +349,14 @@ jobs:
           CONTROL = "no_incident_llm_judge"
           ERRORS = ("llm_judge_error", "hub_fetch_error")
 
-          paths = sorted(Path("/tmp/judge/scores").glob("*.json"))
+          # Only this run's files: the rest were seeded from the committed
+          # scores and are summarized by the "on file" count instead.
+          marker = Path("/tmp/judge/.started")
+          started = marker.stat().st_mtime if marker.exists() else 0
+          paths = sorted(
+              p for p in Path("/tmp/judge/scores").glob("*.json")
+              if p.stat().st_mtime > started
+          )
           modes, rewards, acc, hall = Counter(), [], [], []
           n_control = n_retried = 0
           for p in paths:
@@ -301,7 +392,10 @@ jobs:
                   f"❌ **LLM Judge** — the run did not finish (`{outcome}`). See the "
                   f"[log]({os.environ.get('RUN_URL', '')}). Partial results below.\n"
               )
-          out.append(f"**LLM Judge** — {len(paths)} trial(s), {n_err} errored\n")
+          scope = os.environ.get("BATCH") or "all trials"
+          if os.environ.get("FORCE"):
+              scope += ", regraded"
+          out.append(f"**LLM Judge** — {scope}: {len(paths)} trial(s) judged, {n_err} errored\n")
           out.append("| Mode | Count |\n| --- | ---: |")
           out += [f"| `{m}` | {c} |" for m, c in modes.most_common()]
           out.append("")
@@ -321,7 +415,9 @@ jobs:
           )
           saved = os.environ.get("SAVED_TO")
           if saved:
-              out.insert(1, f"Per-trial scores committed to `{saved}` on this branch.\n")
+              total = os.environ.get("N_TOTAL")
+              out.insert(1, f"Per-trial scores merged into `{saved}` on this branch"
+                            + (f" — {total} record(s) on file." if total else ".") + "\n")
           # The leaderboard's own numbers, as static_analysis computed them from
           # the scores and wrote them into the submission (or why it did not).
           metrics_outcome = os.environ.get("METRICS_OUTCOME", "")
