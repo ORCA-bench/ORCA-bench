@@ -402,7 +402,7 @@ jobs:
           out.append("")
           out.append("| Metric | Value |\n| --- | --- |")
           out.append(
-              f"| Mean reward (incident) | {sum(rewards)/len(rewards):.3f} |"
+              f"| Mean reward (incident) | {sum(rewards)/len(rewards):.3f} (n={len(rewards)}) |"
               if rewards else "| Mean reward (incident) | — |"
           )
           out.append(f"| RCA accuracy (incident) | {pct(acc)} |")
