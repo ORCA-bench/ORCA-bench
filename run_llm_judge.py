@@ -171,7 +171,7 @@ async def judge_with_retry(
     because deciding what is worth another draw is project knowledge; the
     waiting is the library's because it is not.
 
-    The wait is exponential **with jitter**. That matters at concurrency 10: a
+    The wait is exponential **with jitter**. That matters at concurrency 100: a
     rate limit typically rejects several in-flight calls at once, and a fixed
     backoff would have them all sleep the same interval and retry in a
     synchronized burst against the limit that just rejected them.
@@ -489,8 +489,8 @@ async def main() -> None:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=10,
-        help="Maximum number of concurrent LLM judge API calls (default: 10).",
+        default=100,
+        help="Maximum number of concurrent LLM judge API calls (default: 100).",
     )
     parser.add_argument(
         "--max-retries",
