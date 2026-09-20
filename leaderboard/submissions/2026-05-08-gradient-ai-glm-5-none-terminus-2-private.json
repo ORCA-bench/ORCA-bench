@@ -1,0 +1,23 @@
+{
+  "board": "private",
+  "source_jobs": [
+    "https://hub.harborframework.com/jobs/dd8ef6eb-c019-55a7-9ddc-8f89f392bccd"
+  ],
+  "source_filter": {
+    "agent": "terminus-2",
+    "agent_version": "2.0.0",
+    "model_name": "gradient_ai/glm-5",
+    "reasoning_effort": null
+  },
+  "metadata": {
+    "agent_display": "Terminus 2",
+    "agent_org": "Harbor",
+    "model_display": "GLM-5",
+    "model_org": "Z.ai",
+    "date": "2026-05-08",
+    "reasoning_effort": null
+  },
+  "metrics": null,
+  "disqualified_trials": [],
+  "credited_trials": []
+}
