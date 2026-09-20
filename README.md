@@ -177,7 +177,8 @@ number. Submit with the same flow, running
 [Submitting to the private leaderboard](./leaderboard/SUBMIT.md#submitting-to-the-private-leaderboard).
 
 Maintainers setting the repo up for the first time should read
-[`leaderboard/SETUP.md`](./leaderboard/SETUP.md).
+[`leaderboard/SETUP.md`](./leaderboard/SETUP.md); publishing a new dataset
+revision is covered by [`PUBLISH.md`](./PUBLISH.md).
 
 ## Constructing the dataset
 
