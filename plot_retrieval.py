@@ -50,7 +50,6 @@ from utils import (
     MODEL_ALIASES,
     get_base_parser,
     load_data,
-    load_invalid_trial_ids,
     setup_logging,
 )
 
@@ -185,14 +184,10 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging(args.log_level)
 
-    invalid_ids: set[str] = (
-        load_invalid_trial_ids(args.filter_xlsx) if args.filter_xlsx else set()
-    )
-
     # Panels (a) and (b): telemetry-call aggregates from the classifications.
     trial_to_group = build_trial_to_group(args.jobs_dir)
     telem = aggregate_telemetry_classifications(
-        args.output_dir / "telemetry_classifications", trial_to_group, invalid_ids
+        args.output_dir / "telemetry_classifications", trial_to_group
     )
     calls_by_model: dict[str, tuple[float, float]] = {
         _relabel(_short_group_label(g)): _mean_sem(per_trial)
@@ -220,7 +215,7 @@ def main() -> None:
     # TODO: once ``utils.load_data`` can filter to a single judge model at the
     # source, select only that judge's rows here so each trial counts once.
     # Until then we pool over every scored row load_data returns.
-    df = load_data(args.jobs_dir, args.effort, args.filter_xlsx)
+    df = load_data(args.jobs_dir, args.effort)
     df["_disp"] = df["_agent_model"].map(
         lambda m: _relabel(MODEL_ALIASES.get(m, m)) if isinstance(m, str) else m
     )
