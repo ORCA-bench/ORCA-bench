@@ -1,24 +1,55 @@
 #!/usr/bin/env python3
-r"""Run LLM-as-a-judge evaluation on harbor-export output.
+r"""Run LLM-as-a-judge evaluation on Harbor trials.
 
-Reads OUTPUT_DIR/all-predictions.json (produced by ``harbor-export``) and
-scores every trial with GPT 5.4.  Results are written back to OUTPUT_DIR.
+Scores trials from either of two sources, selected by exactly one of ``--job``
+or ``--jobs-dir``:
+
+* ``--job <uuid>`` -- Hub jobs. Both halves of the judge input come from the Hub
+  (``harbor_utils.hub_source``): the agent's ``report.md`` from the trial
+  archive, and the ground truth from the task package.
+* ``--jobs-dir <path>`` -- a local Harbor jobs tree
+  (``harbor_utils.local_source``). Reports are read from
+  ``<job>/<trial>/verifier/report.md`` and trials are identified by their
+  directory name, the same key ``utils.load_trials`` and
+  ``backfill_verifier_outputs`` use.
+
+Only the reports differ between the modes. Ground truth always comes from the
+task package, resolved by the ``task.name`` each trial records -- a trial
+directory carries no rubric -- so both modes need Hub credentials.
+
+Per-trial results are written under OUTPUT_DIR.
 
 Usage::
 
-    # Score all trials
-    uv run python run_llm_judge.py -od out-0224-curl --rubrics-dir rubrics/
+    # Score every trial of a Hub job
+    uv run python run_llm_judge.py -od out-0224 --job <job-uuid>
 
-    # Score batch 2 of size 5 (trials 6-10)
-    uv run python run_llm_judge.py -od out-0224-curl --rubrics-dir rubrics/ \\
-        --batch-size 5 --batch-number 2
+    # Score batch 2 of size 50, across two Hub jobs
+    uv run python run_llm_judge.py -od out-0224 \\
+        --job <uuid-a> --job <uuid-b> --batch-size 50 --batch-number 2
 
-Prerequisite: run ``harbor-export`` with ``--registry-url`` to include
-task_meta and expected in the JSON::
+    # Score a local jobs tree
+    uv run python run_llm_judge.py -od out-0224 --jobs-dir path/to/jobs
 
-    uv run harbor-export <jobs_dir> -od <output_dir> \\
-        --registry-url https://huggingface.co/datasets/.../registry.json
+Trials of the answer-free ``-hidden`` split are scored against their oracle
+twin's ground truth, which is what makes this script the scoring path for
+``orca-bench/orca-bench-private`` -- those tasks ship without a rubric and
+cannot be scored in-container (see build_harbor_tasks.py).
 
+Model and reasoning effort default to what the in-container verifier uses
+(``openai-gpt-5.4``, effort ``high``), so scores are comparable with the ones
+the public split's verifier produced. Override with ``-m`` / ``-e``.
+
+Requires HARBOR_API_KEY (or a ``harbor auth login`` session) with read access to
+the oracle tasks, plus OPENAI_API_KEY for the judge itself. Access is checked
+before any trial is downloaded.
+
+Trials already scored under OUTPUT_DIR/scores are skipped *before* their report
+is fetched, so a re-run costs neither API calls nor downloads. Pass --force to
+re-score.
+
+Failed trials are retried in-run (see --max-retries) and again on the next
+invocation: a trial saved with an error mode is not treated as scored.
 """
 
 import asyncio
@@ -27,24 +58,165 @@ import logging
 import math
 import os
 import sys
+import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    AsyncOpenAI,
+    AuthenticationError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
+from harbor_utils import hub_source, local_source
 from utils import get_base_parser, setup_logging
 
 # Add the directory containing check_prediction.py to sys.path so we can
 # import the judge helpers.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_prediction import (
-    DEFAULT_MODEL,
     aggregate_judge_response,
+    build_rewards,
+    default_model,
     judge,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Retry policy
+# ---------------------------------------------------------------------------
+#
+# The OpenAI SDK already retries connection failures, 408, 409, 429 and 5xx
+# twice on its own (max_retries=2), so an API error arriving here has survived
+# three attempts. This layer exists for the two cases that survives does not
+# cover: a condition that outlasts the SDK's backoff -- a sustained rate limit
+# or provider incident -- and the parse failures the SDK cannot see at all,
+# because they happen after a perfectly successful HTTP call.
+
+_RETRYABLE_API_ERRORS: tuple[type[Exception], ...] = (
+    APIConnectionError,  # covers APITimeoutError
+    RateLimitError,
+    InternalServerError,
+)
+
+# parse_judge_response raises these after a 200: a model emitting
+# markdown-fenced JSON despite Structured Outputs, output truncated at
+# max_output_tokens, or a per-rubric score outside [0, 3]. They are sampling
+# flakes -- a second draw usually fixes them -- and are the failures most worth
+# retrying, since without this they get exactly one attempt.
+#
+# JSONDecodeError is a ValueError, so the second entry is redundant; both are
+# listed to document the two distinct failures. ValueError is broad enough to
+# also catch a deterministic bug, which then costs max_retries wasted calls --
+# bounded, and preferable to letting a flake lose the trial.
+_RETRYABLE_PARSE_ERRORS: tuple[type[Exception], ...] = (json.JSONDecodeError, ValueError)
+
+# No draw fixes a bad or unentitled key. Not retried, so a misconfigured run
+# fails fast per trial instead of paying max_retries times over for each.
+_FATAL_ERRORS: tuple[type[Exception], ...] = (AuthenticationError, PermissionDeniedError)
+
+_RETRY_BASE_DELAY_SEC = 5.0
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Whether a second attempt at ``judge()`` could plausibly succeed."""
+    if isinstance(exc, _FATAL_ERRORS):
+        return False
+    return isinstance(exc, _RETRYABLE_API_ERRORS + _RETRYABLE_PARSE_ERRORS)
+
+
+def _log_retry(label: str, max_retries: int):
+    """tenacity ``before_sleep`` hook: report the failure and the wait."""
+
+    def hook(retry_state) -> None:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        logger.warning(
+            f"{label}: attempt {retry_state.attempt_number}/{max_retries + 1} "
+            f"failed ({type(exc).__name__}: {exc}); retrying in "
+            f"{retry_state.next_action.sleep:.0f}s"
+        )
+
+    return hook
+
+
+async def judge_with_retry(
+    client: AsyncOpenAI,
+    expected: dict[str, Any],
+    predictions: str,
+    rubric_data: list[dict[str, Any]],
+    *,
+    model: str,
+    reasoning_effort: str | None,
+    max_retries: int,
+    label: str,
+) -> tuple[dict[str, Any], int]:
+    """``judge()`` with bounded retries. Returns ``(result, attempts_used)``.
+
+    Uses tenacity's ``AsyncRetrying`` as an explicit loop rather than the
+    ``@retry`` decorator, which would hide the attempt count this returns. The
+    split matches harbor's own ``supabase_rpc_retry``: the predicate is ours
+    because deciding what is worth another draw is project knowledge; the
+    waiting is the library's because it is not.
+
+    The wait is exponential **with jitter**. That matters at concurrency 10: a
+    rate limit typically rejects several in-flight calls at once, and a fixed
+    backoff would have them all sleep the same interval and retry in a
+    synchronized burst against the limit that just rejected them.
+
+    ``reraise=True`` so the caller sees the original exception -- the error
+    payload records its type, and a ``RetryError`` wrapper would erase that.
+
+    Note that ``process_trial`` holds the judge semaphore across this whole
+    call, so the backoff sleeps with a concurrency slot still taken. That is
+    deliberate, and independent of the retry API used: under a rate limit the
+    stalled slot is one fewer concurrent request, so the wait throttles the run
+    rather than freeing capacity to re-apply the pressure that caused the
+    failure. Moving the acquire inside the loop body would trade that for
+    better throughput on isolated flakes.
+    """
+    attempt_number = 0
+    async for attempt in AsyncRetrying(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(max_retries + 1),
+        wait=wait_random_exponential(multiplier=_RETRY_BASE_DELAY_SEC, max=60),
+        before_sleep=_log_retry(label, max_retries),
+        reraise=True,
+    ):
+        with attempt:
+            attempt_number = attempt.retry_state.attempt_number
+            try:
+                result = await judge(
+                    client,
+                    expected,
+                    predictions,
+                    rubric_data,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            except _FATAL_ERRORS as exc:
+                # _is_retryable already refuses these, so this only adds the
+                # message: one rejected key fails every remaining trial, and
+                # that is worth saying once per occurrence rather than leaving
+                # 324 identical payloads to explain themselves.
+                logger.error(
+                    f"{label}: {type(exc).__name__} -- the judge credentials are "
+                    f"rejected, so every remaining trial will fail the same way: {exc}"
+                )
+                raise
+    return result, attempt_number
 
 
 # ---------------------------------------------------------------------------
@@ -83,90 +255,122 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 async def process_trial(
     client: AsyncOpenAI,
-    semaphore: asyncio.Semaphore,
-    trial_id: str,
-    entry: dict[str, Any],
+    judge_sem: asyncio.Semaphore,
+    download_sem: asyncio.Semaphore,
+    row: dict[str, Any],
+    truth: dict[str, Any],
     model: str,
     reasoning_effort: str | None,
     bs: int,
     batch_num: int,
     scores_dir: Path,
     prompts_dir: Path,
+    work_dir: Path,
     force: bool,
+    max_retries: int,
+    fetch_report: Callable[[str, Path], Awaitable[str]],
 ) -> tuple[str, dict[str, Any] | None]:
     """Score a single trial and write its result to a per-trial JSON file.
 
     Also writes the judge prompt to a sibling ``.md`` under ``prompts_dir``.
 
-    Returns ``(trial_id, None)`` when the trial is skipped because its
-    output file already exists (and ``--force`` was not passed). In that
-    case, the prompt markdown is backfilled from the existing JSON if
-    missing.
+    The already-scored check runs *before* the report is fetched, so a re-run
+    neither downloads archives nor calls the judge; it returns
+    ``(trial_id, None)`` when the trial is skipped that way.
     """
+    trial_id = row["id"]
+    task_name = row.get("task_name", "")
     out_path = _trial_score_path(scores_dir, model, reasoning_effort, trial_id)
     prompt_path = _trial_prompt_path(prompts_dir, model, reasoning_effort, trial_id)
     if out_path.is_file() and not force:
         existing = json.loads(out_path.read_text())
-        if existing.get("mode") != "llm_judge_error":
-            if not prompt_path.is_file():
-                prompt_text = existing.get("judge_prompt")
-                if prompt_text:
-                    _atomic_write_text(prompt_path, prompt_text)
+        if existing.get("mode") not in ("llm_judge_error", "hub_fetch_error"):
             return trial_id, None
         logger.info(f"Trial {trial_id}: previous run errored, re-scoring")
 
-    task_meta = entry.get("task_meta", {})
-    task_name = entry.get("result", {}).get("task_name", "")
-    flag = task_meta.get("flag", "")
-    rubric_data = entry.get("rubric") or []
-    expected = entry.get("expected", {})
+    rubric_data = truth.get("rubric") or []
+    expected = truth.get("expected", {})
 
-    async with semaphore:
+    def _error_payload(mode: str, exc: Exception) -> dict[str, Any]:
+        # Same keys as a scored payload so every score file has one shape, plus
+        # the diagnosis. reward 0.0 without rca_accuracy / hallucinate_any is
+        # what build_rewards emits when the rollups are undefined, which is the
+        # case here -- there is no verdict to roll up.
+        return {
+            "trial_id": trial_id,
+            "task_name": task_name,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "batch_size": bs,
+            "batch_number": batch_num,
+            "mode": mode,
+            "reward": 0.0,
+            "error": f"{type(exc).__name__}: {exc}",
+            "raw_response": getattr(exc, "raw_response", None),
+        }
+
+    # Bounded separately from the judge: in Hub mode a fetch is disk- and
+    # bandwidth-bound and pulls a whole trial archive for one markdown file. In
+    # jobs-dir mode it is a local read and the bound costs nothing.
+    async with download_sem:
         try:
-            result = await judge(
-                client,
-                expected,
-                entry.get("predictions", ""),
-                rubric_data,
-                model=model,
-                reasoning_effort=reasoning_effort,
-            )
+            predictions = await fetch_report(trial_id, work_dir)
         except Exception as exc:
-            logger.error(f"Trial {trial_id} ({task_name}) failed: {exc}")
-            payload = {
-                "trial_id": trial_id,
-                "task_name": task_name,
-                "error": f"{type(exc).__name__}: {exc}",
-                "raw_response": getattr(exc, "raw_response", None),
-                "reward": 0.0,
-                "mode": "llm_judge_error",
-                "model": model,
-                "reasoning_effort": reasoning_effort,
-                "batch_size": bs,
-                "batch_number": batch_num,
-                "rca_depth": 0,
-                "rubric_used": bool(rubric_data),
-                "flag": flag,
-            }
+            logger.error(f"Trial {trial_id} ({task_name}) report read failed: {exc}")
+            payload = _error_payload("hub_fetch_error", exc)
             _atomic_write_json(out_path, payload)
             return trial_id, payload
 
-    # Materialize the post-hoc rca_depth (mean across rubrics) so the runtime
-    # log and the saved JSON both surface it. Downstream consumers (load_trials
-    # in utils.py) re-derive it from ``nested`` anyway, but having it at the top
-    # level matches the historical schema and makes per-trial files greppable.
+    async with judge_sem:
+        try:
+            result, attempts = await judge_with_retry(
+                client,
+                expected,
+                predictions,
+                rubric_data,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                max_retries=max_retries,
+                label=f"Trial {trial_id} ({task_name})",
+            )
+        except Exception as exc:
+            logger.error(f"Trial {trial_id} ({task_name}) failed: {exc}")
+            payload = _error_payload("llm_judge_error", exc)
+            _atomic_write_json(out_path, payload)
+            return trial_id, payload
+
+    # The scores are exactly what the in-container verifier persists to
+    # reward.json, produced by the same function, so the two cannot drift: the
+    # reward plus whichever of rca_accuracy / hallucinate_any is defined. A
+    # rollup that is None is omitted rather than written as null, and the
+    # booleans are cast to int -- both are build_rewards' doing, and both are
+    # what makes these comparable with a Hub trial's own metrics.
+    #
+    # Everything in ``result`` that names the answer stays out by construction:
+    # ``nested`` and ``judge_response_raw`` key their verdicts by feature_flag,
+    # ``judge_prompt`` embeds the rubric, and ``reasoning_summary`` is the judge
+    # explaining which root cause it matched. That is what makes a score file
+    # publishable next to a submission. The judge prompt is still written to
+    # prompts_dir for local debugging; that directory is not.
     agg = aggregate_judge_response(result["nested"], mode=result.get("mode"))
     rca_depth = agg["rca_depth"] if agg["rca_depth"] is not None else 0
     payload = {
         "trial_id": trial_id,
         "task_name": task_name,
+        "model": model,
         "reasoning_effort": reasoning_effort,
         "batch_size": bs,
         "batch_number": batch_num,
-        "flag": flag,
-        **result,
-        "rca_depth": rca_depth,
+        # Kept from ``result``: the skip check above and the CI summary both
+        # branch on mode, and control tasks are identified by it.
+        "mode": result.get("mode"),
+        **build_rewards(agg, rca_depth / 3.0),
     }
+    # Recorded only when it took more than one draw, so a clean run's schema is
+    # unchanged and a flaky one is visible after the fact -- CI logs are
+    # ephemeral, the score file is not.
+    if attempts > 1:
+        payload["attempts"] = attempts
     _atomic_write_json(out_path, payload)
     prompt_text = result.get("judge_prompt")
     if prompt_text:
@@ -176,17 +380,21 @@ async def process_trial(
 
 async def process_batch(
     client: AsyncOpenAI,
-    semaphore: asyncio.Semaphore,
-    batch: list[str],
-    all_data: dict[str, Any],
+    judge_sem: asyncio.Semaphore,
+    download_sem: asyncio.Semaphore,
+    batch: list[dict[str, Any]],
+    truth: dict[str, dict[str, Any]],
     batch_num: int,
     n_batches: int,
     scores_dir: Path,
     prompts_dir: Path,
+    work_dir: Path,
     force: bool,
     model: str,
     reasoning_effort: str | None,
     bs: int,
+    max_retries: int,
+    fetch_report: Callable[[str, Path], Awaitable[str]],
 ) -> None:
     """Process all trials in a batch concurrently; write per-trial JSONs."""
     logger.info(f"=== Batch {batch_num}/{n_batches}: {len(batch)} trials ===")
@@ -194,18 +402,22 @@ async def process_batch(
     tasks = [
         process_trial(
             client,
-            semaphore,
-            trial_id,
-            all_data[trial_id],
+            judge_sem,
+            download_sem,
+            row,
+            truth[row["task_name"]],
             model,
             reasoning_effort,
             bs,
             batch_num,
             scores_dir,
             prompts_dir,
+            work_dir,
             force,
+            max_retries,
+            fetch_report,
         )
-        for trial_id in batch
+        for row in batch
     ]
     results = await asyncio.gather(*tasks)
 
@@ -216,7 +428,8 @@ async def process_batch(
             continue
         logger.info(
             f"  [{i + 1}/{len(batch)}] {result.get('task_name', '')}: "
-            f"rca_depth={result.get('rca_depth', 'N/A')}/3 "
+            f"reward={result.get('reward', 0.0):.2f} "
+            f"rca_accuracy={result.get('rca_accuracy', '-')} "
             f"(mode={result.get('mode', '?')})"
         )
     logger.info(f"Batch {batch_num}/{n_batches}: scored={n_scored} skipped={n_skipped}")
@@ -228,10 +441,32 @@ async def process_batch(
 
 
 async def main() -> None:
-    """Run the LLM judge on all trials in all-predictions.json."""
+    """Run the LLM judge on every trial of the given Hub jobs."""
     parser = get_base_parser()
-    parser.description = "Run LLM-as-a-judge evaluation on harbor-export output."
-    parser.set_defaults(model=DEFAULT_MODEL)
+    parser.description = "Run LLM-as-a-judge evaluation on Harbor Hub trials."
+    # Match the in-container verifier, which is what produced every score
+    # these are compared against: tests/test.sh runs check_prediction.py with
+    # no arguments, so it judges at its own defaults (openai-gpt-5.4, effort
+    # high). The shared base parser defaults --effort to None, which would
+    # silently judge this split at a different reasoning effort.
+    # Resolved here, not at import: load_dotenv() runs in __main__, after
+    # this module is imported, and the default follows $OPENAI_BASE_URL.
+    parser.set_defaults(model=default_model(), effort="high")
+    # The shared base parser defaults --jobs-dir to Path("jobs"), which would
+    # make local mode look requested on every run; blank it so passing the flag
+    # is what selects the mode.
+    parser.set_defaults(jobs_dir=None)
+    parser.add_argument(
+        "--job",
+        "-j",
+        action="append",
+        default=None,
+        metavar="UUID",
+        help=(
+            "Harbor Hub job to score (link or bare UUID). Repeatable. "
+            "Mutually exclusive with --jobs-dir."
+        ),
+    )
     parser.add_argument(
         "--batch-size",
         "-bs",
@@ -258,67 +493,68 @@ async def main() -> None:
         help="Maximum number of concurrent LLM judge API calls (default: 10).",
     )
     parser.add_argument(
-        "--sampled-tasks-file",
-        type=Path,
-        default=None,
+        "--max-retries",
+        type=int,
+        default=2,
         help=(
-            "Optional JSON file whose top-level keys are task names. "
-            "When set, only trials whose task_name is in this set are scored."
+            "Retries per trial for failures a second draw can fix -- malformed "
+            "judge JSON, and rate limits or 5xx that outlast the OpenAI SDK's "
+            "own retries (default: 2). Waits are exponential with jitter. "
+            "0 disables."
+        ),
+    )
+    parser.add_argument(
+        "--download-concurrency",
+        type=int,
+        default=4,
+        help=(
+            "Maximum number of concurrent trial-archive downloads (default: 4). "
+            "Each holds one whole archive on disk while its report is read."
         ),
     )
     args = parser.parse_args()
     setup_logging(args.log_level)
 
+    if bool(args.job) == bool(args.jobs_dir):
+        parser.error("pass exactly one of --job (Hub) or --jobs-dir (local tree)")
+
     output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load predictions
-    predictions_path = output_dir / "all-predictions.json"
-    if not predictions_path.is_file():
-        logger.error(f"No predictions file found at {predictions_path}")
-        logger.error("Run `harbor-export <jobs_dir> -od <output_dir>` first.")
+    # Only the listing and the report reader differ between the two modes;
+    # ground truth comes from the task packages either way.
+    if args.jobs_dir is not None:
+        rows = local_source.list_trials(args.jobs_dir)
+        fetch_report = local_source.report_reader(rows)
+        origin = str(args.jobs_dir)
+    else:
+        # Bare UUIDs or hub links; the trailing path segment is the id either way.
+        job_ids = [link.rstrip("/").split("/")[-1] for link in args.job]
+        await hub_source.check_hub_auth()
+        rows = await hub_source.list_job_trials(job_ids)
+        fetch_report = hub_source.fetch_report
+        origin = ", ".join(job_ids)
+
+    if not rows:
+        logger.error(f"No trials found for {origin}")
         sys.exit(1)
+    rows.sort(key=lambda r: r["id"])
 
-    logger.info(f"Loading predictions from {predictions_path}...")
-    with predictions_path.open() as f:
-        all_data = json.load(f)
-
-    # Sort trial IDs deterministically
-    trial_ids = sorted(all_data.keys())
-    logger.info(f"Found {len(trial_ids)} trials total")
-
-    if args.sampled_tasks_file is not None:
-        with args.sampled_tasks_file.open() as f:
-            allowed = set(json.load(f).keys())
-        before = len(trial_ids)
-        trial_ids = [
-            tid
-            for tid in trial_ids
-            if all_data[tid].get("result", {}).get("task_name") in allowed
-        ]
-        logger.info(
-            f"Filtered to {len(trial_ids)}/{before} trials "
-            f"({len(allowed)} allowed task names from {args.sampled_tasks_file})"
-        )
-
-    # Verify that task_meta and expected are present
-    sample_entry = next(iter(all_data.values()), {})
-    if "task_meta" not in sample_entry or "expected" not in sample_entry:
-        logger.error(
-            "all-predictions.json is missing task_meta and/or expected fields. "
-            "Re-run `harbor-export` with --registry-url to include them."
-        )
-        sys.exit(1)
+    if args.jobs_dir is not None:
+        # A trial dir carries no rubric, so the task packages still come from
+        # the registry even when the reports are local.
+        await hub_source.check_hub_auth()
 
     # Batching
     if args.batch_size is not None:
-        n_batches = math.ceil(len(trial_ids) / args.batch_size)
+        n_batches = math.ceil(len(rows) / args.batch_size)
         batches = [
-            trial_ids[i : i + args.batch_size]
-            for i in range(0, len(trial_ids), args.batch_size)
+            rows[i : i + args.batch_size]
+            for i in range(0, len(rows), args.batch_size)
         ]
     else:
         n_batches = 1
-        batches = [trial_ids]
+        batches = [rows]
 
     if args.batch_number is not None:
         if args.batch_number < 1 or args.batch_number > n_batches:
@@ -331,6 +567,23 @@ async def main() -> None:
             f"Running batch {args.batch_number}/{n_batches} ({len(batches[0])} trials)"
         )
 
+    # Ground truth is fetched up front, but only for the tasks this run will
+    # actually judge -- resolving it before batching meant `--batch-size 1`
+    # downloaded every task package in the tree to score one trial. Fetching
+    # ahead of the batches still buys the thing it was for: a missing rubric
+    # fails before any judging spend rather than silently scoring a trial
+    # against nothing. With no batching flags this is every row, as before.
+    selected = [row for batch in batches for row in batch]
+    task_names = [r["task_name"] for r in selected]
+    await hub_source.check_task_access(hub_source.oracle_package(task_names[0]))
+    truth = await hub_source.load_ground_truth(task_names)
+    missing = sorted({n for n in task_names if not truth.get(n, {}).get("expected")})
+    if missing:
+        logger.error(
+            f"{len(missing)} task(s) resolved no ground truth, e.g. {missing[:3]}"
+        )
+        sys.exit(1)
+
     # Init async OpenAI client
     client = AsyncOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"),
@@ -338,31 +591,38 @@ async def main() -> None:
     )
 
     # Process batches sequentially (trials within each batch run concurrently)
-    bs = args.batch_size if args.batch_size is not None else len(trial_ids)
+    bs = args.batch_size if args.batch_size is not None else len(rows)
     scores_dir = output_dir / "scores"
     scores_dir.mkdir(exist_ok=True)
     prompts_dir = output_dir / "judge_prompts"
     prompts_dir.mkdir(exist_ok=True)
-    semaphore = asyncio.Semaphore(args.concurrency)
+    judge_sem = asyncio.Semaphore(args.concurrency)
+    download_sem = asyncio.Semaphore(args.download_concurrency)
 
-    for batch_idx, batch in enumerate(batches):
-        batch_num = (
-            args.batch_number if args.batch_number is not None else batch_idx + 1
-        )
-        await process_batch(
-            client,
-            semaphore,
-            batch,
-            all_data,
-            batch_num,
-            n_batches,
-            scores_dir,
-            prompts_dir,
-            args.force,
-            args.model,
-            args.effort,
-            bs,
-        )
+    with tempfile.TemporaryDirectory(prefix="hub-trials-", dir=output_dir) as tmp:
+        work_dir = Path(tmp)
+        for batch_idx, batch in enumerate(batches):
+            batch_num = (
+                args.batch_number if args.batch_number is not None else batch_idx + 1
+            )
+            await process_batch(
+                client,
+                judge_sem,
+                download_sem,
+                batch,
+                truth,
+                batch_num,
+                n_batches,
+                scores_dir,
+                prompts_dir,
+                work_dir,
+                args.force,
+                args.model,
+                args.effort,
+                bs,
+                args.max_retries,
+                fetch_report,
+            )
     logger.info("Done!")
 
 

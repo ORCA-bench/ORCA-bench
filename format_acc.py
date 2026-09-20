@@ -77,7 +77,7 @@ else:
 # %%
 # Scores come from each trial's verifier/reward-details.json; output_dir is
 # only the write location for the CSVs below. ``_report_path`` is set by
-# load_trials, so no all-predictions.json join is needed.
+# load_trials, so no separate join is needed to reach the agent's report.
 df = load_data(jobs_dir, effort)
 
 # %%
