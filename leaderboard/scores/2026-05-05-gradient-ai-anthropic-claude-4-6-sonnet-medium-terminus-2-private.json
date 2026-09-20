@@ -7,7 +7,7 @@
     "batch_size": 20,
     "batch_number": 1,
     "mode": "llm_judge",
-    "reward": 0.3333333333333333,
+    "reward": 0.2777777777777778,
     "rca_accuracy": 0,
     "hallucinate_any": 0
   },
@@ -67,7 +67,7 @@
     "batch_size": 20,
     "batch_number": 1,
     "mode": "llm_judge",
-    "reward": 0.19999999999999998,
+    "reward": 0.3333333333333333,
     "rca_accuracy": 0,
     "hallucinate_any": 0
   },
@@ -90,7 +90,7 @@
     "batch_size": 20,
     "batch_number": 1,
     "mode": "llm_judge",
-    "reward": 0.5833333333333334,
+    "reward": 0.5,
     "rca_accuracy": 0,
     "hallucinate_any": 0
   },
@@ -102,7 +102,7 @@
     "batch_size": 20,
     "batch_number": 1,
     "mode": "llm_judge",
-    "reward": 0.4166666666666667,
+    "reward": 0.5833333333333334,
     "rca_accuracy": 0,
     "hallucinate_any": 0
   },
@@ -126,7 +126,7 @@
     "batch_size": 20,
     "batch_number": 1,
     "mode": "llm_judge",
-    "reward": 0.8333333333333334,
+    "reward": 0.6666666666666666,
     "rca_accuracy": 1,
     "hallucinate_any": 0
   },
