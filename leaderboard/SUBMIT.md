@@ -309,7 +309,13 @@ When it finishes:
 
 A trial the judge could not score (`llm_judge_error`, `hub_fetch_error`)
 shows up in that summary as errored; the maintainer re-runs `/judge` before
-merging rather than merge a partially judged submission.
+merging rather than merge a partially judged submission. A re-run judges only
+the trials that still lack a verdict (errored ones included) and merges the
+results into the committed file, so it costs only what is missing. The
+maintainer can also scope or repeat a run: `/judge <batch_size> <batch_number>`
+scores one batch of the submission's trials (sorted by id, 1-indexed), and a
+trailing `force` — `/judge force`, `/judge 20 3 force` — regrades the selected
+trials even though they already have a verdict.
 
 **Review + merge** then proceeds as for the public board, with the metrics
 already computed from the committed scores instead of the trials' own rewards.

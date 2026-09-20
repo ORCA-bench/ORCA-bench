@@ -149,7 +149,10 @@ writes nothing for it, and the bot PR opens without metrics. `/judge` then
 commits `leaderboard/scores/<name>.json` and, in the same run, calls
 `static_analysis --scores … --write-metrics`, which refuses unless the scores
 cover every trial and otherwise writes the metrics into the submission on the
-bot branch. On merge, `ci/submit.py` re-checks the merged scores file against
+bot branch. The committed file is seeded into the judge's output dir before
+each run and this run's results are merged back into it, so `/judge` scores
+only what lacks a verdict, `/judge <size> <number>` scores one batch, and a
+trailing `force` regrades the selection (`leaderboard-judge.yml` header). On merge, `ci/submit.py` re-checks the merged scores file against
 the submission's trials before posting the row, so a submission merged without
 a judge run, or on a partial one, gets no row. A push to the bot PR re-runs
 static analysis with the scores file if the PR head has one, so its sticky
