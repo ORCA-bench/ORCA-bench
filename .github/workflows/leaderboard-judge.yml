@@ -190,6 +190,7 @@ jobs:
           mkdir -p leaderboard/scores
           cp /tmp/scores.json "$dest"
           git add "$dest"
+          echo "dest=$dest" >> "$GITHUB_OUTPUT"
           if git diff --cached --quiet; then
             echo "scores unchanged; nothing to commit"
             exit 0
@@ -199,8 +200,37 @@ jobs:
               commit -m "Judge scores for $(basename "$SUB_PATH" .json)" \
                      -m "Written by /judge from run #${{ github.run_id }}."
           git push origin "$BOT_BRANCH"
-          echo "dest=$dest" >> "$GITHUB_OUTPUT"
           echo "Committed $dest to $BOT_BRANCH"
+
+      # The private board's metrics come from these scores, not from the trials
+      # (which carry none), so they are written here rather than at promote.
+      # static_analysis refuses unless the scores cover every trial of the
+      # submission, so a partial judge run leaves the submission without
+      # metrics and the merge step will not post it; re-run /judge instead.
+      - name: Write the metrics into the submission
+        id: metrics
+        if: steps.save.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARBOR_API_KEY: ${{ secrets.HARBOR_API_KEY }}
+          PR: ${{ github.event.issue.number }}
+          SUB_PATH: ${{ steps.jobs.outputs.sub_path }}
+          SCORES: ${{ steps.save.outputs.dest }}
+        run: |
+          set -euo pipefail
+          uv sync --project leaderboard
+          uv run --project leaderboard python -m leaderboard.ci.static_analysis \
+            "$SUB_PATH" --scores "$SCORES" --write-metrics | tee /tmp/metrics.json
+          git add "$SUB_PATH"
+          if git diff --cached --quiet; then
+            echo "metrics unchanged; nothing to commit"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Metrics for $(basename "$SUB_PATH" .json) from the judge scores" \
+                     -m "Written by /judge from run #${{ github.run_id }}."
+          git push origin "$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.ref')"
 
       # Counts and aggregates only -- no per-trial detail is quoted, since the
       # comment is readable by anyone who can see the PR.
@@ -217,8 +247,10 @@ jobs:
         if: always()
         env:
           JUDGE_OUTCOME: ${{ steps.judge.outcome }}
+          METRICS_OUTCOME: ${{ steps.metrics.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SAVED_TO: ${{ steps.save.outputs.dest }}
+          SUB_PATH: ${{ steps.jobs.outputs.sub_path }}
         run: |
           uv run python - <<'PY' > /tmp/comment.md
           import json
@@ -290,6 +322,27 @@ jobs:
           saved = os.environ.get("SAVED_TO")
           if saved:
               out.insert(1, f"Per-trial scores committed to `{saved}` on this branch.\n")
+          # The leaderboard's own numbers, as static_analysis computed them from
+          # the scores and wrote them into the submission (or why it did not).
+          metrics_outcome = os.environ.get("METRICS_OUTCOME", "")
+          if metrics_outcome == "success":
+              try:
+                  m = json.loads(Path("/tmp/metrics.json").read_text())
+                  out.append(
+                      f"\n**Leaderboard metrics** written into `{os.environ.get('SUB_PATH')}`:\n"
+                  )
+                  out.append("| Metric | Result |\n| --- | --- |")
+                  out += [
+                      f"| {k.removesuffix('_display')} | {v} |"
+                      for k, v in m.items() if k.endswith("_display")
+                  ]
+              except (OSError, ValueError):
+                  out.append("\nLeaderboard metrics were written into the submission.")
+          elif metrics_outcome == "failure":
+              out.append(
+                  "\n❌ **Leaderboard metrics not written** — the scores do not cover "
+                  "every trial (see the log); re-run `/judge` before merging."
+              )
           print("\n".join(out))
           PY
           cat /tmp/comment.md
@@ -303,7 +356,8 @@ jobs:
           path: /tmp/comment.md
 
       # continue-on-error above kept the summary reachable; the job itself must
-      # still go red so the PR does not look judged when it is not.
+      # still go red so the PR does not look judged when it is not. The same
+      # for the metrics: a judged-but-unscored submission is not mergeable.
       - name: Fail if the judge failed
-        if: steps.judge.outcome != 'success'
+        if: steps.judge.outcome != 'success' || steps.metrics.outcome == 'failure'
         run: exit 1

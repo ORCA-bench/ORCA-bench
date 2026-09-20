@@ -168,6 +168,14 @@ A trial that produced no verdict — the run died before the verifier scored it 
 is excluded rather than counted as zero, matching how `format_acc.py` treats
 unscored trials.
 
+**Private leaderboard.** The 324 held-out tasks are published separately as
+`orca-bench/orca-bench-private`, with the answers stripped from the task
+package; they are scored out-of-band by a maintainer-run LLM judge (the same
+judge the public verifier uses), so this is the contamination-resistant
+number. Submit with the same flow, running
+`-d orca-bench/orca-bench-private` instead of the public dataset — see
+[Submitting to the private leaderboard](./leaderboard/SUBMIT.md#submitting-to-the-private-leaderboard).
+
 Maintainers setting the repo up for the first time should read
 [`leaderboard/SETUP.md`](./leaderboard/SETUP.md).
 

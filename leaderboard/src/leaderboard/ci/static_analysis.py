@@ -29,11 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from leaderboard.core.hub import (
-    DATASET,
-    DATASET_REF,
+    PRIVATE,
+    Board,
     dataset_task_digests,
     hub_json,
     job_uuid,
+    submission_board,
     submission_trials,
 )
 from leaderboard.core.metrics import (
@@ -44,7 +45,12 @@ from leaderboard.core.metrics import (
     compute_subset_metrics,
     format_resource_cells,
     format_metrics_table,
+    judged_trials,
+    load_scores,
+    private_task_labels,
+    scores_coverage_failure,
     submission_by_task,
+    submission_coverage,
     metric_counts,
 )
 from leaderboard.core.task_groups import task_labels
@@ -54,8 +60,8 @@ TRIAL_CONCURRENCY = 24
 
 # A submission must cover every task in the dataset, with at least this many
 # trials each. The expected task count is NOT hardcoded: it is derived from the
-# canonical DATASET@DATASET_REF task list the digest check already fetches, so
-# republishing the dataset can never leave a stale constant behind.
+# canonical task list of the board's dataset@ref the digest check already
+# fetches, so republishing the dataset can never leave a stale constant behind.
 MIN_TRIALS_PER_TASK = 1
 
 REQUIRED_METADATA = ("agent_display", "agent_org", "model_display", "model_org", "date")
@@ -99,6 +105,9 @@ class Result:
     n_disqualified: int = 0
     n_credited: int = 0
     errors: Counter = field(default_factory=Counter)
+    # Private board, no scores yet: the metrics are computed by /judge on the
+    # bot PR, so the comment says so instead of showing an empty table.
+    metrics_pending: bool = False
 
     @property
     def passed(self) -> bool:
@@ -134,21 +143,22 @@ def timeout_multiplier_ok(config: dict) -> bool:
     return tm is None or tm == 1.0
 
 
-def dataset_entry_failure(config: dict) -> str:
-    """'' when the job ran DATASET at the pinned version, else why not.
+def dataset_entry_failure(config: dict, board: Board) -> str:
+    """'' when the job ran the board's dataset at the pinned version, else why
+    not.
 
     The job config always names its datasets, but does not always record a
     resolved `ref` (harbor 0.15.0 writes only `name` + `task_names`). When the
     ref is absent the version is pinned by the per-trial task-digest check
     instead, which compares every trial's task sha256 against the canonical
-    DATASET@DATASET_REF task list -- a stronger guarantee than one dataset-level
-    label, since it verifies content per task.
+    task list of the board's dataset@ref -- a stronger guarantee than one
+    dataset-level label, since it verifies content per task.
     """
-    entries = [d for d in config.get("datasets", []) if d.get("name") == DATASET]
+    entries = [d for d in config.get("datasets", []) if d.get("name") == board.dataset]
     if not entries:
-        return f"did not run {DATASET}"
+        return f"did not run {board.dataset}"
     refs = [d.get("ref") for d in entries if d.get("ref") is not None]
-    if refs and DATASET_REF not in refs:
+    if refs and board.ref not in refs:
         return "ref mismatch"
     return ""
 
@@ -219,9 +229,12 @@ def _agent_override_msg(agent: dict) -> str:
     return ", ".join(_section_overrides(agent, _AGENT_OVERRIDES))
 
 
-def run(submission: dict, *, per_trial: bool = True) -> Result:
+def run(
+    submission: dict, *, per_trial: bool = True, scores: dict[str, dict] | None = None
+) -> Result:
     sf = submission["source_filter"]
     md = submission.get("metadata", {})
+    board = submission_board(submission)
     configs = {
         job_uuid(link): hub_json(["job", "show", job_uuid(link)]).get("config", {})
         for link in submission["source_jobs"]
@@ -230,8 +243,8 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
 
     res = Result()
 
-    # The dataset is a repo-level constant, not part of the filter key; the
-    # "Valid dataset reference" check below pins it per job.
+    # The dataset is fixed by the submission's board, not part of the filter
+    # key; the "Valid dataset reference" check below pins it per job.
     ok = all(agents.values())
     res.checks.append(
         Check("Valid source_filter", ok, "" if ok else "no matching agent in job config")
@@ -276,18 +289,20 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     res.checks.append(Check("No resource overrides", not r_bad, r_bad))
 
     ref_bad = next(
-        (m for c in configs.values() if (m := dataset_entry_failure(c))),
+        (m for c in configs.values() if (m := dataset_entry_failure(c, board))),
         "",
     )
-    res.checks.append(Check("Valid dataset reference", not ref_bad, ref_bad))
+    res.checks.append(
+        Check(f"Valid dataset reference ({board.dataset})", not ref_bad, ref_bad)
+    )
 
-    # The canonical task list for DATASET@DATASET_REF. Fetched once and used
-    # twice: its length is the expected task count (no hardcoded constant to go
-    # stale on a republish), and the per-trial check below compares each trial's
-    # task ref against it. Only the length is used for the count check -- the
-    # bulk rows' `task_name` and the registry's `org/name` keys are different
-    # namespaces, so comparing counts is the format-independent test.
-    expected_digests = dataset_task_digests()
+    # The canonical task list for the board's dataset@ref. Fetched once and
+    # used twice: its length is the expected task count (no hardcoded constant
+    # to go stale on a republish), and the per-trial check below compares each
+    # trial's task ref against it. Only the length is used for the count check
+    # -- the bulk rows' `task_name` and the registry's `org/name` keys are
+    # different namespaces, so comparing counts is the format-independent test.
+    expected_digests = dataset_task_digests(board)
     expected_task_count = len(expected_digests)
 
     # Fetch the bulk trials once; metrics/errors/counts derive from it (one
@@ -300,11 +315,15 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
         if t.get("error_type") is not None:
             res.errors[t["error_type"]] += 1
 
+    # A task is covered by a scored or overridden trial -- and, on the private
+    # board only, by a trial that finished without a verdict, which is every
+    # private trial by construction (see metrics.submission_coverage).
+    covered = submission_coverage(trials, submission, board)
     count_msg = ""
-    if len(by_task) != expected_task_count:
-        count_msg = f"{len(by_task)} tasks (expected {expected_task_count})"
-    elif any(len(rs) < MIN_TRIALS_PER_TASK for rs in by_task.values()):
-        short = sum(len(rs) < MIN_TRIALS_PER_TASK for rs in by_task.values())
+    if len(covered) != expected_task_count:
+        count_msg = f"{len(covered)} tasks (expected {expected_task_count})"
+    elif any(n < MIN_TRIALS_PER_TASK for n in covered.values()):
+        short = sum(n < MIN_TRIALS_PER_TASK for n in covered.values())
         count_msg = f"{short} task(s) below {MIN_TRIALS_PER_TASK} trials"
     res.checks.append(
         Check(
@@ -316,11 +335,34 @@ def run(submission: dict, *, per_trial: bool = True) -> Result:
     res.n_trials = len(trials)
     res.n_scored = sum(len(rs) for rs in by_task.values())
     res.resources = compute_resource_metrics(trials)
-    # The same breakdown compute_submission_metrics publishes, so the PR comment
-    # and the stored row can't disagree.
-    labels = task_labels()
-    res.metrics = compute_subset_metrics(trials, submission, labels)
-    res.metric_counts = metric_counts(trials, labels)
+
+    if board is PRIVATE and scores is None:
+        # Private-split metrics come from the /judge scores committed to
+        # leaderboard/scores/ on the bot PR, not from trial rewards (there are
+        # none). Before /judge has run there is nothing to compute; passing
+        # here is what lets the intake PR be promoted, and the merge step
+        # refuses a private submission whose scores never arrived.
+        res.checks.append(
+            Check("Private-split scoring", True, "pending /judge on the bot PR")
+        )
+        res.metrics_pending = True
+    elif board is PRIVATE:
+        # /judge has run: every trial needs a verdict before a mean over them
+        # can be published as the submission's number.
+        cov_bad = scores_coverage_failure(trials, scores)
+        res.checks.append(Check("Judge scores cover every trial", not cov_bad, cov_bad))
+        if not cov_bad:
+            judged = judged_trials(trials, scores)
+            labels = private_task_labels(board, judged)
+            res.n_scored = sum("judge_mode" in t for t in judged)
+            res.metrics = compute_subset_metrics(judged, submission, labels)
+            res.metric_counts = metric_counts(judged, labels)
+    else:
+        # The same breakdown compute_submission_metrics publishes, so the PR
+        # comment and the stored row can't disagree.
+        labels = task_labels(board)
+        res.metrics = compute_subset_metrics(trials, submission, labels)
+        res.metric_counts = metric_counts(trials, labels)
 
     if per_trial:
         # Fetch each trial's own config + task digest in-process -- the
@@ -377,7 +419,7 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
         out.append(f"| **Total** | **{result.n_trials}** |\n")
         # Without this the reader sees a Total that the accuracy below is not a
         # mean over. Unscored trials are dropped from the metric, so say so.
-        if result.n_scored != result.n_trials:
+        if result.n_scored != result.n_trials and not result.metrics_pending:
             out.append(
                 f"{result.n_trials - result.n_scored} trial(s) produced no verdict "
                 f"and are excluded from the metrics below, which are computed over "
@@ -390,9 +432,17 @@ def render(result: Result, submission: dict, ctx: dict) -> str:
             f"{md.get('model_display')} [{md.get('model_org')}] · {effort} · "
             f"{md.get('agent_display')} [{md.get('agent_org')}] · {md.get('date')}\n"
         )
-        out.append(
-            "\n".join(format_metrics_table(result.metrics, result.metric_counts)) + "\n"
-        )
+        if result.metrics_pending:
+            out.append(
+                "Private-split trials carry no verdict on the Hub. The metrics are "
+                "computed once a maintainer runs `/judge` on the promoted PR, from "
+                "the scores it commits to `leaderboard/scores/`.\n"
+            )
+        else:
+            out.append(
+                "\n".join(format_metrics_table(result.metrics, result.metric_counts))
+                + "\n"
+            )
         # The blank line above matters: without it markdown folds the resource
         # rows into the metrics table.
         out.append(
@@ -427,18 +477,43 @@ def main() -> None:
         "--write-metrics",
         action="store_true",
         help="Compute metrics (honoring disqualified/credited trials), write them into the "
-        "submission JSON in place, print them, and exit -- used by promote.",
+        "submission JSON in place, print them, and exit -- used by promote, and by "
+        "/judge (with --scores) for the private board.",
+    )
+    ap.add_argument(
+        "--scores",
+        type=Path,
+        default=None,
+        help="The /judge scores file for a private-board submission "
+        "(leaderboard/scores/<name>.json). Required to compute its metrics; "
+        "without it a private submission checks as 'pending /judge'.",
     )
     args = ap.parse_args()
 
     submission = json.loads(args.path.read_text())
+    scores = load_scores(args.scores) if args.scores is not None else None
     if args.write_metrics:
-        submission["metrics"] = compute_submission_metrics(submission)
+        if submission_board(submission) is PRIVATE and scores is None:
+            # Promote runs --write-metrics on every green submission, before
+            # /judge can have run. There is nothing to compute yet, and metrics
+            # from trial rewards would be nonsense (the -hidden tasks never
+            # produce any), so leave the file alone; /judge writes them later.
+            print(
+                "private-board submission: metrics are computed by /judge from "
+                "leaderboard/scores/<name>.json (pass --scores); nothing written."
+            )
+            return
+        try:
+            submission["metrics"] = compute_submission_metrics(submission, scores=scores)
+        except ValueError as exc:
+            # A partial judge run: the submission keeps no metrics, so the
+            # merge step will not post it. The message says what to do.
+            sys.exit(f"metrics not written: {exc}")
         args.path.write_text(json.dumps(submission, indent=2) + "\n")
         print(json.dumps(submission["metrics"]))
         return
 
-    result = run(submission, per_trial=not args.no_per_trial)
+    result = run(submission, per_trial=not args.no_per_trial, scores=scores)
     ctx = {
         "repo": os.environ.get("GITHUB_REPOSITORY", "ORCA-bench/ORCA-bench"),
         "run_id": os.environ.get("GITHUB_RUN_ID", "0"),

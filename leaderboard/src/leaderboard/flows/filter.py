@@ -1,12 +1,14 @@
 """filter: split a Hub job's agents into leaderboard submission rows.
 
 Input:  one or more Harbor job links (or bare job UUIDs).
-Output: one JSON file per unique (agent, agent_version, model_name,
+Output: one JSON file per unique (board, agent, agent_version, model_name,
         reasoning_effort) in submissions/, named
-        <date>-<model>-<reasoning_effort>-<agent>.json.
+        <date>-<model>-<reasoning_effort>-<agent>[-<board>].json -- the board
+        suffix is omitted for the public board, so its filenames (and the
+        `submission/<stem>` branches derived from them) are unchanged.
 
-Each file records `source_jobs`, `source_filter`, and a scaffolded `metadata`
-block: date and reasoning_effort are filled here; the display fields
+Each file records `board`, `source_jobs`, `source_filter`, and a scaffolded
+`metadata` block: date and reasoning_effort are filled here; the display fields
 (agent_display, agent_org, model_display, model_org) are left null for
 `lb metadata` to populate. Trial ids and metrics are re-derived / computed
 downstream (in CI).
@@ -15,12 +17,13 @@ Any new agent/model is also scaffolded into the display-name map
 (display_names.json) as a null entry, so you can fill the nulls directly (and
 skip the `lb metadata` prompts) or let that command prompt for them.
 
-Filtering is anchored to DATASET (this repo's leaderboard dataset): a job that
-did not run it is rejected, so other datasets are never considered. The
-dataset itself is a repo-level constant, not part of the filter key.
+Filtering is anchored to the boards' datasets (core.hub.BOARDS): a job that
+ran neither is rejected, so other datasets are never considered. Each trial's
+`source` names the dataset it ran, which picks the board; a job that ran both
+datasets yields separate files, one per board.
 
 Data comes from `harbor hub job show <uuid> --json` (config.agents gives the
-reasoning_effort; config.datasets is checked against DATASET; the job's
+reasoning_effort; config.datasets is checked against the boards; the job's
 finished_at gives the date) plus the job's bulk trial listing (`harbor hub job
 trials`), which carries the agent version the job config doesn't. Metadata
 only -- no trial content is downloaded.
@@ -37,7 +40,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from leaderboard.core.hub import (
-    DATASET,
+    BOARDS,
+    PUBLIC,
+    board_for_dataset,
     hub_job_trials,
     hub_json,
     job_uuid,
@@ -48,21 +53,23 @@ DEFAULT_DISPLAY_NAMES = Path(__file__).resolve().parents[1] / "display_names.jso
 
 
 def job_filter_keys(uuid: str) -> tuple[list[tuple], str | None]:
-    """Return this job's (agent, agent_version, model_name, reasoning_effort)
-    keys + date.
+    """Return this job's (board, agent, agent_version, model_name,
+    reasoning_effort) keys + date.
 
     agent / agent_version / model_name come from the job's bulk trial rows
     (the job config doesn't carry the agent version); reasoning_effort comes
-    from the config.agents entry matching the trial's agent + model. Exits if
-    the job did not run DATASET.
+    from the config.agents entry matching the trial's agent + model; the board
+    comes from the trial's `source` dataset. Exits if the job ran no board's
+    dataset.
     """
     overview = hub_json(["job", "show", uuid])
     datasets = [
         d.get("name") for d in overview.get("config", {}).get("datasets", [])
     ]
-    if DATASET not in datasets:
+    if not any(board_for_dataset(d) for d in datasets):
+        wanted = ", ".join(b.dataset for b in BOARDS.values())
         sys.exit(
-            f"job {uuid} did not run {DATASET} "
+            f"job {uuid} ran none of the leaderboard datasets ({wanted}) "
             f"(datasets: {', '.join(filter(None, datasets)) or 'none'})"
         )
     finished_at = overview.get("finished_at")
@@ -75,10 +82,12 @@ def job_filter_keys(uuid: str) -> tuple[list[tuple], str | None]:
     keys: list[tuple] = []
     trial_times: list[str] = []
     for t in hub_job_trials(uuid):
-        if t.get("source") != DATASET:
+        board = board_for_dataset(t.get("source"))
+        if board is None:
             continue
         agent, model_name = t.get("agent_name"), trial_model(t)
         key = (
+            board.key,
             agent,
             t.get("agent_version"),
             model_name,
@@ -112,7 +121,7 @@ def scaffold_display_names(keys: list[tuple], path: Path) -> int:
     agents = mapping.setdefault("agents", {})
     models = mapping.setdefault("models", {})
     added = 0
-    for agent, _version, model_name, _ in keys:
+    for _board, agent, _version, model_name, _ in keys:
         if agent not in agents:
             agents[agent] = {"display_name": None, "display_org": None}
             added += 1
@@ -129,9 +138,9 @@ def filter_jobs(
     submissions_dir: Path = Path("submissions"),
     display_names: Path = DEFAULT_DISPLAY_NAMES,
 ) -> list[Path]:
-    """Write one submission JSON per (agent, agent version, model, effort) key
-    across the given job links. Returns the written paths (input to the next
-    flow step)."""
+    """Write one submission JSON per (board, agent, agent version, model,
+    effort) key across the given job links. Returns the written paths (input
+    to the next flow step)."""
     # source_jobs[key] = links that contributed; dates[key] = job finish times.
     source_jobs: dict[tuple, list[str]] = defaultdict(list)
     dates: dict[tuple, list[str]] = defaultdict(list)
@@ -154,10 +163,14 @@ def filter_jobs(
     for key, job_links in sorted(
         source_jobs.items(), key=lambda kv: tuple(x or "" for x in kv[0])
     ):
-        agent, agent_version, model_name, reasoning_effort = key
+        board_key, agent, agent_version, model_name, reasoning_effort = key
         # Date = latest contributing job's finish date (YYYY-MM-DD).
         date = max(dates[key])[:10] if dates[key] else "unknown"
         row = {
+            # Which leaderboard this file targets (core.hub.BOARDS). Written
+            # explicitly even for the public board; older files that predate
+            # the field are read as public.
+            "board": board_key,
             "source_jobs": job_links,
             "source_filter": {
                 "agent": agent,
@@ -182,8 +195,14 @@ def filter_jobs(
             "disqualified_trials": [],
             "credited_trials": [],
         }
+        # The public board keeps the original filename shape so existing
+        # submissions and their `submission/<stem>` branches stay addressable;
+        # any other board is suffixed so the same run on both boards cannot
+        # collide.
+        suffix = "" if board_key == PUBLIC.key else f"-{board_key}"
         filename = (
-            f"{date}-{_slug(model_name)}-{_slug(reasoning_effort)}-{_slug(agent)}.json"
+            f"{date}-{_slug(model_name)}-{_slug(reasoning_effort)}-{_slug(agent)}"
+            f"{suffix}.json"
         )
         path = submissions_dir / filename
         path.write_text(json.dumps(row, indent=2))

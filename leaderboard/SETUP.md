@@ -6,12 +6,14 @@ This `leaderboard/` folder is a self-contained project (own `pyproject.toml`,
 benchmark-neutral `leaderboard` package) vendored from
 [harbor-index](https://github.com/harbor-framework/harbor-index) without
 touching ORCA-bench's root project. The per-benchmark constants live in exactly
-three places:
+two places:
 
-- `src/leaderboard/core/hub.py` — `DATASET`, `DATASET_REF`
+- `src/leaderboard/core/hub.py` — the two `Board`s, `PUBLIC` and `PRIVATE`:
+  each one's dataset, pinned `ref`, and hub leaderboard name (the leaderboard
+  package is the dataset). A submission names its board in its `board` field;
+  files that predate the field are public.
 - `src/leaderboard/ci/static_analysis.py` — `MIN_TRIALS_PER_TASK` (the expected
   task count is derived from the dataset registry, not hardcoded)
-- `src/leaderboard/ci/submit.py` — `LEADERBOARD_PACKAGE`, `LEADERBOARD_NAME`
 
 Plus `src/leaderboard/display_names.json`, which seeds the display-name map.
 
@@ -59,14 +61,23 @@ jq -r .api_key ~/.harbor/credentials.json   # the raw key, for CI secrets etc.
 harbor itself reads the stored key automatically; a `HARBOR_API_KEY` env var
 takes precedence when set — that's how CI supplies it.
 
-## The dataset
+## The datasets
 
-Published as `orca-bench/orca-bench` (755 tasks), pinned in
-[`core/hub.py`](src/leaderboard/core/hub.py) as
-`sha256:2add497ac2f93468dba1b83977c295a784c89031754e6a35520195345ad62ada`.
+Two, one per board, pinned in [`core/hub.py`](src/leaderboard/core/hub.py):
 
-**The dataset is public**, so anyone can fetch it and run the benchmark. CI
-still passes `HARBOR_API_KEY` because the submission flow writes (cloning
+| Board | Dataset | Tasks | Pinned ref |
+| --- | --- | --- | --- |
+| `PUBLIC` | `orca-bench/orca-bench` | 755 | `sha256:2add497ac2f93468dba1b83977c295a784c89031754e6a35520195345ad62ada` |
+| `PRIVATE` | `orca-bench/orca-bench-private` | 324 | `sha256:ab44e871420e7c32540c36c8c2af5f8cb75bf48e371e3f19791540339dfdac81` |
+
+The private dataset is the held-out split's answer-free `-hidden` tasks
+(published 2026-09-19; `out-0919/harbor/datasets/private/` rebuilds it
+byte-for-byte, see [`PUBLISH.md`](../PUBLISH.md)); its oracle twins live in
+`orca-bench/orca-bench-private-internal`, which stays private on the hub and is
+what `/judge` scores against.
+
+**Both datasets are public**, so anyone can fetch them and run the benchmark.
+CI still passes `HARBOR_API_KEY` because the submission flow writes (cloning
 trials, creating rows), not because reading needs it.
 
 If it is ever made private again, the failure mode is worth knowing: an
@@ -82,12 +93,38 @@ Note also that a credentials file written by an older harbor is rejected by
 0.20 ("Found credentials from an older Harbor version"), which silently
 downgrades you to anonymous.
 
-## The leaderboard on the hub
+## The leaderboards on the hub
 
-**Created** — `orca-bench/orca-bench` → leaderboard `orca-bench`, title
-"ORCA-bench", **visibility `public`** (matching the dataset), id
-`dcb96003-d991-4f98-97b6-3813c35daa81`. This matches `LEADERBOARD_PACKAGE` /
-`LEADERBOARD_NAME` in [`ci/submit.py`](src/leaderboard/ci/submit.py).
+**Created** — two boards, each on its own dataset package, both **visibility
+`public`** (matching the datasets), matching `PUBLIC` / `PRIVATE` in
+[`core/hub.py`](src/leaderboard/core/hub.py):
+
+| Board | Package → leaderboard | Title | Definition | Id |
+| --- | --- | --- | --- | --- |
+| public | `orca-bench/orca-bench` → `orca-bench` | ORCA-bench | [`leaderboard.json`](leaderboard.json) | `dcb96003-d991-4f98-97b6-3813c35daa81` |
+| private | `orca-bench/orca-bench-private` → `orca-bench-private` | ORCA-bench (Private) | [`leaderboard-private.json`](leaderboard-private.json) | `3fd8e16b-9412-4bff-a07f-8de46985bd8d` |
+
+The two definitions differ only in `package`, `name`, `title` and
+`description`; the schemas, columns and `rank_by` are identical, so a row is
+shaped the same on either board and the comment renderers are shared.
+
+Each was created from its checked-in definition; the same files drive `update`
+(the account must be allowed to manage the `orca-bench` org's leaderboards):
+
+```bash
+uv run harbor hub leaderboard create --config leaderboard.json --json
+uv run harbor hub leaderboard create --config leaderboard-private.json --json
+
+uv run harbor hub leaderboard list
+uv run harbor hub leaderboard show orca-bench/orca-bench/orca-bench
+uv run harbor hub leaderboard show orca-bench/orca-bench-private/orca-bench-private
+uv run harbor hub leaderboard update --config leaderboard.json
+uv run harbor hub leaderboard update --config leaderboard-private.json
+```
+
+`show` takes the `org/package/name` slug or the id. A private board is hidden
+rather than refused to an anonymous reader (`404 leaderboard not found`), so
+check visibility by reading it with no credentials, not by trusting the field.
 
 The board on the retired uppercase package (`orca-bench/ORCA-bench`, id
 `1b72818f-bd2e-4051-a3d1-634fe44808d7`) is superseded and should be deleted; it
@@ -95,9 +132,68 @@ holds no rows.
 
 Visibility must not run ahead of the dataset's: a public leaderboard over a
 private dataset shows scores nobody can reproduce or submit against. Both are
-public now. A private board is hidden rather than refused — an anonymous read
-returns `404 leaderboard not found`, not a permission error — so test visibility
-by reading it with no credentials rather than by trusting the field.
+public now.
+
+### The private leaderboard: how it differs
+
+[SUBMIT.md](SUBMIT.md#submitting-to-the-private-leaderboard) documents the
+flow for the held-out split — same `lb submit`, then `/judge` on the bot PR,
+then a row on the `orca-bench-private` board. Everything below is in place;
+the two items record what had to change from the public flow and why, since
+each rests on something observed on the Hub rather than on the code alone.
+
+Where a private submission's number comes from, end to end: the intake PR's
+static analysis passes with **Private-split scoring** reading "pending
+`/judge`" (there is nothing to compute yet), promote's `--write-metrics`
+writes nothing for it, and the bot PR opens without metrics. `/judge` then
+commits `leaderboard/scores/<name>.json` and, in the same run, calls
+`static_analysis --scores … --write-metrics`, which refuses unless the scores
+cover every trial and otherwise writes the metrics into the submission on the
+bot branch. On merge, `ci/submit.py` re-checks the merged scores file against
+the submission's trials before posting the row, so a submission merged without
+a judge run, or on a partial one, gets no row. A push to the bot PR re-runs
+static analysis with the scores file if the PR head has one, so its sticky
+comment shows the metrics.
+
+1. ~~**Coverage must count unscored private trials.**~~ Done. Confirmed on
+   the first uploaded private job (`6b469112-157f-5d55-a7c2-25417c2a226d`,
+   2026-09-19): the Hub stores a `{}` rewards map as `evals: {}` with
+   `reward: null` on all 324 rows, so `trial_metric` returns `None` and
+   `MissingRewardMetricError` does not fire. That shape is identical to a
+   trial that errored before its verifier ran — `status` (`completed`) and
+   `is_scored` (`true`) do not separate them either — and only `error_type`
+   does (`None` vs the exception class name). `core.hub.private_trial_finished`
+   keys on exactly that (empty `evals`, private dataset, and no `error_type`
+   or one in `JUDGEABLE_ERRORS`), and `metrics.submission_coverage` counts
+   such a trial as covering its task on the private board only; the **Valid
+   trial count** check now passes on all five uploaded jobs (324 tasks × 1).
+   `JUDGEABLE_ERRORS` mirrors harbor's `SingleStepTrial._run_agent`, which
+   catches exactly `AgentTimeoutError` and `NonZeroAgentExitCodeError`,
+   records them, and still runs the verifier — so the public board *scores*
+   such a trial (mostly 0, from an empty report; job `2026-05-05__05-48-18`
+   has 462 of them public and 204 private), and the two boards must agree on
+   what finished means. Any other error propagates before the verifier, so a
+   trial with it (a setup `RuntimeError`) still does not cover: there is no
+   report for `/judge` to score.
+2. ~~**Metrics from `leaderboard/scores/`.**~~ Done. A private submission's
+   three metrics are computed from `leaderboard/scores/<submission>.json`
+   (written by `/judge`) rather than from trial rewards, by the same
+   `compute_subset_metrics` the public board uses: `metrics.judged_trials`
+   puts each judge record where the Hub would have put the verifier's
+   `reward.json` — the row's `evals` — so a judged private trial reads
+   exactly like a verified public one. A record is required for every trial
+   and must not be an error mode (`llm_judge_error`, `hub_fetch_error`);
+   `metrics.scores_coverage_failure` refuses otherwise, in static analysis,
+   in `--write-metrics`, and again in `ci/submit.py` at merge.
+   `core/task_groups.py` cannot label private tasks as control or incident:
+   the `-hidden` `task.toml` keeps no `events` (whether an incident happened
+   *is* the answer), so every private task reads as control there. The judge
+   knows — its per-trial `mode` is `no_incident_llm_judge` for a control task
+   — so `metrics.private_task_labels` takes control/incident from the scores
+   file and only `difficulty` from the task (`empty_report` is an incident
+   trial that scored 0, not a control). Checked against the first uploaded
+   private job with a scores file rebuilt from the archived judge outputs:
+   324 records, 57 control / 267 incident, all three metrics computed.
 
 ### The package slug must stay lowercase
 
@@ -115,12 +211,9 @@ gone now that the package is `orca-bench/orca-bench`: `ci/submit.py` sends
 `package` + `name` directly, and `tests/test_submit.py` guards the slug against
 regressing to something the hub would reject.
 
-The definition is checked in as [`leaderboard.json`](leaderboard.json) and can
-be passed to `create` / `update` as-is:
-
-```bash
-uv run harbor hub leaderboard create --config leaderboard.json --json
-```
+The definitions are checked in as [`leaderboard.json`](leaderboard.json) and
+[`leaderboard-private.json`](leaderboard-private.json) and are passed to
+`create` / `update` as-is (commands above).
 
 The `metadata_schema` / `metrics_schema` are the contract merged submissions
 must satisfy. `metadata` = the display fields, plus the `pr` markdown link cell
@@ -164,31 +257,30 @@ there by construction and `hallucinate_any` is not emitted at all.
 > rejects a row carrying an unknown key — and that happens at merge time, after
 > the PR is already merged. `tests/test_metrics_schema.py` keeps the checked-in
 > schema and the computed metrics in step, but it cannot see the live hub:
-> run `harbor hub leaderboard update --config leaderboard.json` first.
+> run `harbor hub leaderboard update --config <definition>` for **both**
+> definitions first — the schemas are shared, so a change to one is a change to
+> both.
 
-Verify it, or export the live definition if you need to amend it:
+To amend a definition, export the live one rather than editing blind:
 
 ```bash
-uv run harbor hub leaderboard list
 uv run harbor hub leaderboard export orca-bench/orca-bench/orca-bench
-uv run harbor hub leaderboard update --config leaderboard.json
+uv run harbor hub leaderboard export orca-bench/orca-bench-private/orca-bench-private
 ```
-
-The account you are logged in as must be allowed to manage the `orca-bench`
-org's leaderboards.
 
 The token / cost columns are totals over every trial in the submission
 (disqualified trials included — they still consumed resources). The `pr` cell
 holds a markdown link string; the `markdown` column type tells the renderer to
 render it as a link.
 
-## Re-pinning `DATASET_REF`
+## Re-pinning a board
 
-`src/leaderboard/core/hub.py` pins the exact dataset version submissions must
-run. CI rejects any job whose dataset ref doesn't match, so re-pin it in
-lockstep with every republish:
+`src/leaderboard/core/hub.py` pins, per board, the exact dataset version
+submissions must run. CI rejects any job whose dataset ref doesn't match, so
+re-pin the board's `ref` in lockstep with every republish of its dataset:
 
 ```bash
+# orca-bench/orca-bench for PUBLIC, orca-bench/orca-bench-private for PRIVATE
 uv run python -c "import asyncio; \
   from harbor.registry.client.package import PackageDatasetClient; \
   print(asyncio.run(PackageDatasetClient().get_dataset_metadata('orca-bench/orca-bench@latest')).version)"

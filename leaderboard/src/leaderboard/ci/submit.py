@@ -2,7 +2,8 @@
 
 Called by the merge workflow when a promoted bot PR (submission/pr-N) is merged.
 Reads the submission JSON, builds one leaderboard row (metadata + metrics +
-backing trial ids), and POSTs it to the `leaderboard-row-create` edge function.
+backing trial ids), and POSTs it to the `leaderboard-row-create` edge function
+of the board the submission targets (its `board` field; see core.hub.Board).
 
 The Supabase base URL comes from harbor's own resolution
 (`HARBOR_SUPABASE_URL` env -> dev, else the prod default), so no dev-specific URL
@@ -24,23 +25,13 @@ from pathlib import Path
 
 from harbor.auth.constants import SUPABASE_URL
 
-from leaderboard.core.hub import HUB_URL
+from leaderboard.core.hub import PRIVATE, Board, submission_board, submission_trials
 from leaderboard.core.metrics import (
     RESOURCE_HEADERS,
     format_metrics_table,
     format_resource_cells,
-)
-
-# The leaderboard this repo submits to; the definition lives in SETUP.md.
-# The slug is lowercase, so it satisfies the hub's `package` pattern
-# (/^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_.-]*$/) and doubles as the API
-# selector -- no `package_id` indirection needed.
-LEADERBOARD_PACKAGE = "orca-bench/orca-bench"
-LEADERBOARD_NAME = "orca-bench"
-
-LEADERBOARD_URL = (
-    f"{HUB_URL}/datasets/{LEADERBOARD_PACKAGE}/latest"
-    f"?tab=leaderboard&leaderboard={LEADERBOARD_NAME}"
+    load_scores,
+    scores_coverage_failure,
 )
 
 # Hub metadata_schema allows only these keys (additionalProperties: false).
@@ -91,7 +82,9 @@ def hub_metadata(submission: dict) -> dict:
 
 
 def row_create_payload(submission: dict) -> dict:
-    """The leaderboard-row-create request body for one submission."""
+    """The leaderboard-row-create request body for one submission, addressed
+    to the board it targets."""
+    board = submission_board(submission)
     row = {
         # Whitelist Hub-allowed keys and drop nulls: optional metadata (e.g.
         # reasoning_effort) is typed but not required, and a null fails its
@@ -106,8 +99,8 @@ def row_create_payload(submission: dict) -> dict:
         "trial_ids": submission["trials"],
     }
     return {
-        "package": LEADERBOARD_PACKAGE,
-        "name": LEADERBOARD_NAME,
+        "package": board.leaderboard_package,
+        "name": board.leaderboard_name,
         "rows": [row],
     }
 
@@ -146,13 +139,13 @@ def _footer_ran() -> str:
     return f"<sub>{run} on {commit}.</sub>"
 
 
-def render_comment(row: dict) -> str:
+def render_comment(row: dict, board: Board) -> str:
     md = row.get("metadata", {})
     me = row.get("metrics", {})
     resources = " | ".join(format_resource_cells(me))
     return "\n".join(
         [
-            f"✅ Entry submitted to the [leaderboard]({LEADERBOARD_URL})",
+            f"✅ Entry submitted to the [{board.leaderboard_name} leaderboard]({board.url})",
             "",
             f"{md.get('model_display')} [{md.get('model_org')}] · "
             f"{md.get('reasoning_effort') or '—'} · {md.get('agent_display')} "
@@ -172,18 +165,43 @@ def render_comment(row: dict) -> str:
     )
 
 
+def scores_path(submission_path: Path) -> Path:
+    """Where /judge commits a submission's scores: `leaderboard/scores/<name>`,
+    next to `leaderboard/submissions/<name>` (leaderboard-judge.yml)."""
+    return submission_path.parent.parent / "scores" / submission_path.name
+
+
+def private_scores_failure(submission: dict, submission_path: Path) -> str:
+    """Why a private submission must not be posted, or "" if it may be.
+
+    Its metrics were written by /judge from leaderboard/scores/<name>.json; the
+    merge carried both files to main. Re-check here that the file is present
+    and still covers every trial, so a submission merged without a judge run,
+    or on a partial one, gets no row rather than a number over a subset.
+    """
+    path = scores_path(submission_path)
+    if not path.is_file():
+        return f"no judge scores at {path}; run /judge on the bot PR before merging"
+    return scores_coverage_failure(submission_trials(submission), load_scores(path))
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         sys.exit("usage: submit.py <submission.json>")
-    submission = json.loads(Path(sys.argv[1]).read_text())
+    submission_path = Path(sys.argv[1])
+    submission = json.loads(submission_path.read_text())
     if not submission.get("metrics"):
         sys.exit("submission has no computed metrics; refusing to submit")
     if not submission.get("trials"):
         sys.exit(
             "submission has no materialized trials (promote/clone did not run?); refusing to submit"
         )
+    if submission_board(submission) is PRIVATE:
+        bad = private_scores_failure(submission, submission_path)
+        if bad:
+            sys.exit(f"private-board submission: {bad}; refusing to submit")
     row = submit_row(submission, os.environ["HARBOR_API_KEY"])
-    print(render_comment(row))
+    print(render_comment(row, submission_board(submission)))
 
 
 if __name__ == "__main__":

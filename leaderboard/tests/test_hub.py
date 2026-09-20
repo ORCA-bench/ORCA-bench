@@ -11,7 +11,12 @@ from __future__ import annotations
 import unittest
 
 from leaderboard.core.hub import (
+    BOARDS,
+    PRIVATE,
+    PUBLIC,
     MissingRewardMetricError,
+    board_for_dataset,
+    submission_board,
     trial_metric,
     trial_reward,
 )
@@ -140,6 +145,46 @@ class TrialMetricTests(unittest.TestCase):
 
     def test_errored_trial_is_none_for_any_metric(self):
         self.assertIsNone(trial_metric(_row(None), "rca_accuracy"))
+
+
+class BoardTests(unittest.TestCase):
+    """Two boards, each pinned to its own dataset version. A submission names
+    its board; a trial's `source` dataset picks one."""
+
+    def test_boards_are_distinct_and_pinned(self):
+        self.assertEqual(set(BOARDS), {"public", "private"})
+        self.assertNotEqual(PUBLIC.dataset, PRIVATE.dataset)
+        self.assertNotEqual(PUBLIC.ref, PRIVATE.ref)
+        for board in BOARDS.values():
+            with self.subTest(board=board.key):
+                self.assertTrue(board.ref.startswith("sha256:"))
+                self.assertEqual(len(board.ref), len("sha256:") + 64)
+                self.assertEqual(board.leaderboard_package, board.dataset)
+                self.assertIn(f"leaderboard={board.leaderboard_name}", board.url)
+
+    def test_private_board_is_the_hidden_split(self):
+        self.assertEqual(PRIVATE.dataset, "orca-bench/orca-bench-private")
+        self.assertEqual(PRIVATE.leaderboard_name, "orca-bench-private")
+
+    def test_submission_without_board_is_public(self):
+        """Every file written before the field existed targeted the public
+        board, so the default records a fact rather than guessing."""
+        self.assertIs(submission_board({"source_jobs": []}), PUBLIC)
+
+    def test_submission_board_is_read_from_the_field(self):
+        self.assertIs(submission_board({"board": "public"}), PUBLIC)
+        self.assertIs(submission_board({"board": "private"}), PRIVATE)
+
+    def test_unknown_board_exits(self):
+        with self.assertRaises(SystemExit):
+            submission_board({"board": "verified"})
+
+    def test_board_for_dataset(self):
+        self.assertIs(board_for_dataset(PUBLIC.dataset), PUBLIC)
+        self.assertIs(board_for_dataset(PRIVATE.dataset), PRIVATE)
+        # The HF-registry dev config and unrelated datasets match no board.
+        self.assertIsNone(board_for_dataset("albertgong1/orca-bench-harbor-tasks"))
+        self.assertIsNone(board_for_dataset(None))
 
 
 if __name__ == "__main__":
