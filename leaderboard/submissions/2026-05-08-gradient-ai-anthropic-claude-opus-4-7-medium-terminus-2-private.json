@@ -18,7 +18,18 @@
     "reasoning_effort": "medium",
     "pr": "[#52](https://github.com/ORCA-bench/ORCA-bench/pull/52)"
   },
-  "metrics": null,
+  "metrics": {
+    "rca_accuracy_incident_medium": 29.59,
+    "rca_accuracy_incident_medium_stderr": 4.63,
+    "rca_accuracy_incident_medium_display": "**29.6%** \u00b1 4.6%",
+    "rca_accuracy_incident_hard": 13.92,
+    "rca_accuracy_incident_hard_stderr": 3.92,
+    "rca_accuracy_incident_hard_display": "**13.9%** \u00b1 3.9%",
+    "hallucinate_any_incident": 10.49,
+    "hallucinate_any_incident_stderr": 1.88,
+    "hallucinate_any_incident_display": "**10.5%** \u00b1 1.9%",
+    "total_tokens": 672396291
+  },
   "disqualified_trials": [],
   "credited_trials": [],
   "trials": [
