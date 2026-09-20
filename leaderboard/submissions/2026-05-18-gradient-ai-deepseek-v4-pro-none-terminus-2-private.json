@@ -15,7 +15,8 @@
     "model_display": "DeepSeek V4 Pro",
     "model_org": "DeepSeek",
     "date": "2026-05-18",
-    "reasoning_effort": null
+    "reasoning_effort": null,
+    "pr": "[#55](https://github.com/ORCA-bench/ORCA-bench/pull/55)"
   },
   "metrics": null,
   "disqualified_trials": [],
