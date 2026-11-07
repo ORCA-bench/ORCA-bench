@@ -24,8 +24,33 @@ CONTEXT_DIR="${CONTEXT_DIR:?CONTEXT_DIR must be set}"
 # in docker-compose-base.yml (specifically opensearch's repo bind-mount source).
 export SNAPSHOT_CACHE_HOST_DIR="${SNAPSHOT_CACHE_HOST_DIR:?SNAPSHOT_CACHE_HOST_DIR must be set; run via run_harbor_cached.sh}"
 
+# ── Host/container switches ─────────────────────────────────────────────────
+# Every default below reproduces the Harbor container path exactly, so this
+# script is also runnable directly on the host (see load_snapshot.sh, which
+# only overrides these).  Host differences this covers: /logs and /app do not
+# exist, the host is not a container so it cannot join the compose network,
+# the stack must outlive the script, Docker DNS names do not resolve, and
+# only a subset of services may be wanted.
+ENTRYPOINT_LOG="${ENTRYPOINT_LOG:-/logs/agent/entrypoint.log}"
+PREP_AGENT_FILES="${PREP_AGENT_FILES:-true}"
+JOIN_COMPOSE_NETWORK="${JOIN_COMPOSE_NETWORK:-true}"
+CLEANUP_ON_EXIT="${CLEANUP_ON_EXIT:-true}"
+COMPOSE_SERVICES="${COMPOSE_SERVICES:-}"
+GRAFANA_URL="${GRAFANA_URL:-http://frontend-proxy:8080/grafana}"
+JAEGER_URL="${JAEGER_URL:-http://frontend-proxy:8080/jaeger/ui}"
+OPENSEARCH_URL="${OPENSEARCH_URL:-http://opensearch:9200}"
+PROMETHEUS_URL="${PROMETHEUS_URL:-http://prometheus:9090}"
+# Readiness probe target.  `-` not `:-`: an explicitly empty value is honoured
+# and skips the wait entirely, which a host run needs when frontend-proxy is
+# not among COMPOSE_SERVICES.
+READY_URL="${READY_URL-${GRAFANA_URL}/api/health}"
+# `-` not `:-`: an explicitly empty value is honoured, restoring the bare
+# (non-consolidated) snapshot name that load_snapshot.sh used to request.
+RESTORE_SUFFIX="${RESTORE_SUFFIX--consolidated}"
+REQUIRE_RESTORE="${REQUIRE_RESTORE:-false}"
+
 # ── 0. Tee all output to a persistent log file ──────────────────────────────
-ENTRYPOINT_LOG="/logs/agent/entrypoint.log"
+# ENTRYPOINT_LOG is set in the host/container switches block above.
 mkdir -p "$(dirname "$ENTRYPOINT_LOG")"
 exec > >(tee -a "$ENTRYPOINT_LOG") 2>&1
 
@@ -33,9 +58,11 @@ exec > >(tee -a "$ENTRYPOINT_LOG") 2>&1
 # Harbor's OracleAgent pre-touches log files from the host as root (mode 644),
 # which blocks the agent from writing; touch(existing) only bumps mtime, so
 # the 666 mode sticks. /app is root-owned; pre-create report.md likewise.
-install -m 666 /dev/null /logs/agent/oracle.txt
-install -m 666 /dev/null /logs/agent/exit-code.txt
-install -m 666 /dev/null /app/report.md
+if [ "$PREP_AGENT_FILES" = true ]; then
+    install -m 666 /dev/null /logs/agent/oracle.txt
+    install -m 666 /dev/null /logs/agent/exit-code.txt
+    install -m 666 /dev/null /app/report.md
+fi
 
 # ── 0b. Derive a unique project name for Docker Compose isolation ────────────
 # CONTEXT_DIR looks like: .../tasks/<taskID>/<taskName>/environment
@@ -49,7 +76,7 @@ TASK_ID="$(basename "$(dirname "$(dirname "$CONTEXT_DIR")")")"
 # Both inputs are hashed so neither task scenario nor trial name leaks.
 TRIAL_RAW="${HOST_AGENT_LOGS_PATH:-$(cat /etc/hostname)}"
 PROJECT_HASH="$(printf '%s' "${TASK_ID}-${TASK_NAME}-${TRIAL_RAW}" | sha256sum | cut -c1-12)"
-PROJECT_NAME="otel-${PROJECT_HASH}"
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-otel-${PROJECT_HASH}}"
 export COMPOSE_PROJECT_NAME="$PROJECT_NAME"
 
 # ── 0c. Assign unique host ports for services that need host-port bindings ───
@@ -269,7 +296,9 @@ cleanup() {
     rm -rf "$OTEL_DIR" 2>/dev/null || true
     echo "[entrypoint] [$(date '+%H:%M:%S')] Cleanup took $(( $(date +%s) - t0 ))s"
 }
-trap cleanup EXIT TERM INT
+if [ "$CLEANUP_ON_EXIT" = true ]; then
+    trap cleanup EXIT TERM INT
+fi
 
 # ── 2. Ensure opensearch-data is empty ───────────────────────────────────────
 # OpenSearch must start with an empty data dir so the snapshot restore can
@@ -293,11 +322,13 @@ export OTEL_COLLECTOR_CONFIG="${OTEL_DIR}/otelcol-config-snapshot.yml"
 export JAEGER_CONFIG="${OTEL_DIR}/jaeger-config-snapshot.yml"
 # Pull only images not already cached locally (--policy missing) to avoid
 # ghcr.io rate-limit timeouts when many Harbor tasks start concurrently.
-docker compose --progress=plain --parallel 3 -f "$COMPOSE_FILE" pull --policy missing --include-deps 2>&1 | cat
+# shellcheck disable=SC2086  # COMPOSE_SERVICES is an intentional word-split list
+docker compose --progress=plain --parallel 3 -f "$COMPOSE_FILE" pull --policy missing --include-deps $COMPOSE_SERVICES 2>&1 | cat
 MAX_RETRIES=3
 for attempt in $(seq 1 $MAX_RETRIES); do
     release_ports
-    if docker compose -f "$COMPOSE_FILE" -f "$SNAPSHOT_COMPOSE" up --pull never --force-recreate --remove-orphans --detach 2>&1; then
+    # shellcheck disable=SC2086  # COMPOSE_SERVICES is an intentional word-split list
+    if docker compose -f "$COMPOSE_FILE" -f "$SNAPSHOT_COMPOSE" up --pull never --force-recreate --remove-orphans --detach $COMPOSE_SERVICES 2>&1; then
         break
     fi
     echo "[entrypoint] docker compose up failed (attempt $attempt/$MAX_RETRIES)"
@@ -315,34 +346,43 @@ done
 # reach services by DNS name on a per-trial private network.  This replaces
 # the previous host-networking design, which leaked every other trial's
 # published ports into every agent container.
-SELF_CID="$(cat /etc/hostname)"
-NET_NAME="${COMPOSE_PROJECT_NAME}_default"
-if ! docker network connect "$NET_NAME" "$SELF_CID" 2>/tmp/netconn.err; then
-    # Re-entry is fine: if we're already attached Docker prints
-    # "endpoint with name ... already exists".  Anything else is fatal.
-    if ! grep -q "already exists" /tmp/netconn.err; then
-        echo "[entrypoint] ERROR: could not join network '$NET_NAME'"
-        cat /tmp/netconn.err
-        docker network ls
-        exit 1
+if [ "$JOIN_COMPOSE_NETWORK" = true ]; then
+    SELF_CID="$(cat /etc/hostname)"
+    NET_NAME="${COMPOSE_PROJECT_NAME}_default"
+    if ! docker network connect "$NET_NAME" "$SELF_CID" 2>/tmp/netconn.err; then
+        # Re-entry is fine: if we're already attached Docker prints
+        # "endpoint with name ... already exists".  Anything else is fatal.
+        if ! grep -q "already exists" /tmp/netconn.err; then
+            echo "[entrypoint] ERROR: could not join network '$NET_NAME'"
+            cat /tmp/netconn.err
+            docker network ls
+            exit 1
+        fi
     fi
+    echo "[entrypoint] Joined network $NET_NAME as $SELF_CID"
+else
+    echo "[entrypoint] JOIN_COMPOSE_NETWORK=false — not joining the compose network"
 fi
-echo "[entrypoint] Joined network $NET_NAME as $SELF_CID"
 
 # ── 5. Wait for services to become healthy ──────────────────────────────────
 echo "[entrypoint] Waiting for services to initialise..."
-GRAFANA_URL="http://frontend-proxy:8080/grafana"
+# READY_URL is set in the host/container switches block above.  An empty value
+# skips the wait, which a host run needs when frontend-proxy is not started.
 MAX_WAIT=120
 ELAPSED=0
-while ! curl -s "${GRAFANA_URL}/api/health" > /dev/null 2>&1; do
+while [ -n "$READY_URL" ] && ! curl -s "$READY_URL" > /dev/null 2>&1; do
     if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
-        echo "[entrypoint] Warning: Grafana not reachable after ${MAX_WAIT}s, continuing anyway"
+        echo "[entrypoint] Warning: ${READY_URL} not reachable after ${MAX_WAIT}s, continuing anyway"
         break
     fi
     sleep 5
     ELAPSED=$((ELAPSED + 5))
 done
-echo "[entrypoint] Grafana reachable after ~${ELAPSED}s"
+if [ -n "$READY_URL" ]; then
+    echo "[entrypoint] ${READY_URL} reachable after ~${ELAPSED}s"
+else
+    echo "[entrypoint] READY_URL empty — skipping readiness wait"
+fi
 
 # ── 6. Restore OpenSearch snapshot ──────────────────────────────────────────
 # OpenSearch requires lowercase snapshot names
@@ -353,7 +393,7 @@ echo "[entrypoint] Restoring OpenSearch snapshot: $OS_SNAPSHOT_NAME"
 # repo-side writes (e.g. master.dat refresh) that would otherwise hit EROFS.
 # verify=false skips the post-register verification round-trip, which also
 # attempts a write.
-curl -s -X PUT "http://opensearch:9200/_snapshot/scheduled_backups?verify=false" \
+curl -s -X PUT "${OPENSEARCH_URL}/_snapshot/scheduled_backups?verify=false" \
     -H 'Content-Type: application/json' \
     -d '{"type": "fs", "settings": {"location": "/usr/share/opensearch/snapshots", "readonly": true}}' \
     || echo "[entrypoint] Warning: could not register OpenSearch snapshot repo"
@@ -361,10 +401,20 @@ curl -s -X PUT "http://opensearch:9200/_snapshot/scheduled_backups?verify=false"
 sleep 2
 
 # Restore the snapshot (no need to close indices — opensearch-data starts empty)
-curl -s -X POST "http://opensearch:9200/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}-consolidated/_restore?wait_for_completion=true" \
+curl -s -X POST "${OPENSEARCH_URL}/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}${RESTORE_SUFFIX}/_restore?wait_for_completion=true" \
     -H 'Content-Type: application/json' \
     -d '{"indices": "*", "include_global_state": false}' \
     || echo "[entrypoint] Warning: OpenSearch snapshot restore failed (may not exist for this snapshot)"
+
+# A failed restore is otherwise silent -- the curl above swallows its own
+# error and the cluster is simply left empty, which only shows up much later
+# as "no telemetry".  Count what actually landed and say so.
+RESTORED_INDICES="$(curl -s "${OPENSEARCH_URL}/_cat/indices?h=index" | grep -cE '^(jaeger-|otel-)' || true)"
+echo "[entrypoint] Restored ${RESTORED_INDICES} telemetry indices from ${OS_SNAPSHOT_NAME}${RESTORE_SUFFIX}"
+if [ "${RESTORED_INDICES:-0}" -eq 0 ] && [ "$REQUIRE_RESTORE" = true ]; then
+    echo "[entrypoint] ERROR: snapshot restore produced no telemetry indices" >&2
+    exit 1
+fi
 
 echo "[entrypoint] Environment ready."
 
@@ -373,10 +423,10 @@ echo "[entrypoint] Environment ready."
 # HOST_PORT vars are kept for host-side tools (check_health.sh, find_metrics.py)
 # that run outside the container and still hit the published host ports.
 cat > /tmp/env-ports <<EOF
-export GRAFANA_URL=http://frontend-proxy:8080/grafana
-export JAEGER_URL=http://frontend-proxy:8080/jaeger/ui
-export OPENSEARCH_URL=http://opensearch:9200
-export PROMETHEUS_URL=http://prometheus:9090
+export GRAFANA_URL=${GRAFANA_URL}
+export JAEGER_URL=${JAEGER_URL}
+export OPENSEARCH_URL=${OPENSEARCH_URL}
+export PROMETHEUS_URL=${PROMETHEUS_URL}
 export ENVOY_HOST_PORT=${ENVOY_HOST_PORT}
 export ENVOY_ADMIN_HOST_PORT=${ENVOY_ADMIN_HOST_PORT}
 export PROMETHEUS_HOST_PORT=${PROMETHEUS_HOST_PORT}
