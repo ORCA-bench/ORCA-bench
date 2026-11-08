@@ -165,10 +165,17 @@ MODEL_BY_HOST = {
 def default_model(base_url: str | None = None) -> str:
     """Default model id for ``base_url`` (default: ``$OPENAI_BASE_URL``).
 
+    ``$ORCA_JUDGE_MODEL``, when set, wins over the host map. It is the only
+    way to pick the model inside a Harbor trial, where ``tests/test.sh`` runs
+    the verifier without arguments.
+
     An unset or empty ``OPENAI_BASE_URL`` means the SDK's own default endpoint,
     api.openai.com. A host that isn't in the map falls back to the
     OpenAI-native (unprefixed) id; pass ``--model`` to override.
     """
+    override = (os.getenv("ORCA_JUDGE_MODEL") or "").strip()
+    if override:
+        return override
     url = (base_url or os.getenv("OPENAI_BASE_URL") or OPENAI_DEFAULT_BASE_URL).strip()
     host = urlparse(url).netloc.lower()
     return MODEL_BY_HOST.get(host, MODEL_BY_HOST[OPENAI_DEFAULT_HOST])
@@ -181,6 +188,10 @@ DEFAULT_MODEL = default_model()
 # the Responses API, so it has to cover the model's thinking as well as the
 # visible output. Change it here only.
 DEFAULT_MAX_TOKENS = 128_000
+
+# Judge calls per task when the verdict doesn't match the rubrics (see
+# ``validate_judge_verdicts``): the first try plus one retry.
+JUDGE_CONTRACT_ATTEMPTS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +677,81 @@ def build_judge_output_schema(rubrics_data: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _error_status(exc: BaseException) -> int | None:
+    """HTTP status of an OpenAI SDK ``APIStatusError``.
+
+    Duck-typed so this module never needs to import ``openai`` at load time.
+    """
+    status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _responses_api_unsupported(exc: BaseException) -> bool:
+    """True when ``exc`` says the endpoint has no Responses API.
+
+    Endpoints without ``/responses`` answer in different ways: 404 (OpenAI-style
+    route miss), 405/501, or a 400 complaining that ``messages`` is missing
+    because the request was routed to a Chat Completions handler.
+    """
+    status = _error_status(exc)
+    if status is None:
+        # Exceptions that carry no status (older SDKs, test doubles): keep
+        # the historical string check.
+        return "404" in str(exc)
+    if status in (404, 405, 501):
+        return True
+    if status == 400:
+        msg = str(exc).lower()
+        return (
+            "'messages'" in msg
+            or '"messages"' in msg
+            or "unrecognized request url" in msg
+        )
+    return False
+
+
+def _rejects_param(exc: BaseException, param: str) -> bool:
+    """True when ``exc`` is a 400 naming ``param`` as unsupported."""
+    return _error_status(exc) == 400 and param in str(exc)
+
+
+async def _create_with_param_fallbacks(
+    create: Any,
+    kwargs: dict[str, Any],
+    drop: tuple[str, ...] = (),
+    rename: dict[str, str] | None = None,
+) -> Any:
+    """Call ``create(**kwargs)``, adapting to parameters an endpoint rejects.
+
+    Each name in ``drop`` is removed, and each ``old -> new`` in ``rename`` is
+    swapped, at most once, when the endpoint answers 400 naming that
+    parameter. Anything else is re-raised unchanged.
+    """
+    rename = dict(rename or {})
+    kwargs = dict(kwargs)
+    while True:
+        try:
+            return await create(**kwargs)
+        except Exception as exc:
+            dropped = next(
+                (k for k in drop if k in kwargs and _rejects_param(exc, k)), None
+            )
+            if dropped is not None:
+                logger.info(f"Endpoint rejected `{dropped}`; retrying without it")
+                kwargs.pop(dropped)
+                drop = tuple(k for k in drop if k != dropped)
+                continue
+            old = next(
+                (o for o in rename if o in kwargs and _rejects_param(exc, o)), None
+            )
+            if old is not None:
+                new = rename.pop(old)
+                logger.info(f"Endpoint rejected `{old}`; retrying with `{new}`")
+                kwargs[new] = kwargs.pop(old)
+                continue
+            raise
+
+
 async def async_call_llm_judge(
     client: Any,
     prompt: str,
@@ -707,7 +793,11 @@ async def async_call_llm_judge(
         }
         if reasoning_effort is not None:
             kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
-        response = await client.responses.create(**kwargs)
+        # ``store`` is an OpenAI-platform feature that compatible endpoints
+        # may reject; the judge does not depend on it.
+        response = await _create_with_param_fallbacks(
+            client.responses.create, kwargs, drop=("store",)
+        )
         reasoning_summaries = None
         if reasoning_effort is not None:
             reasoning_summaries = [
@@ -726,15 +816,17 @@ async def async_call_llm_judge(
             usage.model_dump() if usage is not None else None,
         )
     except Exception as exc:
-        if "404" not in str(exc):
+        if not _responses_api_unsupported(exc):
             raise
         logger.info(
-            f"Responses API returned 404 for {model}, falling back to Chat Completions"
+            f"Responses API unavailable for {model} ({exc}), falling back to Chat Completions"
         )
+        # Current reasoning models reject ``max_tokens`` in favor of
+        # ``max_completion_tokens``; older servers only know ``max_tokens``.
         chat_kwargs: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": DEFAULT_MAX_TOKENS,
+            "max_completion_tokens": DEFAULT_MAX_TOKENS,
         }
         if output_schema is not None:
             chat_kwargs["response_format"] = {
@@ -747,7 +839,11 @@ async def async_call_llm_judge(
             }
         if reasoning_effort is not None:
             chat_kwargs["reasoning_effort"] = reasoning_effort
-        response = await client.chat.completions.create(**chat_kwargs)
+        response = await _create_with_param_fallbacks(
+            client.chat.completions.create,
+            chat_kwargs,
+            rename={"max_completion_tokens": "max_tokens"},
+        )
         reasoning_summaries = None
         if reasoning_effort is not None:
             reasoning_content = getattr(
@@ -790,6 +886,67 @@ def parse_judge_response(response_text: str) -> dict:
             raise ValueError(f"Per-rubric score {score} out of range [0, 3]")
         r["score"] = score
     return parsed
+
+
+class JudgeContractError(ValueError):
+    """The judge's JSON is well-formed but does not line up with the rubrics.
+
+    Raised instead of scoring, because :func:`aggregate_judge_response` would
+    otherwise turn a malformed verdict into a plausible-looking number (for
+    example, a single verdict for a four-rubric task makes ``rca_accuracy``
+    an ``all()`` over one rubric instead of four).
+    """
+
+
+def _norm_flag(name: str) -> str:
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+# Rubric symptom section -> the judge's per-cluster entries for it.
+_CLUSTER_SECTIONS = ("metrics", "logs", "traces")
+
+
+def validate_judge_verdicts(parsed: dict, rubrics_data: list[dict]) -> None:
+    """Check that ``parsed`` has one verdict per rubric, in order, with the
+    same number of metric/log/trace entries as the rubric lists.
+
+    The prompt asks for exactly this, but Structured Outputs cannot enforce
+    it (array lengths are unconstrained, and some providers reject
+    ``minItems``/``maxItems``). Feature-flag names are compared loosely
+    (case and punctuation are ignored, and decorations such as
+    ``"paymentFailure (50%)"`` are accepted) so only a verdict that names a
+    different flag fails.
+
+    Raises:
+        JudgeContractError: describing every mismatch found.
+
+    """
+    verdicts = parsed.get("rubrics") or []
+    problems: list[str] = []
+    if len(verdicts) != len(rubrics_data):
+        problems.append(
+            f"expected {len(rubrics_data)} rubric verdict(s), got {len(verdicts)}"
+        )
+    for i, (verdict, rubric) in enumerate(zip(verdicts, rubrics_data)):
+        want = _norm_flag(rubric.get("feature_flag", ""))
+        got = _norm_flag(verdict.get("feature_flag", ""))
+        if want and want not in got:
+            problems.append(
+                f"verdict {i + 1} is for {verdict.get('feature_flag')!r}, "
+                f"rubric {i + 1} is {rubric.get('feature_flag')!r}"
+            )
+        rubric_symptoms = rubric.get("symptoms", {}) or {}
+        verdict_symptoms = verdict.get("symptoms", {}) or {}
+        for section in _CLUSTER_SECTIONS:
+            n_want = len(rubric_symptoms.get(section) or [])
+            n_got = len(verdict_symptoms.get(section) or [])
+            if n_want != n_got:
+                problems.append(
+                    f"verdict {i + 1} has {n_got} {section} cluster(s), "
+                    f"rubric lists {n_want}"
+                )
+    if problems:
+        raise JudgeContractError("; ".join(problems))
 
 
 def _aggregate_one_rubric(verdict: dict) -> dict:
@@ -1145,14 +1302,24 @@ async def judge(
     prompt = build_judge_prompt(rubrics_data, predictions)
     output_schema = build_judge_output_schema(rubrics_data)
 
-    raw_response, reasoning_summary, usage = await async_call_llm_judge(
-        client,
-        prompt,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        output_schema=output_schema,
-    )
-    parsed = parse_judge_response(raw_response)
+    # A verdict that doesn't line up with the rubrics is re-asked once, then
+    # surfaced as a verifier error rather than scored.
+    for attempt in range(JUDGE_CONTRACT_ATTEMPTS):
+        raw_response, reasoning_summary, usage = await async_call_llm_judge(
+            client,
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            output_schema=output_schema,
+        )
+        parsed = parse_judge_response(raw_response)
+        try:
+            validate_judge_verdicts(parsed, rubrics_data)
+            break
+        except JudgeContractError as exc:
+            if attempt + 1 == JUDGE_CONTRACT_ATTEMPTS:
+                raise
+            logger.warning(f"Judge verdict rejected ({exc}); asking again")
 
     # Per-section rollups and the ``rca_depth`` mean are NOT spread into the
     # result — they're pure post-hoc derivations from ``nested`` via
