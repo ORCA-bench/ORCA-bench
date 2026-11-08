@@ -48,6 +48,10 @@ READY_URL="${READY_URL-${GRAFANA_URL}/api/health}"
 # (non-consolidated) snapshot name that load_snapshot.sh used to request.
 RESTORE_SUFFIX="${RESTORE_SUFFIX--consolidated}"
 REQUIRE_RESTORE="${REQUIRE_RESTORE:-false}"
+# false leaves the cluster empty so a different snapshot (e.g.
+# post_consolidation_<date>) can be restored by hand afterwards without
+# hitting the overlap-on-existing-index error from a double restore.
+RESTORE_SNAPSHOT="${RESTORE_SNAPSHOT:-true}"
 
 # ── 0. Tee all output to a persistent log file ──────────────────────────────
 # ENTRYPOINT_LOG is set in the host/container switches block above.
@@ -199,13 +203,13 @@ cp -f "${SNAPSHOT_CACHE_HOST_DIR}/otelcol-config-snapshot.yml" "${OTEL_DIR}/otel
 # which is frozen while wall-clock time advances, so size it at start-up
 # rather than copying the baked-in value.
 #
-# Inlined rather than exec'ing set_max_span_age.sh: BASH_ENV points at
+# Inlined rather than exec'd as a separate script: BASH_ENV points at
 # /etc/profile.d/wait-env-ready.sh, which every non-interactive bash sources and
 # which blocks until /tmp/env-ready exists.  That gate exempts PID 1 only, so a
 # bash child spawned here would wait on a file this script does not create until
-# step 6b -- a deadlock.  load_snapshot.sh runs on the host, where BASH_ENV is
-# unset, and keeps a standalone copy in set_max_span_age.sh; keep the two in
-# sync.  Returns non-zero on error; `set -e` turns that into an entrypoint exit.
+# step 6b -- a deadlock.  This is the only copy; load_snapshot.sh reaches it by
+# running this same entrypoint on the host, where BASH_ENV is unset.  Returns
+# non-zero on error; `set -e` turns that into an entrypoint exit.
 set_max_span_age() {
     local src="$1" dst="$2"
     local snapshot_date="${SNAPSHOT_DATA_DATE:-2026-04-18}"
@@ -401,21 +405,27 @@ echo   # curl -s emits no trailing newline; keep the next line greppable
 
 sleep 2
 
-# Restore the snapshot (no need to close indices — opensearch-data starts empty)
-curl -s -X POST "${OPENSEARCH_URL}/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}${RESTORE_SUFFIX}/_restore?wait_for_completion=true" \
-    -H 'Content-Type: application/json' \
-    -d '{"indices": "*", "include_global_state": false}' \
-    || echo "[entrypoint] Warning: OpenSearch snapshot restore failed (may not exist for this snapshot)"
-echo   # curl -s emits no trailing newline; keep the next line greppable
+if [ "$RESTORE_SNAPSHOT" = true ]; then
+    # Restore the snapshot (no need to close indices — opensearch-data starts empty)
+    curl -s -X POST "${OPENSEARCH_URL}/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAME}${RESTORE_SUFFIX}/_restore?wait_for_completion=true" \
+        -H 'Content-Type: application/json' \
+        -d '{"indices": "*", "include_global_state": false}' \
+        || echo "[entrypoint] Warning: OpenSearch snapshot restore failed (may not exist for this snapshot)"
+    echo   # curl -s emits no trailing newline; keep the next line greppable
 
-# A failed restore is otherwise silent -- the curl above swallows its own
-# error and the cluster is simply left empty, which only shows up much later
-# as "no telemetry".  Count what actually landed and say so.
-RESTORED_INDICES="$(curl -s "${OPENSEARCH_URL}/_cat/indices?h=index" | grep -cE '^(jaeger-|otel-)' || true)"
-echo "[entrypoint] Restored ${RESTORED_INDICES} telemetry indices from ${OS_SNAPSHOT_NAME}${RESTORE_SUFFIX}"
-if [ "${RESTORED_INDICES:-0}" -eq 0 ] && [ "$REQUIRE_RESTORE" = true ]; then
-    echo "[entrypoint] ERROR: snapshot restore produced no telemetry indices" >&2
-    exit 1
+    # A failed restore is otherwise silent -- the curl above swallows its own
+    # error and the cluster is simply left empty, which only shows up much later
+    # as "no telemetry".  Count what actually landed and say so.
+    RESTORED_INDICES="$(curl -s "${OPENSEARCH_URL}/_cat/indices?h=index" | grep -cE '^(jaeger-|otel-)' || true)"
+    echo "[entrypoint] Restored ${RESTORED_INDICES} telemetry indices from ${OS_SNAPSHOT_NAME}${RESTORE_SUFFIX}"
+    if [ "${RESTORED_INDICES:-0}" -eq 0 ] && [ "$REQUIRE_RESTORE" = true ]; then
+        echo "[entrypoint] ERROR: snapshot restore produced no telemetry indices" >&2
+        exit 1
+    fi
+else
+    echo "[entrypoint] RESTORE_SNAPSHOT=false — cluster left empty; restore manually, e.g.:"
+    echo "[entrypoint]   curl -X POST '${OPENSEARCH_URL}/_snapshot/scheduled_backups/post_consolidation_<date>/_restore?wait_for_completion=true' \\"
+    echo "[entrypoint]     -H 'Content-Type: application/json' -d '{\"indices\": \"*\", \"include_global_state\": false}'"
 fi
 
 echo "[entrypoint] Environment ready."
