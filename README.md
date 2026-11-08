@@ -92,6 +92,21 @@ cp patches/litellm_gradient_ai_chat_transformation.py \
 
 </details>
 
+<details>
+<summary>Running the LLM judge on another OpenAI-compatible endpoint</summary>
+
+The verifier (`check_prediction.py`) and the oracle (`solve.py`) talk to whatever `OPENAI_BASE_URL` points at. They use the Responses API and fall back to Chat Completions when the endpoint doesn't have it, retrying without `store` or with `max_tokens` when a server rejects those parameters. Set `ORCA_JUDGE_MODEL` to choose the model id; inside a Harbor trial this is the only way, since `tests/test.sh` passes no `--model`.
+
+```bash
+export OPENAI_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+export OPENAI_API_KEY=unused
+export ORCA_JUDGE_MODEL=qwen2.5:7b
+```
+
+Judge prompts run to tens of thousands of tokens. Some local servers silently truncate to a small default context (with Ollama's defaults, a 115K-character four-rubric prompt reached the model as about 2K tokens in my test), so raise the context length first. The verifier rejects a verdict that doesn't have one entry per rubric with matching cluster counts, rather than scoring it.
+
+</details>
+
 ## Quick start
 
 1. Pull the Docker image (only need to do this step once):
