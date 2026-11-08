@@ -84,6 +84,12 @@ CMDB_LABELS = (
     "host_name",
 )
 
+# Prometheus exposes no metric metadata for a frozen snapshot (it comes from
+# live scrape/OTLP targets), so counters are recognised by the conventional
+# suffixes instead.  Counters are summed when collapsing duplicate series,
+# everything else is averaged.
+COUNTER_SUFFIXES = ("_total", "_count", "_sum")
+
 # Metadata markers rather than measurements: target_info is a single series
 # pinned at 1 whose only content is the ~20 resource labels it carries, which
 # would make for an enormous kpi_name and no signal.  Bank has no equivalent.
@@ -567,8 +573,13 @@ def export_metrics(
                     window += WINDOW_SECONDS
                     continue
 
-                seen = set()
-                rows = []
+                # Series that differ only by labels dropped from kpi_name --
+                # in practice the per-process service_instance_id/instance
+                # UUIDs, so one series per incarnation of a service that
+                # restarted mid-window -- would otherwise emit duplicate
+                # (timestamp, cmdb_id, kpi_name) tuples and leave the file
+                # ambiguous to anything that pivots on them.  Collapse them.
+                bucket: dict = defaultdict(list)
                 for series in payload["data"]["result"]:
                     metric = series.get("metric", {})
                     cmdb_label = next(
@@ -582,16 +593,24 @@ def export_metrics(
                     if cmdb_label == "instance" and ":" in cmdb_id:
                         cmdb_id = cmdb_id.rsplit(":", 1)[0]
                     kpi_name = build_kpi_name(metric, cmdb_label)
-                    key = (cmdb_id, kpi_name)
-                    if key in seen:
-                        collisions += 1
-                    seen.add(key)
                     for ts, value in series.get("values", []):
                         if value in ("NaN", "+Inf", "-Inf"):
                             continue
+                        bucket[(int(ts), cmdb_id, kpi_name)].append(value)
+
+                rows = []
+                is_counter = name.endswith(COUNTER_SUFFIXES)
+                for key in sorted(bucket):
+                    values = bucket[key]
+                    if len(values) == 1:
                         # Pass the raw Prometheus string through: reformatting
                         # via float() would introduce repr drift.
-                        rows.append([int(ts), cmdb_id, kpi_name, value])
+                        out = values[0]
+                    else:
+                        collisions += len(values) - 1
+                        nums = [float(v) for v in values]
+                        out = repr(sum(nums) if is_counter else sum(nums) / len(nums))
+                    rows.append([key[0], key[1], key[2], out])
                 writer.writerows(rows)
                 written += len(rows)
                 window += WINDOW_SECONDS
@@ -600,9 +619,9 @@ def export_metrics(
                 logger.info(f"  {i}/{len(names)} metrics, {written:,} rows so far")
 
     if collisions:
-        logger.warning(
-            f"  {collisions} series collapsed onto an existing (cmdb_id, kpi_name) "
-            "within a window -- a service with multiple instances would do this"
+        logger.info(
+            f"  collapsed {collisions:,} duplicate samples (series differing only "
+            "by a dropped per-process label); counters summed, others averaged"
         )
     logger.info(f"  wrote {written:,} samples -> {path.name}")
 
