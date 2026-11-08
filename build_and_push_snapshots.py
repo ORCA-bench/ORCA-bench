@@ -62,14 +62,6 @@ def assemble_build_context(
         copy_function=os.link,
     )
 
-    # Prometheus read-only config
-    prom_config_src = Path("prometheus-config-readonly.yaml").resolve()
-    assert prom_config_src.exists(), f"Prometheus config not found: {prom_config_src}"
-    logger.info(
-        f"Copying Prometheus config from {prom_config_src} to build context ..."
-    )
-    shutil.copy2(prom_config_src, data_dest / "prometheus-config.yaml")
-
     # OpenSearch snapshot repo (but NOT opensearch-data — OpenSearch starts
     # with an empty node and the snapshot restore recreates the indices).
     os_repo_src = data_dir / "opensearch-repo-snapshots"
