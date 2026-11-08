@@ -397,6 +397,7 @@ curl -s -X PUT "${OPENSEARCH_URL}/_snapshot/scheduled_backups?verify=false" \
     -H 'Content-Type: application/json' \
     -d '{"type": "fs", "settings": {"location": "/usr/share/opensearch/snapshots", "readonly": true}}' \
     || echo "[entrypoint] Warning: could not register OpenSearch snapshot repo"
+echo   # curl -s emits no trailing newline; keep the next line greppable
 
 sleep 2
 
@@ -405,6 +406,7 @@ curl -s -X POST "${OPENSEARCH_URL}/_snapshot/scheduled_backups/${OS_SNAPSHOT_NAM
     -H 'Content-Type: application/json' \
     -d '{"indices": "*", "include_global_state": false}' \
     || echo "[entrypoint] Warning: OpenSearch snapshot restore failed (may not exist for this snapshot)"
+echo   # curl -s emits no trailing newline; keep the next line greppable
 
 # A failed restore is otherwise silent -- the curl above swallows its own
 # error and the cluster is simply left empty, which only shows up much later
