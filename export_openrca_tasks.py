@@ -73,6 +73,13 @@ FLAG_COMPONENT = {
 # service's behaviour.
 LEVEL = "service"
 
+# Control tasks have no root cause. Empty cells come back from pandas as NaN
+# and render as "nan" in the groundtruth dump, which reads like missing data
+# rather than a deliberate absence, so say so explicitly. Anything that tries
+# to use a control's timestamp (run_sampling_* does, to locate telemetry) then
+# fails loudly instead of coercing a NaN.
+NO_INCIDENT = "(no incident)"
+
 QUERY_HEADER = ["task_index", "instruction"]
 RECORD_HEADER = [
     "level",
@@ -162,17 +169,17 @@ def record_row(events: list[dict]) -> dict:
     stringifies the row into a `groundtruth` column, so a task with several
     events still gets one row: the earliest event fills the canonical Bank
     columns, and `root_causes` / `event_count` carry the rest. A control task
-    leaves the canonical columns empty.
+    marks every column NO_INCIDENT.
     """
     if not events:
         return {
-            "level": "",
-            "component": "",
-            "timestamp": "",
-            "datetime": "",
-            "reason": "",
-            "components": "",
-            "root_causes": "",
+            "level": NO_INCIDENT,
+            "component": NO_INCIDENT,
+            "timestamp": NO_INCIDENT,
+            "datetime": NO_INCIDENT,
+            "reason": NO_INCIDENT,
+            "components": NO_INCIDENT,
+            "root_causes": NO_INCIDENT,
             "event_count": 0,
         }
 
