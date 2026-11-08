@@ -948,7 +948,8 @@ services:
       # names (verified: an 873-name/33kb query returns 200). Only the URL grows
       # with the window -- ignore_unavailable means shard count tracks the real
       # index count, not the name count. Keep in sync with
-      # OPENSEARCH_MAX_LINE_BYTES in set_max_span_age.sh.
+      # OPENSEARCH_MAX_LINE_BYTES in set_max_span_age() in
+      # harbor-template/environment/entrypoint.sh.
       - http.max_initial_line_length=64kb
       - DISABLE_INSTALL_DEMO_CONFIG=true
       - DISABLE_SECURITY_PLUGIN=true

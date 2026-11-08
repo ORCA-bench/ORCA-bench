@@ -30,7 +30,7 @@ The telemetry data collection was performed on a DigitalOcean Droplet with 32 GB
 
 We collect telemetry data using the codebase at https://github.com/open-telemetry/opentelemetry-demo with the following modifications:
 
-1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and only looks back `max_span_age` when querying — it builds the index-name list from `now - max_span_age`, so once that window no longer reaches the snapshot's dates, the service list silently comes back empty. Because snapshot data is frozen while wall-clock time advances, `max_span_age` is **computed at start-up** by `set_max_span_age.sh` from `SNAPSHOT_DATA_DATE` (default `2026-04-18`) plus `MAX_SPAN_AGE_MARGIN_DAYS` (default 7); the value in `jaeger-config-snapshot.yml` is only a placeholder. Jaeger names one index per day in the query URL, so a long window needs a matching `http.max_initial_line_length` on the opensearch service (set to `64kb` in `patches/docker-compose.yml`, ~1724 days of headroom); `set_max_span_age.sh` warns when the estimate passes 75% of that limit.
+1. We use OpenSearch as the storage backend for Jaeger as recommended [here](https://www.jaegertracing.io/docs/1.76/faq/#what-is-the-recommended-storage-backend). Jaeger uses date-based indices (e.g. `jaeger-main-jaeger-span-2026-02-17`) and only looks back `max_span_age` when querying — it builds the index-name list from `now - max_span_age`, so once that window no longer reaches the snapshot's dates, the service list silently comes back empty. Because snapshot data is frozen while wall-clock time advances, `max_span_age` is **computed at start-up** by `set_max_span_age()` in [`harbor-template/environment/entrypoint.sh`](./harbor-template/environment/entrypoint.sh) from `SNAPSHOT_DATA_DATE` (default `2026-04-18`) plus `MAX_SPAN_AGE_MARGIN_DAYS` (default 7); the value in `jaeger-config-snapshot.yml` is only a placeholder. Jaeger names one index per day in the query URL, so a long window needs a matching `http.max_initial_line_length` on the opensearch service (set to `64kb` in `patches/docker-compose.yml`, ~1724 days of headroom); it warns when the estimate passes 75% of that limit.
 
 2. We also increase the memory resources for certain containers:
 
@@ -68,6 +68,17 @@ cp patches/harbor_models_task_task.py \
 ```
 
 The patch tracks `harbor.models.task.task` verbatim except for the `ignore=[".trials/"]` argument, so re-copy it from the installed module and re-apply that one hunk whenever harbor is upgraded. As of harbor 0.20.0 `Task.checksum` raises a `DeprecationWarning` in favor of `TrialLock.task.digest`, but `trial/trial.py` still calls it once per trial, so the patch remains required until that call goes away.
+
+> \[!NOTE\]
+> [`harbor-template/environment/entrypoint.sh`](./harbor-template/environment/entrypoint.sh)
+> runs unchanged both inside the task image and directly on the host, so the
+> local and in-trial code paths cannot drift. Everything container-specific is
+> a variable whose default is the container behaviour — see the
+> "Host/container switches" block at the top of the script.
+> [`load_snapshot.sh`](./load_snapshot.sh) is a thin wrapper that supplies the
+> host values. Note that the entrypoint baked into the published image is only
+> refreshed by `build_and_push_snapshots.py`, so edits to it do not reach
+> trials until that image is rebuilt.
 
 <details>
 <summary>Using GradientAI's serverless inference from DigitalOcean</summary>
@@ -297,6 +308,31 @@ uv run python build_and_push_snapshots.py --data-dir DATA_DIR
 # Loads the latest snapshot (lexicographic sort works because names are timestamp-prefixed)
 ./load_snapshot.sh DATA_DIR "$(ls -1 DATA_DIR/prometheus/snapshots | sort | tail -n 1)"
 ```
+
+`load_snapshot.sh` takes either a raw data directory (as above) or a staged
+snapshot cache, detected from the layout — so the exact data the leaderboard
+runs on can be loaded locally:
+
+```bash
+IMAGE=orcabench/sre-otel-snapshot:data-0418-harbor-template-v2
+CACHE="$(./stage_snapshot_cache.sh --image "$IMAGE" --cache-root /root/.cache/sre-snapshot-cache)"
+./load_snapshot.sh "$CACHE" 20260424T192542Z-64df31d58b702c09
+```
+
+It brings up the stack on fixed host ports (envoy 8080, prometheus 9090,
+opensearch 9200) so the `localhost` URLs used below and in `find_traces.py` /
+`find_logs.py` keep working, and leaves it running when it exits. Useful
+overrides:
+
+| Variable | Effect |
+| --- | --- |
+| `COMPOSE_SERVICES="prometheus opensearch"` | Start only those services. Much faster when you only need to query the backends directly rather than through Grafana or Jaeger. |
+| `RESTORE_SNAPSHOT=false` | Leave OpenSearch empty so a different snapshot (e.g. `post_consolidation_<date>`) can be restored by hand, avoiding the overlap-on-existing-index error from a double restore. Replaces the old `RESTORE_NAMED_SNAPSHOT=false`. |
+| `RESTORE_SUFFIX=""` | Restore the bare snapshot name instead of the `-consolidated` variant. |
+
+> \[!NOTE\]
+> Unlike earlier versions this does **not** stop every running container, so a
+> local stack and Harbor trials can coexist.
 
 2. Please following the instructions below for each telemetry type to find golden signals:
 

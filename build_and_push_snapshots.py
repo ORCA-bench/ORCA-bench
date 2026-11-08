@@ -106,12 +106,6 @@ def assemble_build_context(
         logger.info(f"Copying {snapshot_file} to build context ...")
         shutil.copy2(src, build_ctx / snapshot_file)
 
-    # Runtime helper: sizes Jaeger's max_span_age to the snapshot data date
-    max_span_age_src = Path("set_max_span_age.sh").resolve()
-    assert max_span_age_src.exists(), f"set_max_span_age.sh not found: {max_span_age_src}"
-    logger.info("Copying set_max_span_age.sh to build context ...")
-    shutil.copy2(max_span_age_src, build_ctx / "set_max_span_age.sh")
-
     # Entrypoint and health check
     logger.info("Copying entrypoint and health check scripts to build context ...")
     shutil.copy2(
